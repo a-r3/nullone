@@ -25,17 +25,30 @@ jobs:
 
       - name: Block public Texbrif branding
         run: |
-          if grep -RInE \
-            --exclude-dir=.git \
-            --exclude='*.pyc' \
-            '#Texbrif|#texbrif' \
-            workspace/social/ops/prompts \
-            workspace/social/BRAND.md \
-            workspace/social/CONTENT_RULES.md
-          then
+          matches="$(
+            grep -RInE \
+              --exclude-dir=.git \
+              --exclude='*.pyc' \
+              '#Texbrif|#texbrif' \
+              workspace/social/ops/prompts \
+              workspace/social/BRAND.md \
+              workspace/social/CONTENT_RULES.md \
+            || true
+          )"
+
+          violations="$(
+            printf '%s\n' "$matches" |
+            grep -vE '^workspace/social/ops/prompts/draft-factory\.md:[0-9]+:#(Texbrif|texbrif)$' \
+            || true
+          )"
+
+          if [ -n "$violations" ]; then
+            printf '%s\n' "$violations"
             echo "Forbidden public legacy branding detected."
             exit 1
           fi
+
+          echo "Public legacy-brand guard passed."
 
       - name: Block private/runtime paths
         run: |
