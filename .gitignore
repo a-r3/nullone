@@ -1,0 +1,41 @@
+# Secrets / auth
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*
+secrets*
+token*
+*token*
+auth*
+oauth*
+
+# OpenClaw live config/state
+openclaw.json
+.openclaw/
+private/
+
+# NullOne runtime / audit state
+workspace/social/ops/private/
+workspace/social/ops/manifests/
+workspace/social/ops/reliability-proof/
+workspace/social/state/
+workspace/social/research/
+workspace/social/drafts/
+workspace/social/published/
+workspace/social/analytics/
+workspace/social/assets/rendered/
+
+# Python/runtime noise
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,46 @@
+name: NullOne CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python
+        run: |
+          python -m py_compile workspace/social/ops/scripts/*.py
+          python -m py_compile workspace/social/tools/*.py
+
+      - name: Block public Texbrif branding
+        run: |
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude='*.pyc' \
+            '#Texbrif|#texbrif' \
+            workspace/social/ops/prompts \
+            workspace/social/BRAND.md \
+            workspace/social/CONTENT_RULES.md
+          then
+            echo "Forbidden public legacy branding detected."
+            exit 1
+          fi
+
+      - name: Block private/runtime paths
+        run: |
+          test ! -e workspace/social/ops/private
+          test ! -e workspace/social/ops/manifests
+          test ! -e workspace/social/state
+          test ! -e workspace/social/research
+          test ! -e workspace/social/analytics
