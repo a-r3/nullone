@@ -47,7 +47,11 @@ CI validates the schema, positive/negative scenarios, traceability anchors, and 
 | `RUN-OUTCOME-001` | scheduler/process success is distinct from domain/business success. | MISSING | EXERCISED | `ok/succeeded` cannot represent a business-level `BLOCKED` result | Workflow Health |
 | `RUN-ARTIFACT-001` | a job is domain-successful only when required artifacts exist, or it returns an explicit valid no-op/no-data outcome. | MISSING | EXERCISED | missing required artifact makes domain result non-success | Workflow Health |
 | `RUN-REASON-001` | every non-success domain outcome has an explicit machine-readable reason. | MISSING | EXERCISED | `BLOCKED/FAILED/UNKNOWN` includes a stable reason/code | Workflow Health |
-| `RUN-ID-001` | each scheduled execution exposes a stable run ID that can bind scheduler receipt, artifacts and domain outcome. | MISSING | NOT_EXERCISED | one run can be traced without relying on free-form model summary | Workflow Health |
+| `RUN-ID-001` | each scheduled execution exposes a stable run ID that can bind scheduler receipt, artifacts and domain outcome. | MISSING | EXERCISED | one run can be traced without relying on free-form model summary | Workflow Health |
+
+Issue #27 now provides the repo-level deterministic Workflow Health core and offline fixture coverage for success, blocked dependency, failed execution, missing artifact, and ambiguous `UNKNOWN`. The executable core lives in `workspace/social/ops/scripts/nullone_run_outcome.py`, with synthetic cases in `tests/fixtures/run_outcome_cases.json`.
+
+These contracts remain `MISSING` at the current operational level because the existing Morning Editorial and Daily Analytics production runners are not yet wired to this result surface. That integration is intentionally deferred to #28 and #29; repo-level implementation alone must not be presented as production enforcement.
 
 The Sep 4–5 Daily Analytics observation is the canonical current counterexample for `RUN-OUTCOME-001`: scheduler `ok/succeeded` with no required analytics artifacts and a business-level blocked summary is **not** a successful workflow completion.
 

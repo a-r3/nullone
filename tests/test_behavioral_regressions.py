@@ -465,6 +465,7 @@ class BehavioralRegressionTests(unittest.TestCase):
                 "scheduler_status": "succeeded",
                 "domain_outcome": "BLOCKED",
                 "reason_code": "ZERNIO_ANALYTICS_UNAVAILABLE",
+                "reason_text": "Zernio analytics capability is unavailable.",
             }
 
             validate_domain_completion(
