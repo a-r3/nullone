@@ -55,7 +55,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #4 and #5 are now CLOSED, while #3 and the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational issue #27 is CLOSED; #28–#37 remain open
+- operational issues #27 and #28 are CLOSED; #29–#37 remain open
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -65,8 +65,8 @@ Relevant issues:
 - #4 executable completion/publication contracts — CLOSED; PR #38 squash-merged as `417cf400157dea95e19d8eb0a860c7bcb974e6e7`
 - #5 offline behavioral regression tests — CLOSED; PR #39 squash-merged as `72e5c31e5bb3db922f30a2f8ea91c5b2d7ef8b41`
 - #27 explicit domain run outcomes/health — CLOSED; PR #40 squash-merged as `c70047a9e3123d19b46968715c3fc294a51d69d4`
-- #28 Morning Editorial network failure behavior — repo-level implementation complete on branch `feature/n28-morning-editorial-network-failures`; PR to `main` pending review
-- #29 Daily Analytics Zernio access/runtime bootstrap
+- #28 Morning Editorial network failure behavior — CLOSED; PR #42 squash-merged as `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`
+- #29 Daily Analytics Zernio access/runtime bootstrap — now the next main engineering issue
 - #30 Telegram failure alerts
 - #31–#33 cadence/Story
 - #34–#36 breaking
@@ -136,20 +136,31 @@ Downstream consumers:
 - #30 concise Telegram failure alerts
 
 
-### #28 repo-level implementation — 2026-09-06
-Issue #28 `Harden Morning Editorial API/network failure handling` is implemented at the repository level on branch `feature/n28-morning-editorial-network-failures`. Production deployment and real scheduled validation are NOT performed.
+### Verified #28 completion — 2026-09-06
+Issue #28 `Harden Morning Editorial API/network failure handling` is complete in the development repository.
+
+Verified merge state:
+- PR #42: MERGED
+- squash merge commit: `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`
+- issue #28: CLOSED / completed
+- production deployment of #28: NOT PERFORMED
+- reliability proof #3: UNTOUCHED; nominal end remains 2026-09-06 03:47 Asia/Baku
+- #29 Daily Analytics Zernio access/runtime bootstrap is now the next main engineering issue
 
 Added:
-- `workspace/social/ops/scripts/nullone_editorial_runtime.py`: `run_morning_editorial()` classifies provider failures via `nullone_run_outcome`, retries only the confirmed transient `PROVIDER_UNREACHABLE` (ENOTFOUND/timeout/reachability) pattern up to 3 bounded attempts with deterministic backoff, and checks the required editorial-board artifact before every provider call so a retry or re-entry for the same occurrence can never repeat the board write or any state mutation. Every attempt for one scheduled occurrence shares the same `run_id`; once that run_id has a persisted terminal result the provider is never called again for it. Non-reachability errors fail immediately as `EDITORIAL_PROVIDER_ERROR` without retry.
+- `workspace/social/ops/scripts/nullone_editorial_runtime.py`: `run_morning_editorial()` classifies provider failures via `nullone_run_outcome`, retries only the confirmed transient `PROVIDER_UNREACHABLE` (ENOTFOUND/timeout/reachability) pattern up to the configured bounded attempts with deterministic backoff, and checks the required editorial-board artifact before every provider call so a retry or re-entry for the same occurrence can never repeat the board write or any state mutation. Every attempt for one scheduled occurrence shares the same `run_id`; once that run_id has a persisted terminal result the provider is never called again for it. Non-reachability errors fail immediately as `EDITORIAL_PROVIDER_ERROR` without retry.
 - `workspace/social/ops/scripts/nullone-morning-editorial-run.py`: thin CLI wrapper (`execute`, `self-test`) exposing this as the wiring point a scheduler would call. Its default provider invocation is untested/unwired to production; all tests inject a fake provider.
-- `tests/test_morning_editorial.py`: offline coverage for bounded retry-to-failure, transient-failure-then-success without duplicate mutation, a later distinct occurrence recovering normally, run/occurrence identity preservation across retries and re-entry, non-retryable errors, and a static guard that this module never references publication/Zernio.
+- `tests/test_morning_editorial.py`: offline coverage for bounded retry-to-failure, transient-failure-then-success without duplicate mutation, a later distinct occurrence recovering normally, run/occurrence identity preservation across retries and re-entry, non-retryable errors, same-occurrence concurrent execution, and a static guard that this module never references publication/Zernio.
 
-This implementation does not touch `nullone-publish-bridge.py`, `nullone-publisher-run.py`, or `nullone-publish-notify.py`; publication `UNKNOWN`/no-auto-retry invariants are unchanged, and no retry behavior from this issue applies to publication.
+This implementation does not touch `nullone-publish-bridge.py`, `nullone-publisher-run.py`, or `nullone-publish-notify.py`; publication `UNKNOWN`/no-auto-retry invariants are unchanged, and no retry behavior from this issue applies to publication. No publication behavior was changed.
 
-Pre-merge correction: the retry policy's worst-case wall-clock cost is now an explicit, tested invariant. `OCCURRENCE_FAILURE_BUDGET_SECONDS = 480` (8 minutes), computed as `MAX_ATTEMPTS(3) * PROVIDER_CALL_TIMEOUT_SECONDS(120) + sum(RETRY_BACKOFF_SECONDS[:2])(30+90) = 480s`, chosen with a 120s margin under the confirmed ~10-minute (600s) minimum spacing between the 2026-09-05 failed occurrences, so a persistent reachability failure cannot still be running when the next scheduled occurrence starts. `nullone_editorial_runtime.worst_case_occurrence_seconds()` computes this and is asserted against the budget at import time; `tests/test_morning_editorial.py` covers it offline (no sleeping, no real provider calls). The provider-call timeout was reduced from an earlier unbounded-worst-case value of 900s (which allowed a ~47-minute worst case) to 120s for this reason.
+Final retry policy: the retry policy's worst-case wall-clock cost is an explicit, tested invariant. `MAX_ATTEMPTS = 2`, `PROVIDER_CALL_TIMEOUT_SECONDS = 210`, `RETRY_BACKOFF_SECONDS = (60,)`, giving `OCCURRENCE_FAILURE_BUDGET_SECONDS = 480`, computed as `2 * 210 + 60 = 480s`. Policy safety is enforced by `validate_occurrence_policy()` raising `UnsafeRetryPolicyError` (not a Python `assert`) so a misconfigured policy fails loudly instead of being silently disabled under `-O`. `nullone_editorial_runtime.worst_case_occurrence_seconds()` computes the worst case and `validate_occurrence_policy()` checks it against the budget at import time; `tests/test_morning_editorial.py` covers it offline (no sleeping, no real provider calls).
+
+Same-occurrence concurrent execution is serialized before any provider side effect using an exclusive `fcntl.flock` on `social/ops/run-outcomes/morning-editorial/<run_id>.lock`, so two concurrent invocations for the same run ID cannot both reach the provider or duplicate the board write.
 
 Validation:
-- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS` (23 run-outcome tests, 11 existing behavioral tests, 8 Morning Editorial tests, acceptance-contract validation, and all script self-tests, including the new one, PASS)
+- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS`; full offline suite passed
+- 15 Morning Editorial tests PASS (final count), alongside the existing run-outcome tests, behavioral regression tests, acceptance-contract validation, and all script self-tests
 - no network or subprocess calls occur in the new tests; the real provider invocation path is never exercised
 
 ## Reliability proof
@@ -225,16 +236,15 @@ Direction:
 No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
-#4, #5 and #27 are complete in Git. #28 is implemented in Git on a feature branch pending PR review. No production deployment has been performed for #27 or #28.
+#4, #5, #27 and #28 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`). No production deployment has been performed for #27 or #28.
 
 Current order:
 1. keep #3 proof/evidence evaluation separate; do not mutate or synthetically contaminate proof state
-2. review/merge #28 Morning Editorial network/runtime failure handling PR
-3. #29 Daily Analytics Zernio scheduled-session bootstrap/access path
-4. #30 concise Telegram failure alerts consuming truthful domain health
-5. #31/#34 decision work may proceed in parallel as planned
-6. later Story/breaking implementation
-7. #37 remains the separate controlled production activation/validation gate
+2. #29 Daily Analytics Zernio scheduled-session bootstrap/access path is now the next main engineering issue
+3. #30 concise Telegram failure alerts consuming truthful domain health
+4. #31/#34 decision work may proceed in parallel as planned
+5. later Story/breaking implementation
+6. #37 remains the separate controlled production activation/validation gate
 
 GitHub development may continue while proof evaluation is pending, but production deployment, synthetic production cycles and healthy-path production patching remain forbidden unless recovering a concrete production failure.
 
