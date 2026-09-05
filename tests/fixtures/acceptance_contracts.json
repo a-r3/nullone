@@ -267,7 +267,7 @@
         "expect": "domain outcome is not SUCCEEDED"
       },
       "observable": "separate machine-readable domain status",
-      "gap_evidence": "Sep 4-5 Daily Analytics was scheduler ok/succeeded while business work was blocked."
+      "gap_evidence": "Issue #27 now provides a deterministic repo-level outcome core, but current production workflow runners are not yet wired to it; that integration belongs to #28/#29."
     },
     {
       "id": "RUN-ARTIFACT-001",
@@ -284,7 +284,7 @@
         "expect": "domain success is rejected"
       },
       "observable": "artifact contract contributes to domain status",
-      "gap_evidence": "Current scheduler receipts do not enforce required analytics artifact presence."
+      "gap_evidence": "Issue #27 now enforces artifact-or-explicit-no-op semantics in the repo-level core, but current production workflow runners are not yet wired to that core."
     },
     {
       "id": "RUN-REASON-001",
@@ -301,13 +301,13 @@
         "expect": "completion contract remains unsatisfied"
       },
       "observable": "reason code can drive health/notification",
-      "gap_evidence": "Current business failure can exist only in model summary while scheduler records success."
+      "gap_evidence": "Issue #27 now requires machine-readable reason_code plus concise operator-readable reason_text in the repo-level core, but current production workflow runners are not yet wired to it."
     },
     {
       "id": "RUN-ID-001",
       "invariant": "Scheduler receipt, artifacts and domain result share one stable run identity.",
       "enforcement": "MISSING",
-      "proof": "NOT_EXERCISED",
+      "proof": "EXERCISED",
       "owner": "Workflow Health",
       "positive": {
         "given": "one scheduled execution",
@@ -318,7 +318,7 @@
         "expect": "completion cannot be conclusively attributed"
       },
       "observable": "traceable run identity",
-      "gap_evidence": "Stable end-to-end domain run identity is not yet part of the acceptance contract."
+      "gap_evidence": "Issue #27 now provides and exercises deterministic occurrence-scoped run IDs, but scheduler/artifact integration in current production workflows remains pending #28/#29."
     }
   ],
   "synthetic_examples": {

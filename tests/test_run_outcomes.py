@@ -482,6 +482,49 @@ class RunOutcomeTests(unittest.TestCase):
             self.assertEqual(statuses.count("CREATED"), 1)
             self.assertEqual(statuses.count("ALREADY_EXISTS"), 7)
 
+    def test_run_outcome_fixture_cases(self):
+        fixture = json.loads(
+            (
+                ROOT
+                / "tests/fixtures/run_outcome_cases.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            fixture["schema"],
+            "nullone.run-outcome-cases.v1",
+        )
+
+        for case in fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                kwargs = {
+                    "workflow_id": "fixture-workflow",
+                    "occurrence_id": (
+                        "2026-09-05T00:00:00+04:00:"
+                        + case["name"]
+                    ),
+                    "scheduler_status": case["scheduler_status"],
+                    "domain_outcome": case["domain_outcome"],
+                    "reason_code": case.get("reason_code"),
+                    "reason_text": case.get("reason_text"),
+                    "empty_success": case.get("empty_success"),
+                    "required_artifacts": tuple(
+                        case.get("required_artifacts", [])
+                    ),
+                }
+
+                if case["name"] == "missing_artifact":
+                    with tempfile.TemporaryDirectory() as td:
+                        kwargs["artifact_root"] = Path(td)
+                        result = assess_run(**kwargs)
+                else:
+                    result = assess_run(**kwargs)
+
+                self.assertEqual(
+                    result["domain_outcome"],
+                    case["expected_outcome"],
+                )
+
     def test_atomic_result_write_round_trip(self):
         result = assess_run(
             workflow_id="morning-editorial",

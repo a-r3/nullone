@@ -1,0 +1,43 @@
+{
+  "schema": "nullone.run-outcome-cases.v1",
+  "cases": [
+    {
+      "name": "success_no_data",
+      "scheduler_status": "succeeded",
+      "domain_outcome": "SUCCEEDED",
+      "empty_success": "NO_DATA",
+      "expected_outcome": "SUCCEEDED"
+    },
+    {
+      "name": "blocked_dependency",
+      "scheduler_status": "succeeded",
+      "domain_outcome": "BLOCKED",
+      "reason_code": "ZERNIO_ANALYTICS_UNAVAILABLE",
+      "reason_text": "Analytics dependency is unavailable.",
+      "expected_outcome": "BLOCKED"
+    },
+    {
+      "name": "failed_execution",
+      "scheduler_status": "error",
+      "domain_outcome": "FAILED",
+      "reason_code": "PROVIDER_UNREACHABLE",
+      "reason_text": "Provider is unreachable.",
+      "expected_outcome": "FAILED"
+    },
+    {
+      "name": "missing_artifact",
+      "scheduler_status": "succeeded",
+      "domain_outcome": "SUCCEEDED",
+      "required_artifacts": ["analytics/daily.json"],
+      "expected_outcome": "FAILED"
+    },
+    {
+      "name": "ambiguous_outcome",
+      "scheduler_status": "unknown",
+      "domain_outcome": "UNKNOWN",
+      "reason_code": "PROVIDER_RESULT_UNKNOWN",
+      "reason_text": "Provider result could not be established.",
+      "expected_outcome": "UNKNOWN"
+    }
+  ]
+}
