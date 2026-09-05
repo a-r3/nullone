@@ -146,8 +146,10 @@ Added:
 
 This implementation does not touch `nullone-publish-bridge.py`, `nullone-publisher-run.py`, or `nullone-publish-notify.py`; publication `UNKNOWN`/no-auto-retry invariants are unchanged, and no retry behavior from this issue applies to publication.
 
+Pre-merge correction: the retry policy's worst-case wall-clock cost is now an explicit, tested invariant. `OCCURRENCE_FAILURE_BUDGET_SECONDS = 480` (8 minutes), computed as `MAX_ATTEMPTS(3) * PROVIDER_CALL_TIMEOUT_SECONDS(120) + sum(RETRY_BACKOFF_SECONDS[:2])(30+90) = 480s`, chosen with a 120s margin under the confirmed ~10-minute (600s) minimum spacing between the 2026-09-05 failed occurrences, so a persistent reachability failure cannot still be running when the next scheduled occurrence starts. `nullone_editorial_runtime.worst_case_occurrence_seconds()` computes this and is asserted against the budget at import time; `tests/test_morning_editorial.py` covers it offline (no sleeping, no real provider calls). The provider-call timeout was reduced from an earlier unbounded-worst-case value of 900s (which allowed a ~47-minute worst case) to 120s for this reason.
+
 Validation:
-- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS` (23 run-outcome tests, 11 existing behavioral tests, 6 new Morning Editorial tests, acceptance-contract validation, and all script self-tests, including the new one, PASS)
+- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS` (23 run-outcome tests, 11 existing behavioral tests, 8 Morning Editorial tests, acceptance-contract validation, and all script self-tests, including the new one, PASS)
 - no network or subprocess calls occur in the new tests; the real provider invocation path is never exercised
 
 ## Reliability proof

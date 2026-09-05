@@ -12,9 +12,21 @@ sys.path.insert(0, str(SCRIPTS))
 
 from nullone_run_outcome import make_run_id  # noqa: E402
 from nullone_editorial_runtime import (  # noqa: E402
+    MAX_ATTEMPTS,
+    OCCURRENCE_FAILURE_BUDGET_SECONDS,
+    PROVIDER_CALL_TIMEOUT_SECONDS,
+    RETRY_BACKOFF_SECONDS,
     ProviderUnreachableError,
     run_morning_editorial,
+    worst_case_occurrence_seconds,
 )
+
+# Confirmed 2026-09-05 evidence (issue #28): failed Morning Editorial
+# occurrences were spaced as little as this many seconds apart. The
+# bounded retry policy's worst case must stay under this window so a
+# persistent reachability failure cannot still be running when the next
+# scheduled occurrence starts.
+OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS = 600
 
 
 class UnreachableStub:
@@ -216,6 +228,39 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             source = (SCRIPTS / filename).read_text(encoding="utf-8").lower()
             self.assertNotIn("publish", source)
             self.assertNotIn("zernio", source)
+
+    def test_worst_case_occurrence_duration_fits_declared_budget(self):
+        # No sleeping and no real provider calls: this is pure arithmetic
+        # over the configured policy constants.
+        computed = worst_case_occurrence_seconds(
+            max_attempts=MAX_ATTEMPTS,
+            provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
+            backoff_seconds=RETRY_BACKOFF_SECONDS,
+        )
+
+        self.assertEqual(
+            computed,
+            MAX_ATTEMPTS * PROVIDER_CALL_TIMEOUT_SECONDS
+            + sum(RETRY_BACKOFF_SECONDS[: MAX_ATTEMPTS - 1]),
+        )
+        self.assertLessEqual(computed, OCCURRENCE_FAILURE_BUDGET_SECONDS)
+        self.assertLess(
+            OCCURRENCE_FAILURE_BUDGET_SECONDS,
+            OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS,
+        )
+
+    def test_budget_invariant_rejects_a_policy_that_would_overrun_it(self):
+        # A deliberately unsafe policy (matching the pre-fix 900s timeout)
+        # must be caught by the same worst-case formula the runtime
+        # asserts against at import time.
+        unsafe = worst_case_occurrence_seconds(
+            max_attempts=3,
+            provider_call_timeout_seconds=900,
+            backoff_seconds=(30, 90),
+        )
+
+        self.assertGreater(unsafe, OCCURRENCE_FAILURE_BUDGET_SECONDS)
+        self.assertGreater(unsafe, OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS)
 
 
 if __name__ == "__main__":

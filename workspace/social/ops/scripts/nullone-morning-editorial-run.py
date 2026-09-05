@@ -9,6 +9,7 @@ from pathlib import Path
 
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_runtime import (
+    PROVIDER_CALL_TIMEOUT_SECONDS,
     REACHABILITY_PATTERN,
     ProviderUnreachableError,
     run_morning_editorial,
@@ -16,7 +17,6 @@ from nullone_editorial_runtime import (
 
 HERE = Path(__file__).resolve().parent
 PROMPT_PATH = WORKSPACE / "social/ops/prompts/morning-editorial.md"
-INVOCATION_TIMEOUT_SECONDS = 900
 
 
 def _default_invoke_provider() -> None:
@@ -45,7 +45,7 @@ def _default_invoke_provider() -> None:
             cwd=WORKSPACE,
             text=True,
             capture_output=True,
-            timeout=INVOCATION_TIMEOUT_SECONDS,
+            timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
             check=False,
         )
     except subprocess.TimeoutExpired as e:
@@ -90,20 +90,6 @@ def execute(occurrence_id: str, board_date: str | None) -> int:
 
 def self_test() -> int:
     calls: list[int] = []
-
-    def flaky_then_ok() -> None:
-        calls.append(1)
-        if len(calls) < 2:
-            raise ProviderUnreachableError(
-                "API Error: Can't reach the API server — ENOTFOUND"
-            )
-
-        board = (
-            WORKSPACE
-            / "social/research/daily/2026-01-01-editorial-board.md"
-        )
-        board.parent.mkdir(parents=True, exist_ok=True)
-        board.write_text("# Editorial board\n", encoding="utf-8")
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
