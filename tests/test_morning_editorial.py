@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "workspace/social/ops/scripts"
@@ -17,8 +20,25 @@ from nullone_editorial_runtime import (  # noqa: E402
     PROVIDER_CALL_TIMEOUT_SECONDS,
     RETRY_BACKOFF_SECONDS,
     ProviderUnreachableError,
+    UnsafeRetryPolicyError,
     run_morning_editorial,
+    validate_occurrence_policy,
     worst_case_occurrence_seconds,
+)
+
+
+def _load_script(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / filename)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {filename}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+runner = _load_script(
+    "nullone_morning_editorial_run_test",
+    "nullone-morning-editorial-run.py",
 )
 
 # Confirmed 2026-09-05 evidence (issue #28): failed Morning Editorial
@@ -27,6 +47,11 @@ from nullone_editorial_runtime import (  # noqa: E402
 # persistent reachability failure cannot still be running when the next
 # scheduled occurrence starts.
 OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS = 600
+
+# Verified real Morning Editorial run on 2026-09-04: completed in
+# ~118s and produced a valid editorial board. The provider timeout
+# must leave comfortable headroom above this healthy baseline.
+VERIFIED_HEALTHY_RUN_SECONDS = 118
 
 
 class UnreachableStub:
@@ -72,8 +97,8 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             self.assertEqual(result["domain_outcome"], "FAILED")
             self.assertEqual(result["reason_code"], "PROVIDER_UNREACHABLE")
             self.assertNotIn("\n", result["reason_text"])
-            self.assertEqual(provider.calls, 3)
-            self.assertEqual(len(sleeps), 2)
+            self.assertEqual(provider.calls, MAX_ATTEMPTS)
+            self.assertEqual(len(sleeps), MAX_ATTEMPTS - 1)
 
             persisted = (
                 root / "run-outcomes" / f"{result['run_id']}.json"
@@ -229,38 +254,85 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             self.assertNotIn("publish", source)
             self.assertNotIn("zernio", source)
 
-    def test_worst_case_occurrence_duration_fits_declared_budget(self):
+    def test_configured_worst_case_is_exactly_480_seconds(self):
         # No sleeping and no real provider calls: this is pure arithmetic
-        # over the configured policy constants.
+        # over the configured default policy constants.
         computed = worst_case_occurrence_seconds(
             max_attempts=MAX_ATTEMPTS,
             provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
             backoff_seconds=RETRY_BACKOFF_SECONDS,
         )
 
-        self.assertEqual(
-            computed,
-            MAX_ATTEMPTS * PROVIDER_CALL_TIMEOUT_SECONDS
-            + sum(RETRY_BACKOFF_SECONDS[: MAX_ATTEMPTS - 1]),
-        )
-        self.assertLessEqual(computed, OCCURRENCE_FAILURE_BUDGET_SECONDS)
+        self.assertEqual(MAX_ATTEMPTS, 2)
+        self.assertEqual(PROVIDER_CALL_TIMEOUT_SECONDS, 210)
+        self.assertEqual(RETRY_BACKOFF_SECONDS, (60,))
+        self.assertEqual(computed, 480)
+        self.assertEqual(OCCURRENCE_FAILURE_BUDGET_SECONDS, 480)
+        self.assertEqual(computed, OCCURRENCE_FAILURE_BUDGET_SECONDS)
+
+    def test_declared_budget_is_under_observed_occurrence_spacing(self):
         self.assertLess(
             OCCURRENCE_FAILURE_BUDGET_SECONDS,
             OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS,
         )
 
-    def test_budget_invariant_rejects_a_policy_that_would_overrun_it(self):
-        # A deliberately unsafe policy (matching the pre-fix 900s timeout)
-        # must be caught by the same worst-case formula the runtime
-        # asserts against at import time.
-        unsafe = worst_case_occurrence_seconds(
-            max_attempts=3,
-            provider_call_timeout_seconds=900,
-            backoff_seconds=(30, 90),
+    def test_provider_timeout_has_comfortable_headroom_over_healthy_baseline(
+        self,
+    ):
+        headroom = PROVIDER_CALL_TIMEOUT_SECONDS - VERIFIED_HEALTHY_RUN_SECONDS
+
+        self.assertGreater(
+            PROVIDER_CALL_TIMEOUT_SECONDS,
+            VERIFIED_HEALTHY_RUN_SECONDS,
+        )
+        self.assertEqual(headroom, 92)
+        self.assertGreaterEqual(headroom, 60)
+
+    def test_validator_accepts_the_configured_default_policy(self):
+        # Does not raise: this is the same call made at module import time.
+        validate_occurrence_policy(
+            max_attempts=MAX_ATTEMPTS,
+            provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
+            backoff_seconds=RETRY_BACKOFF_SECONDS,
+            budget_seconds=OCCURRENCE_FAILURE_BUDGET_SECONDS,
         )
 
-        self.assertGreater(unsafe, OCCURRENCE_FAILURE_BUDGET_SECONDS)
-        self.assertGreater(unsafe, OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS)
+    def test_validator_rejects_a_policy_that_would_overrun_the_budget(self):
+        # The pre-fix policy (3 attempts, 900s timeout, (30, 90) backoff)
+        # must be actually rejected by the validator, not merely shown to
+        # be numerically larger.
+        with self.assertRaises(UnsafeRetryPolicyError):
+            validate_occurrence_policy(
+                max_attempts=3,
+                provider_call_timeout_seconds=900,
+                backoff_seconds=(30, 90),
+                budget_seconds=OCCURRENCE_FAILURE_BUDGET_SECONDS,
+            )
+
+    def test_validator_rejects_a_budget_at_or_above_observed_spacing(self):
+        with self.assertRaises(UnsafeRetryPolicyError):
+            validate_occurrence_policy(
+                max_attempts=MAX_ATTEMPTS,
+                provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
+                backoff_seconds=RETRY_BACKOFF_SECONDS,
+                budget_seconds=OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS,
+            )
+
+    def test_cli_wrapper_passes_provider_timeout_to_subprocess(self):
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch.object(runner.subprocess, "run", side_effect=fake_run):
+            runner._default_invoke_provider()
+
+        self.assertEqual(
+            captured["kwargs"]["timeout"],
+            PROVIDER_CALL_TIMEOUT_SECONDS,
+        )
 
 
 if __name__ == "__main__":

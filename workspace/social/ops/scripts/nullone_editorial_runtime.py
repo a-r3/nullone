@@ -19,14 +19,18 @@ WORKFLOW_ID = "morning-editorial"
 
 RUN_OUTCOME_ROOT = WORKSPACE / "social/ops/run-outcomes/morning-editorial"
 
-MAX_ATTEMPTS = 3
-RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 90)
+MAX_ATTEMPTS = 2
+RETRY_BACKOFF_SECONDS: tuple[int, ...] = (60,)
 
 # Per-attempt wall-clock ceiling enforced by the provider invocation
 # (see nullone-morning-editorial-run.py's subprocess timeout). Kept here,
 # next to the retry/backoff policy it must be sized against, rather than
 # duplicated as a second unrelated constant in the runner script.
-PROVIDER_CALL_TIMEOUT_SECONDS = 120
+#
+# A verified real Morning Editorial run on 2026-09-04 completed in
+# ~118s. 210s leaves 92s of headroom above that healthy baseline while
+# still fitting the occurrence failure budget below.
+PROVIDER_CALL_TIMEOUT_SECONDS = 210
 
 # Confirmed 2026-09-05 evidence (issue #28) showed failed Morning
 # Editorial occurrences spaced as little as ~10 minutes (600s) apart.
@@ -37,6 +41,10 @@ PROVIDER_CALL_TIMEOUT_SECONDS = 120
 # below the observed ~10-minute spacing.
 OCCURRENCE_FAILURE_BUDGET_SECONDS = 480
 
+# The declared budget itself must stay under the confirmed minimum
+# occurrence spacing, independent of any particular policy.
+_MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS = 600
+
 
 def worst_case_occurrence_seconds(
     *,
@@ -46,27 +54,67 @@ def worst_case_occurrence_seconds(
 ) -> int:
     """Deterministic worst-case wall-clock cost of the bounded retry path.
 
-    Every attempt can cost up to `provider_call_timeout_seconds`, and a
-    backoff sleep is inserted before each retry (max_attempts - 1 of
-    them). This does not model successful/short calls; it models the
-    ceiling that must fit inside OCCURRENCE_FAILURE_BUDGET_SECONDS.
+    Pure function: every attempt can cost up to
+    `provider_call_timeout_seconds`, and a backoff sleep is inserted
+    before each retry (max_attempts - 1 of them). This does not model
+    successful/short calls; it models the ceiling that must fit inside
+    OCCURRENCE_FAILURE_BUDGET_SECONDS.
     """
 
     backoffs_applied = backoff_seconds[: max(max_attempts - 1, 0)]
     return max_attempts * provider_call_timeout_seconds + sum(backoffs_applied)
 
 
-# Fail closed at import time if the constants above are ever edited
-# out of sync: the worst case must always fit the declared budget, and
-# the budget itself must always stay under the confirmed ~10-minute
-# occurrence spacing.
-assert worst_case_occurrence_seconds() <= OCCURRENCE_FAILURE_BUDGET_SECONDS, (
-    "Morning Editorial worst-case retry duration exceeds its declared "
-    "occurrence failure budget"
-)
-assert OCCURRENCE_FAILURE_BUDGET_SECONDS < 600, (
-    "Occurrence failure budget must stay under the confirmed ~10-minute "
-    "occurrence spacing"
+class UnsafeRetryPolicyError(RuntimeError):
+    """Raised when a retry/timeout/backoff policy violates the occurrence
+    failure budget invariant (issue #28): the worst-case retry duration
+    must fit inside a declared budget, and that budget must itself stay
+    under the confirmed minimum occurrence spacing.
+    """
+
+
+def validate_occurrence_policy(
+    *,
+    max_attempts: int,
+    provider_call_timeout_seconds: int,
+    backoff_seconds: tuple[int, ...],
+    budget_seconds: int,
+) -> None:
+    """Raise UnsafeRetryPolicyError if this policy is not safe to run.
+
+    This is an operational safety invariant, so it is enforced with an
+    explicit, catchable exception rather than a bare `assert` (asserts
+    can be stripped with `python -O`).
+    """
+
+    if budget_seconds >= _MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS:
+        raise UnsafeRetryPolicyError(
+            f"Occurrence failure budget ({budget_seconds}s) must stay "
+            "under the confirmed "
+            f"{_MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS}s minimum "
+            "observed occurrence spacing"
+        )
+
+    worst_case = worst_case_occurrence_seconds(
+        max_attempts=max_attempts,
+        provider_call_timeout_seconds=provider_call_timeout_seconds,
+        backoff_seconds=backoff_seconds,
+    )
+
+    if worst_case > budget_seconds:
+        raise UnsafeRetryPolicyError(
+            f"Worst-case retry duration ({worst_case}s) exceeds the "
+            f"declared occurrence failure budget ({budget_seconds}s)"
+        )
+
+
+# Fail closed at import time if the default/production policy constants
+# above are ever edited out of sync with the occurrence budget invariant.
+validate_occurrence_policy(
+    max_attempts=MAX_ATTEMPTS,
+    provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
+    backoff_seconds=RETRY_BACKOFF_SECONDS,
+    budget_seconds=OCCURRENCE_FAILURE_BUDGET_SECONDS,
 )
 
 # Confirmed 2026-09-05 pattern: transient provider/runtime reachability
