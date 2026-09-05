@@ -204,7 +204,7 @@
       "id": "PUB-NOTIFY-001",
       "invariant": "Notifier failure cannot trigger publication retry.",
       "enforcement": "ENFORCED_TODAY",
-      "proof": "NOT_EXERCISED",
+      "proof": "EXERCISED",
       "owner": "Publish Notifier",
       "positive": {
         "given": "publication state exists and notification attempt is unused",
@@ -230,7 +230,7 @@
       "id": "PUB-DRAFT-001",
       "invariant": "Review creation is draft-only and ambiguous create is not blindly repeated.",
       "enforcement": "ENFORCED_TODAY",
-      "proof": "NOT_EXERCISED",
+      "proof": "EXERCISED",
       "owner": "Draft Bridge",
       "positive": {
         "given": "no review attempt consumed and preflight passes",
