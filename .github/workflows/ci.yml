@@ -57,3 +57,10 @@ jobs:
           test ! -e workspace/social/state
           test ! -e workspace/social/research
           test ! -e workspace/social/analytics
+
+      - name: Validate executable acceptance contracts
+        run: |
+          python tests/test_acceptance_contracts.py
+          python workspace/social/ops/scripts/nullone-manifest.py self-test
+          python workspace/social/ops/scripts/nullone-publish-bridge.py self-test
+          python workspace/social/ops/scripts/nullone-publisher-run.py self-test

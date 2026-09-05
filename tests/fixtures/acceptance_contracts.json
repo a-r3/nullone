@@ -1,0 +1,330 @@
+{
+  "schema": "nullone.acceptance-contracts.v1",
+  "contracts": [
+    {
+      "id": "PUB-VERIFY-001",
+      "invariant": "Publication manifest requires verification PASS.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "EXERCISED",
+      "owner": "Production Bridge",
+      "positive": {
+        "given": "verification is PASS",
+        "expect": "manifest may continue to later guards"
+      },
+      "negative": {
+        "given": "verification is BLOCKED",
+        "expect": "manifest validation blocks"
+      },
+      "observable": "BridgeError before publication transport",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone_bridge_common.py",
+          "contains": "Manifest verification is not PASS"
+        }
+      ]
+    },
+    {
+      "id": "PUB-BIND-001",
+      "invariant": "Approved caption and media are hash-bound.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "EXERCISED",
+      "owner": "Production Bridge",
+      "positive": {
+        "given": "caption/media hashes match",
+        "expect": "manifest validation continues"
+      },
+      "negative": {
+        "given": "approved caption bytes change",
+        "expect": "validation blocks"
+      },
+      "observable": "caption/media hash mismatch",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone_bridge_common.py",
+          "contains": "Caption hash mismatch: approved content changed"
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone_bridge_common.py",
+          "contains": "Media hash mismatch:"
+        }
+      ]
+    },
+    {
+      "id": "PUB-AUTH-001",
+      "invariant": "Publish Bridge requires both approval stages and expected metadata values.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "EXERCISED",
+      "owner": "Publish Bridge",
+      "positive": {
+        "given": "both approval stages and expected metadata are present",
+        "expect": "authorization guard passes"
+      },
+      "negative": {
+        "given": "final_publish is false",
+        "expect": "publication blocks"
+      },
+      "observable": "BridgeError before live provider call",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "Final human publish authorization missing"
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "Two-step authorization proof missing"
+        }
+      ]
+    },
+    {
+      "id": "PUB-AUTH-PROVENANCE-001",
+      "invariant": "Authorization metadata must come from authenticated callback provenance, not wrapper assertion.",
+      "enforcement": "MISSING",
+      "proof": "NOT_EXERCISED",
+      "owner": "Approval/Core authorization",
+      "positive": {
+        "given": "authenticated callback identity and stage bind an immutable authorization record",
+        "expect": "publisher consumes that record"
+      },
+      "negative": {
+        "given": "local wrapper asserts trusted source/operator/two_step fields",
+        "expect": "publication must block"
+      },
+      "observable": "forged wrapper metadata cannot create authority",
+      "gap_evidence": "Publisher wrapper currently writes trusted approval metadata itself."
+    },
+    {
+      "id": "PUB-CALLBACK-001",
+      "invariant": "Stale, replayed, wrong-identity or wrong-stage callbacks are rejected deterministically.",
+      "enforcement": "MISSING",
+      "proof": "NOT_EXERCISED",
+      "owner": "Approval/Core authorization",
+      "positive": {
+        "given": "fresh exact callback from expected identity/stage",
+        "expect": "one authorization transition"
+      },
+      "negative": {
+        "given": "callback is replayed or identity/stage mismatches",
+        "expect": "no authorization transition"
+      },
+      "observable": "callback rejected with auditable reason",
+      "gap_evidence": "No inspected deterministic callback identity/replay/expiry contract is bound to the publisher wrapper."
+    },
+    {
+      "id": "PUB-IDEMP-001",
+      "invariant": "Publication attempt is consumed before the consequential provider call and cannot exceed one.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "EXERCISED",
+      "owner": "Publish Bridge",
+      "positive": {
+        "given": "attempts is 0 and final authorization passes",
+        "expect": "attempts becomes 1 before live call"
+      },
+      "negative": {
+        "given": "attempts is already 1",
+        "expect": "second local publish is blocked"
+      },
+      "observable": "publication.attempts remains max 1",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "# Critical idempotency boundary."
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "m[\"publication\"][\"attempts\"] = 1"
+        }
+      ]
+    },
+    {
+      "id": "PUB-MODEL-REPEAT-001",
+      "invariant": "One publisher wrapper invocation must not allow the model to call the live publish tool more than once.",
+      "enforcement": "MISSING",
+      "proof": "NOT_EXERCISED",
+      "owner": "Publish Bridge",
+      "positive": {
+        "given": "one authorized publish invocation",
+        "expect": "the live publish tool can be consumed at most once inside that invocation"
+      },
+      "negative": {
+        "given": "the model attempts a second posts_publish_now call in the same run_structured session",
+        "expect": "the second tool call is deterministically rejected"
+      },
+      "observable": "per-invocation consequential tool-call count never exceeds one",
+      "gap_evidence": "Current code consumes publication.attempts before run_structured, but the inspected path relies on prompt text saying MAXIMUM ONE TIME and does not show a deterministic per-tool-call counter inside the model session."
+    },
+    {
+      "id": "PUB-UNKNOWN-001",
+      "invariant": "Ambiguous publication becomes unsafe-to-repeat and is never auto-retried.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "EXERCISED",
+      "owner": "Publish Bridge",
+      "positive": {
+        "given": "provider result is unambiguous",
+        "expect": "readback proceeds without another publish call"
+      },
+      "negative": {
+        "given": "provider invocation is ambiguous",
+        "expect": "state becomes UNKNOWN and retry is forbidden"
+      },
+      "observable": "UNKNOWN plus consumed attempt",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "Publication result ambiguous; retry forbidden"
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone-publisher-run.py",
+          "contains": "AUTOMATIC_RETRY=FORBIDDEN"
+        }
+      ]
+    },
+    {
+      "id": "PUB-READBACK-001",
+      "invariant": "Accepted publication with inconclusive readback does not permit another publish attempt.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "EXERCISED",
+      "owner": "Publish Bridge",
+      "positive": {
+        "given": "accepted publish and conclusive readback",
+        "expect": "final state reflects readback"
+      },
+      "negative": {
+        "given": "accepted publish but readback fails",
+        "expect": "READBACK_FAILED/unsafe-to-repeat"
+      },
+      "observable": "no second live call",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "Publish accepted but readback failed; "
+        }
+      ]
+    },
+    {
+      "id": "PUB-NOTIFY-001",
+      "invariant": "Notifier failure cannot trigger publication retry.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "NOT_EXERCISED",
+      "owner": "Publish Notifier",
+      "positive": {
+        "given": "publication state exists and notification attempt is unused",
+        "expect": "one Telegram send attempt"
+      },
+      "negative": {
+        "given": "Telegram send times out or fails",
+        "expect": "notification becomes UNKNOWN/FAILED and automatic resend is forbidden"
+      },
+      "observable": "notification attempt changes independently of publication attempts",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-notify.py",
+          "contains": "Consume notification attempt BEFORE the outbound side effect."
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone-publish-notify.py",
+          "contains": "automatic resend forbidden"
+        }
+      ]
+    },
+    {
+      "id": "PUB-DRAFT-001",
+      "invariant": "Review creation is draft-only and ambiguous create is not blindly repeated.",
+      "enforcement": "ENFORCED_TODAY",
+      "proof": "NOT_EXERCISED",
+      "owner": "Draft Bridge",
+      "positive": {
+        "given": "no review attempt consumed and preflight passes",
+        "expect": "at most one draft create attempt"
+      },
+      "negative": {
+        "given": "create result is ambiguous",
+        "expect": "REVIEW_UNKNOWN and no automatic second create"
+      },
+      "observable": "review.create_attempts max 1",
+      "traceability": [
+        {
+          "path": "workspace/social/ops/scripts/nullone-draft-bridge.py",
+          "contains": "REVIEW_UNKNOWN"
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone-draft-bridge.py",
+          "contains": "m[\"review\"][\"create_attempts\"] = 1"
+        }
+      ]
+    },
+    {
+      "id": "RUN-OUTCOME-001",
+      "invariant": "Scheduler success is distinct from domain success.",
+      "enforcement": "MISSING",
+      "proof": "EXERCISED",
+      "owner": "Workflow Health",
+      "positive": {
+        "given": "scheduler succeeds and required business result is valid",
+        "expect": "domain outcome may be SUCCEEDED"
+      },
+      "negative": {
+        "given": "scheduler says succeeded but business summary is BLOCKED",
+        "expect": "domain outcome is not SUCCEEDED"
+      },
+      "observable": "separate machine-readable domain status",
+      "gap_evidence": "Sep 4-5 Daily Analytics was scheduler ok/succeeded while business work was blocked."
+    },
+    {
+      "id": "RUN-ARTIFACT-001",
+      "invariant": "Required artifacts or explicit valid no-op/no-data are necessary for domain success.",
+      "enforcement": "MISSING",
+      "proof": "EXERCISED",
+      "owner": "Workflow Health",
+      "positive": {
+        "given": "all required artifacts validate",
+        "expect": "domain success is eligible"
+      },
+      "negative": {
+        "given": "required analytics artifact is absent and no valid no-data result exists",
+        "expect": "domain success is rejected"
+      },
+      "observable": "artifact contract contributes to domain status",
+      "gap_evidence": "Current scheduler receipts do not enforce required analytics artifact presence."
+    },
+    {
+      "id": "RUN-REASON-001",
+      "invariant": "Every non-success domain outcome has a stable machine-readable reason.",
+      "enforcement": "MISSING",
+      "proof": "EXERCISED",
+      "owner": "Workflow Health",
+      "positive": {
+        "given": "run is BLOCKED",
+        "expect": "stable reason/code is recorded"
+      },
+      "negative": {
+        "given": "only free-form summary says blocked",
+        "expect": "completion contract remains unsatisfied"
+      },
+      "observable": "reason code can drive health/notification",
+      "gap_evidence": "Current business failure can exist only in model summary while scheduler records success."
+    },
+    {
+      "id": "RUN-ID-001",
+      "invariant": "Scheduler receipt, artifacts and domain result share one stable run identity.",
+      "enforcement": "MISSING",
+      "proof": "NOT_EXERCISED",
+      "owner": "Workflow Health",
+      "positive": {
+        "given": "one scheduled execution",
+        "expect": "all outputs reference the same run ID"
+      },
+      "negative": {
+        "given": "artifact cannot be tied to an exact execution",
+        "expect": "completion cannot be conclusively attributed"
+      },
+      "observable": "traceable run identity",
+      "gap_evidence": "Stable end-to-end domain run identity is not yet part of the acceptance contract."
+    }
+  ],
+  "synthetic_examples": {
+    "account_id": "acct_test_001",
+    "review_post_id": "000000000000000000000001",
+    "live_post_id": "000000000000000000000002",
+    "media_url": "https://example.invalid/media.png"
+  }
+}
