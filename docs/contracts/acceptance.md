@@ -37,8 +37,8 @@ CI validates the schema, positive/negative scenarios, traceability anchors, and 
 | `PUB-MODEL-REPEAT-001` | One authorized wrapper invocation must deterministically prevent a second live publish tool call inside the same model session. | MISSING | NOT_EXERCISED | second `posts_publish_now` call in the same session is rejected | Publish Bridge |
 | `PUB-UNKNOWN-001` | timeout/malformed/ambiguous publish result becomes unsafe-to-repeat and is never auto-retried. | ENFORCED_TODAY | EXERCISED | state is `UNKNOWN`/equivalent and retry is forbidden | Publish Bridge |
 | `PUB-READBACK-001` | accepted publish + inconclusive readback cannot cause another live publish attempt. | ENFORCED_TODAY | EXERCISED | readback failure remains unsafe-to-repeat | Publish Bridge |
-| `PUB-NOTIFY-001` | publication-result notification is a separate side effect and its failure cannot trigger publication retry. | ENFORCED_TODAY | NOT_EXERCISED | notification consumes its own attempt; publication attempt remains unchanged | Publish Notifier |
-| `PUB-DRAFT-001` | review transport is draft-only and a possibly-consumed create attempt cannot be blindly repeated. | ENFORCED_TODAY | NOT_EXERCISED | ambiguous review create becomes `REVIEW_UNKNOWN`; no second automatic create | Draft Bridge |
+| `PUB-NOTIFY-001` | publication-result notification is a separate side effect and its failure cannot trigger publication retry. | ENFORCED_TODAY | EXERCISED | notification consumes its own attempt; publication attempt remains unchanged | Publish Notifier |
+| `PUB-DRAFT-001` | review transport is draft-only and a possibly-consumed create attempt cannot be blindly repeated. | ENFORCED_TODAY | EXERCISED | ambiguous review create becomes `REVIEW_UNKNOWN`; no second automatic create | Draft Bridge |
 
 ## Workflow completion contracts
 
