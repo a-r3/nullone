@@ -15,8 +15,11 @@ from nullone_run_outcome import (  # noqa: E402
     CompletionContractError,
     assess_run,
     atomic_write_result,
+    health_decision,
     make_run_id,
+    result_path,
     validate_result_record,
+    validate_result_structure,
 )
 
 
@@ -184,7 +187,7 @@ class RunOutcomeTests(unittest.TestCase):
             reason_text="Provider is unreachable.",
         )
 
-        result["run_id"] = "run_forged"
+        result["run_id"] = "run_" + ("0" * 24)
 
         with self.assertRaisesRegex(
             CompletionContractError,
@@ -315,6 +318,97 @@ class RunOutcomeTests(unittest.TestCase):
             "unexpected result fields",
         ):
             validate_result_record(result)
+
+    def test_result_path_is_canonical_and_rejects_forged_id(self):
+        run_id = make_run_id(
+            workflow_id="daily-analytics",
+            occurrence_id="2026-09-05T03:20:00+04:00",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            expected = root.resolve() / f"{run_id}.json"
+
+            self.assertEqual(
+                result_path(root, run_id),
+                expected,
+            )
+
+            with self.assertRaisesRegex(
+                CompletionContractError,
+                "invalid run_id format",
+            ):
+                result_path(root, "../escape")
+
+    def test_health_decision_is_quiet_for_success(self):
+        result = assess_run(
+            workflow_id="daily-analytics",
+            occurrence_id="2026-09-05T03:20:00+04:00",
+            scheduler_status="succeeded",
+            domain_outcome="SUCCEEDED",
+            empty_success="NO_DATA",
+        )
+
+        decision = health_decision(result)
+
+        self.assertEqual(decision["health"], "HEALTHY")
+        self.assertFalse(decision["attention_required"])
+        self.assertIsNone(decision["failure_identity"])
+
+    def test_health_decision_exposes_stable_failure_identity(self):
+        result = assess_run(
+            workflow_id="daily-analytics",
+            occurrence_id="2026-09-05T03:20:00+04:00",
+            scheduler_status="succeeded",
+            domain_outcome="BLOCKED",
+            reason_code="ZERNIO_ANALYTICS_UNAVAILABLE",
+            reason_text="Zernio analytics capability is unavailable.",
+        )
+
+        first = health_decision(result)
+        second = health_decision(result)
+
+        self.assertTrue(first["attention_required"])
+        self.assertEqual(
+            first["failure_identity"],
+            result["run_id"]
+            + ":ZERNIO_ANALYTICS_UNAVAILABLE",
+        )
+        self.assertEqual(first, second)
+
+    def test_structure_validation_does_not_require_live_artifact(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            artifact = root / "analytics/daily.json"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text(
+                '{"status":"ok"}\n',
+                encoding="utf-8",
+            )
+
+            result = assess_run(
+                workflow_id="daily-analytics",
+                occurrence_id="2026-09-05T03:20:00+04:00",
+                scheduler_status="succeeded",
+                domain_outcome="SUCCEEDED",
+                artifact_root=root,
+                required_artifacts=("analytics/daily.json",),
+            )
+
+            artifact.unlink()
+
+            # Consumer-side structural validation remains possible after
+            # the original evidence-backed persistence decision.
+            validate_result_structure(result)
+
+            with self.assertRaisesRegex(
+                CompletionContractError,
+                "required artifacts missing",
+            ):
+                validate_result_record(
+                    result,
+                    artifact_root=root,
+                )
 
     def test_atomic_result_write_round_trip(self):
         result = assess_run(

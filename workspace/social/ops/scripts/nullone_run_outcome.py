@@ -24,6 +24,7 @@ ALLOWED_EMPTY_SUCCESS = {
 }
 
 REASON_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+RUN_ID_RE = re.compile(r"^run_[0-9a-f]{24}$")
 
 RESULT_FIELDS = frozenset(
     {
@@ -319,12 +320,8 @@ def validate_domain_completion(
         )
 
 
-def validate_result_record(
-    result: dict[str, Any],
-    *,
-    artifact_root: Path | None = None,
-) -> None:
-    """Validate a machine-readable run outcome before durable persistence."""
+def validate_result_structure(result: dict[str, Any]) -> None:
+    """Validate deterministic result structure without re-reading artifacts."""
 
     actual_fields = set(result)
     missing_fields = sorted(RESULT_FIELDS - actual_fields)
@@ -362,15 +359,28 @@ def validate_result_record(
         single_line=True,
     )
 
+    run_id = _required_text(
+        result.get("run_id"),
+        "run_id",
+        max_len=28,
+        single_line=True,
+    )
+
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise CompletionContractError("invalid run_id format")
+
     expected_run_id = make_run_id(
         workflow_id=workflow_id,
         occurrence_id=occurrence_id,
     )
 
-    if result.get("run_id") != expected_run_id:
-        raise CompletionContractError("run_id does not match occurrence identity")
+    if run_id != expected_run_id:
+        raise CompletionContractError(
+            "run_id does not match occurrence identity"
+        )
 
     outcome = result.get("domain_outcome")
+
     if outcome not in ALLOWED_OUTCOMES:
         raise CompletionContractError("invalid domain_outcome")
 
@@ -432,28 +442,11 @@ def validate_result_record(
         if empty_success is not None:
             if empty_success not in ALLOWED_EMPTY_SUCCESS:
                 raise CompletionContractError("invalid empty_success")
-        else:
-            if not required_artifacts:
-                raise CompletionContractError(
-                    "successful outcome requires artifacts "
-                    "or explicit empty_success"
-                )
-
-            if artifact_root is None:
-                raise CompletionContractError(
-                    "artifact_root required to persist artifact-backed success"
-                )
-
-            missing_on_disk = _missing_artifacts(
-                artifact_root=artifact_root,
-                required_artifacts=tuple(required_artifacts),
+        elif not required_artifacts:
+            raise CompletionContractError(
+                "successful outcome requires artifacts "
+                "or explicit empty_success"
             )
-
-            if missing_on_disk:
-                raise CompletionContractError(
-                    "required artifacts missing: "
-                    + ", ".join(missing_on_disk)
-                )
 
         return
 
@@ -469,6 +462,95 @@ def validate_result_record(
         max_len=240,
         single_line=True,
     )
+
+
+def validate_result_record(
+    result: dict[str, Any],
+    *,
+    artifact_root: Path | None = None,
+) -> None:
+    """Validate structure plus artifact evidence before persistence."""
+
+    validate_result_structure(result)
+
+    if result["domain_outcome"] != "SUCCEEDED":
+        return
+
+    if result["empty_success"] is not None:
+        return
+
+    required_artifacts = tuple(result["required_artifacts"])
+
+    if artifact_root is None:
+        raise CompletionContractError(
+            "artifact_root required to persist artifact-backed success"
+        )
+
+    missing_on_disk = _missing_artifacts(
+        artifact_root=artifact_root,
+        required_artifacts=required_artifacts,
+    )
+
+    if missing_on_disk:
+        raise CompletionContractError(
+            "required artifacts missing: "
+            + ", ".join(missing_on_disk)
+        )
+
+
+def result_path(
+    output_root: Path,
+    run_id: str,
+) -> Path:
+    """Return the canonical result file path for a validated run ID."""
+
+    run_id = _required_text(
+        run_id,
+        "run_id",
+        max_len=28,
+        single_line=True,
+    )
+
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise CompletionContractError("invalid run_id format")
+
+    root = output_root.resolve()
+    return root / f"{run_id}.json"
+
+
+def health_decision(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the deterministic operator-health surface for one result."""
+
+    validate_result_structure(result)
+
+    healthy = result["domain_outcome"] == "SUCCEEDED"
+
+    return {
+        "run_id": result["run_id"],
+        "workflow_id": result["workflow_id"],
+        "domain_outcome": result["domain_outcome"],
+        "health": result["health"],
+        "attention_required": not healthy,
+        "reason_code": (
+            None
+            if healthy
+            else result["reason_code"]
+        ),
+        "reason_text": (
+            None
+            if healthy
+            else result["reason_text"]
+        ),
+        "failure_identity": (
+            None
+            if healthy
+            else (
+                result["run_id"]
+                + ":"
+                + result["reason_code"]
+            )
+        ),
+    }
 
 
 def atomic_write_result(
