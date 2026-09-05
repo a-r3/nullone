@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -161,6 +163,10 @@ def _artifact_ready(artifact_root: Path, relative: str) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
+def _occurrence_lock_path(output_root: Path, run_id: str) -> Path:
+    return output_root.resolve() / f"{run_id}.lock"
+
+
 def run_morning_editorial(
     *,
     occurrence_id: str,
@@ -175,11 +181,18 @@ def run_morning_editorial(
     """Run one Morning Editorial scheduled occurrence with bounded retry.
 
     Every attempt made for one `occurrence_id` shares the same run_id
-    (see nullone_run_outcome.make_run_id). Once that run_id has a
-    persisted terminal result, later invocations return it unchanged
-    and never call `invoke_provider` again — this is what prevents a
-    retry or an accidental re-entry from producing a second editorial
-    board or a second queue/state mutation for the same occurrence.
+    (see nullone_run_outcome.make_run_id). An exclusive `fcntl.flock` on
+    a lock file named after that run_id, under `output_root`, is held
+    for the full duration of this call — acquired before the persisted
+    result / artifact are even checked, and released only when this
+    call returns (naturally released by the OS if the process exits
+    instead). A second concurrent call for the same occurrence_id
+    therefore blocks until the first is completely done, then re-checks
+    the persisted result and returns it directly. This, combined with
+    the persisted-result and artifact checks below, is what prevents a
+    retry, a re-entry, or a genuinely concurrent second invocation from
+    producing a second editorial board or a second queue/state mutation
+    for the same occurrence.
     """
 
     required_artifacts = (board_relative_path(board_date),)
@@ -187,65 +200,83 @@ def run_morning_editorial(
         workflow_id=WORKFLOW_ID,
         occurrence_id=occurrence_id,
     )
-    existing = result_path(output_root, run_id)
 
-    if existing.is_file():
-        return json.loads(existing.read_text(encoding="utf-8"))
-
-    reason_code = "EDITORIAL_PROVIDER_ERROR"
-    reason_text = "Editorial provider call failed."
-    attempts_made = 0
-
-    for attempt in range(1, max_attempts + 1):
-        attempts_made = attempt
-
-        # A previous attempt for this same occurrence may already have
-        # produced the board even though its call was later reported as
-        # failed (e.g. a stalled/late response). Never call the provider
-        # again once the required artifact exists.
-        if _artifact_ready(artifact_root, required_artifacts[0]):
-            break
-
-        try:
-            invoke_provider()
-            break
-        except Exception as exc:
-            reason_code, reason_text = classify_provider_failure(exc)
-            retryable = reason_code == "PROVIDER_UNREACHABLE"
-
-            if not retryable or attempt == max_attempts:
-                plural = "s" if attempts_made != 1 else ""
-                final_text = f"{reason_text} ({attempts_made} attempt{plural})"
-
-                result = assess_run(
-                    workflow_id=WORKFLOW_ID,
-                    occurrence_id=occurrence_id,
-                    scheduler_status="error",
-                    domain_outcome="FAILED",
-                    reason_code=reason_code,
-                    reason_text=final_text,
-                )
-                emit_result_once(
-                    output_root,
-                    result,
-                    artifact_root=artifact_root,
-                )
-                return result
-
-            sleep(backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)])
-            continue
-
-    result = assess_run(
-        workflow_id=WORKFLOW_ID,
-        occurrence_id=occurrence_id,
-        scheduler_status="succeeded",
-        domain_outcome="SUCCEEDED",
-        artifact_root=artifact_root,
-        required_artifacts=required_artifacts,
+    output_root.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(
+        str(_occurrence_lock_path(output_root, run_id)),
+        os.O_CREAT | os.O_RDWR,
+        0o600,
     )
-    emit_result_once(
-        output_root,
-        result,
-        artifact_root=artifact_root,
-    )
-    return result
+
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        existing = result_path(output_root, run_id)
+
+        if existing.is_file():
+            return json.loads(existing.read_text(encoding="utf-8"))
+
+        reason_code = "EDITORIAL_PROVIDER_ERROR"
+        reason_text = "Editorial provider call failed."
+        attempts_made = 0
+
+        for attempt in range(1, max_attempts + 1):
+            attempts_made = attempt
+
+            # A previous attempt for this same occurrence may already
+            # have produced the board even though its call was later
+            # reported as failed (e.g. a stalled/late response). Never
+            # call the provider again once the required artifact
+            # exists.
+            if _artifact_ready(artifact_root, required_artifacts[0]):
+                break
+
+            try:
+                invoke_provider()
+                break
+            except Exception as exc:
+                reason_code, reason_text = classify_provider_failure(exc)
+                retryable = reason_code == "PROVIDER_UNREACHABLE"
+
+                if not retryable or attempt == max_attempts:
+                    plural = "s" if attempts_made != 1 else ""
+                    final_text = (
+                        f"{reason_text} ({attempts_made} attempt{plural})"
+                    )
+
+                    result = assess_run(
+                        workflow_id=WORKFLOW_ID,
+                        occurrence_id=occurrence_id,
+                        scheduler_status="error",
+                        domain_outcome="FAILED",
+                        reason_code=reason_code,
+                        reason_text=final_text,
+                    )
+                    emit_result_once(
+                        output_root,
+                        result,
+                        artifact_root=artifact_root,
+                    )
+                    return result
+
+                sleep(
+                    backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
+                )
+                continue
+
+        result = assess_run(
+            workflow_id=WORKFLOW_ID,
+            occurrence_id=occurrence_id,
+            scheduler_status="succeeded",
+            domain_outcome="SUCCEEDED",
+            artifact_root=artifact_root,
+            required_artifacts=required_artifacts,
+        )
+        emit_result_once(
+            output_root,
+            result,
+            artifact_root=artifact_root,
+        )
+        return result
+    finally:
+        os.close(lock_fd)

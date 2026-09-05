@@ -5,6 +5,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -333,6 +334,155 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             captured["kwargs"]["timeout"],
             PROVIDER_CALL_TIMEOUT_SECONDS,
         )
+
+    def test_concurrent_same_occurrence_serializes_to_one_provider_call(self):
+        # Two threads calling run_morning_editorial() with distinct
+        # os.open() file descriptors on the same lock file are still
+        # serialized by fcntl.flock, because flock locks are attached to
+        # the open file description, not the process. No sleeps: the
+        # second caller is only started once the first is deterministically
+        # known to be inside invoke_provider() (and therefore already
+        # holding the occurrence lock), so if the lock did not serialize
+        # execution the second caller would race it there.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output_root = root / "run-outcomes"
+            board = root / "social/research/daily/2026-09-07-editorial-board.md"
+
+            call_count = {"n": 0}
+            count_lock = threading.Lock()
+            entered = threading.Event()
+            release = threading.Event()
+
+            def invoke() -> None:
+                with count_lock:
+                    call_count["n"] += 1
+                entered.set()
+                self.assertTrue(
+                    release.wait(timeout=5),
+                    "release was never signaled",
+                )
+                board.parent.mkdir(parents=True, exist_ok=True)
+                board.write_text("# Editorial board\n", encoding="utf-8")
+
+            results: list[dict | None] = [None, None]
+
+            def worker(idx: int) -> None:
+                results[idx] = run_morning_editorial(
+                    occurrence_id="2026-09-07T08:30:00+04:00",
+                    board_date="2026-09-07",
+                    invoke_provider=invoke,
+                    sleep=lambda _s: None,
+                    artifact_root=root,
+                    output_root=output_root,
+                )
+
+            first = threading.Thread(target=worker, args=(0,))
+            first.start()
+
+            self.assertTrue(
+                entered.wait(timeout=5),
+                "first caller never entered the provider",
+            )
+
+            # At this point the first caller holds the occurrence lock
+            # and is blocked inside invoke_provider(). A second caller
+            # for the same occurrence must block on the lock rather than
+            # entering invoke_provider() concurrently.
+            second = threading.Thread(target=worker, args=(1,))
+            second.start()
+
+            release.set()
+
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+
+            self.assertEqual(call_count["n"], 1)
+            self.assertIsNotNone(results[0])
+            self.assertIsNotNone(results[1])
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(results[0]["domain_outcome"], "SUCCEEDED")
+
+    def test_different_occurrence_lock_is_independent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output_root = root / "run-outcomes"
+
+            entered = threading.Event()
+            release = threading.Event()
+
+            def blocking_invoke() -> None:
+                entered.set()
+                self.assertTrue(
+                    release.wait(timeout=5),
+                    "release was never signaled",
+                )
+                board = (
+                    root
+                    / "social/research/daily/2026-09-07-editorial-board.md"
+                )
+                board.parent.mkdir(parents=True, exist_ok=True)
+                board.write_text("# Editorial board\n", encoding="utf-8")
+
+            holder = threading.Thread(
+                target=lambda: run_morning_editorial(
+                    occurrence_id="2026-09-07T08:30:00+04:00",
+                    board_date="2026-09-07",
+                    invoke_provider=blocking_invoke,
+                    sleep=lambda _s: None,
+                    artifact_root=root,
+                    output_root=output_root,
+                )
+            )
+            holder.start()
+
+            self.assertTrue(
+                entered.wait(timeout=5),
+                "holder never entered the provider",
+            )
+
+            other_board = (
+                root / "social/research/daily/2026-09-08-editorial-board.md"
+            )
+
+            def immediate_success() -> None:
+                other_board.parent.mkdir(parents=True, exist_ok=True)
+                other_board.write_text(
+                    "# Editorial board\n", encoding="utf-8"
+                )
+
+            other_result: list[dict | None] = [None]
+
+            def other_worker() -> None:
+                other_result[0] = run_morning_editorial(
+                    occurrence_id="2026-09-08T08:30:00+04:00",
+                    board_date="2026-09-08",
+                    invoke_provider=immediate_success,
+                    sleep=lambda _s: None,
+                    artifact_root=root,
+                    output_root=output_root,
+                )
+
+            # A different occurrence_id must not block on the lock held
+            # for the first occurrence, so this must finish promptly
+            # even while `holder` is still inside its provider call.
+            other = threading.Thread(target=other_worker)
+            other.start()
+            other.join(timeout=5)
+
+            self.assertFalse(
+                other.is_alive(),
+                "a distinct occurrence was blocked by an unrelated lock",
+            )
+            self.assertIsNotNone(other_result[0])
+            self.assertEqual(other_result[0]["domain_outcome"], "SUCCEEDED")
+
+            release.set()
+            holder.join(timeout=5)
+            self.assertFalse(holder.is_alive())
 
 
 if __name__ == "__main__":
