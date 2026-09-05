@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from nullone_run_outcome import (  # noqa: E402
     CompletionContractError,
     assess_run,
     atomic_write_result,
+    emit_result_once,
     health_decision,
     make_run_id,
     result_path,
@@ -409,6 +411,76 @@ class RunOutcomeTests(unittest.TestCase):
                     result,
                     artifact_root=root,
                 )
+
+    def test_emit_result_once_is_idempotent(self):
+        result = assess_run(
+            workflow_id="daily-analytics",
+            occurrence_id="2026-09-05T03:20:00+04:00",
+            scheduler_status="succeeded",
+            domain_outcome="SUCCEEDED",
+            empty_success="NO_DATA",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            first = emit_result_once(root, result)
+            second = emit_result_once(root, result)
+
+            self.assertEqual(first["status"], "CREATED")
+            self.assertEqual(second["status"], "ALREADY_EXISTS")
+
+    def test_emit_result_once_detects_conflict_without_overwrite(self):
+        original = assess_run(
+            workflow_id="morning-editorial",
+            occurrence_id="2026-09-05T08:30:00+04:00",
+            scheduler_status="error",
+            domain_outcome="FAILED",
+            reason_code="PROVIDER_UNREACHABLE",
+            reason_text="Provider is unreachable.",
+        )
+
+        conflicting = dict(original)
+        conflicting["reason_text"] = "Provider failed differently."
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            first = emit_result_once(root, original)
+            second = emit_result_once(root, conflicting)
+
+            self.assertEqual(first["status"], "CREATED")
+            self.assertEqual(second["status"], "CONFLICT")
+
+            stored = json.loads(
+                Path(first["path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(stored, original)
+
+    def test_emit_result_once_handles_same_run_race(self):
+        result = assess_run(
+            workflow_id="daily-analytics",
+            occurrence_id="2026-09-05T03:20:00+04:00",
+            scheduler_status="succeeded",
+            domain_outcome="SUCCEEDED",
+            empty_success="NO_DATA",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                replies = list(
+                    pool.map(
+                        lambda _: emit_result_once(root, result),
+                        range(8),
+                    )
+                )
+
+            statuses = [item["status"] for item in replies]
+
+            self.assertEqual(statuses.count("CREATED"), 1)
+            self.assertEqual(statuses.count("ALREADY_EXISTS"), 7)
 
     def test_atomic_result_write_round_trip(self):
         result = assess_run(

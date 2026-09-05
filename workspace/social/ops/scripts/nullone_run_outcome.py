@@ -589,3 +589,98 @@ def atomic_write_result(
 
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _read_existing_result(path: Path) -> dict[str, Any]:
+    """Read and validate an already-persisted authoritative result."""
+
+    if path.is_symlink() or not path.is_file():
+        raise CompletionContractError(
+            "existing result path is not a regular file"
+        )
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CompletionContractError(
+            "existing result is unreadable"
+        ) from exc
+
+    if not isinstance(value, dict):
+        raise CompletionContractError(
+            "existing result must be a JSON object"
+        )
+
+    validate_result_structure(value)
+    return value
+
+
+def emit_result_once(
+    output_root: Path,
+    result: dict[str, Any],
+    *,
+    artifact_root: Path | None = None,
+) -> dict[str, str]:
+    """Persist one run result without ever overwriting its run_id."""
+
+    validate_result_structure(result)
+
+    path = result_path(
+        output_root,
+        result["run_id"],
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.exists():
+        existing = _read_existing_result(path)
+        return {
+            "status": (
+                "ALREADY_EXISTS"
+                if existing == result
+                else "CONFLICT"
+            ),
+            "path": str(path),
+        }
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.emit.",
+        dir=str(path.parent),
+    )
+    os.close(fd)
+
+    tmp = Path(tmp_name)
+    tmp.unlink(missing_ok=True)
+
+    try:
+        atomic_write_result(
+            tmp,
+            result,
+            artifact_root=artifact_root,
+        )
+
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            existing = _read_existing_result(path)
+            return {
+                "status": (
+                    "ALREADY_EXISTS"
+                    if existing == result
+                    else "CONFLICT"
+                ),
+                "path": str(path),
+            }
+
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+        return {
+            "status": "CREATED",
+            "path": str(path),
+        }
+
+    finally:
+        tmp.unlink(missing_ok=True)
