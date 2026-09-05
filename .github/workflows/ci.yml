@@ -58,6 +58,10 @@ jobs:
           test ! -e workspace/social/research
           test ! -e workspace/social/analytics
 
+      - name: Install CI test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check Pillow
+
       - name: Validate executable acceptance contracts
         run: |
           python tests/test_acceptance_contracts.py
