@@ -65,7 +65,7 @@ Relevant issues:
 - #4 executable completion/publication contracts — CLOSED; PR #38 squash-merged as `417cf400157dea95e19d8eb0a860c7bcb974e6e7`
 - #5 offline behavioral regression tests — CLOSED; PR #39 squash-merged as `72e5c31e5bb3db922f30a2f8ea91c5b2d7ef8b41`
 - #27 explicit domain run outcomes/health — CLOSED; PR #40 squash-merged as `c70047a9e3123d19b46968715c3fc294a51d69d4`
-- #28 Morning Editorial network failure behavior — NEXT main engineering issue
+- #28 Morning Editorial network failure behavior — repo-level implementation complete on branch `feature/n28-morning-editorial-network-failures`; PR to `main` pending review
 - #29 Daily Analytics Zernio access/runtime bootstrap
 - #30 Telegram failure alerts
 - #31–#33 cadence/Story
@@ -135,6 +135,20 @@ Downstream consumers:
 - #29 Daily Analytics Zernio scheduled-session bootstrap/access path
 - #30 concise Telegram failure alerts
 
+
+### #28 repo-level implementation — 2026-09-06
+Issue #28 `Harden Morning Editorial API/network failure handling` is implemented at the repository level on branch `feature/n28-morning-editorial-network-failures`. Production deployment and real scheduled validation are NOT performed.
+
+Added:
+- `workspace/social/ops/scripts/nullone_editorial_runtime.py`: `run_morning_editorial()` classifies provider failures via `nullone_run_outcome`, retries only the confirmed transient `PROVIDER_UNREACHABLE` (ENOTFOUND/timeout/reachability) pattern up to 3 bounded attempts with deterministic backoff, and checks the required editorial-board artifact before every provider call so a retry or re-entry for the same occurrence can never repeat the board write or any state mutation. Every attempt for one scheduled occurrence shares the same `run_id`; once that run_id has a persisted terminal result the provider is never called again for it. Non-reachability errors fail immediately as `EDITORIAL_PROVIDER_ERROR` without retry.
+- `workspace/social/ops/scripts/nullone-morning-editorial-run.py`: thin CLI wrapper (`execute`, `self-test`) exposing this as the wiring point a scheduler would call. Its default provider invocation is untested/unwired to production; all tests inject a fake provider.
+- `tests/test_morning_editorial.py`: offline coverage for bounded retry-to-failure, transient-failure-then-success without duplicate mutation, a later distinct occurrence recovering normally, run/occurrence identity preservation across retries and re-entry, non-retryable errors, and a static guard that this module never references publication/Zernio.
+
+This implementation does not touch `nullone-publish-bridge.py`, `nullone-publisher-run.py`, or `nullone-publish-notify.py`; publication `UNKNOWN`/no-auto-retry invariants are unchanged, and no retry behavior from this issue applies to publication.
+
+Validation:
+- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS` (23 run-outcome tests, 11 existing behavioral tests, 6 new Morning Editorial tests, acceptance-contract validation, and all script self-tests, including the new one, PASS)
+- no network or subprocess calls occur in the new tests; the real provider invocation path is never exercised
 
 ## Reliability proof
 Baseline: 2026-09-04 03:47 Asia/Baku
@@ -209,11 +223,11 @@ Direction:
 No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
-#4, #5 and #27 are complete in Git. No production deployment has been performed for #27.
+#4, #5 and #27 are complete in Git. #28 is implemented in Git on a feature branch pending PR review. No production deployment has been performed for #27 or #28.
 
 Current order:
 1. keep #3 proof/evidence evaluation separate; do not mutate or synthetically contaminate proof state
-2. #28 Morning Editorial network/runtime failure handling
+2. review/merge #28 Morning Editorial network/runtime failure handling PR
 3. #29 Daily Analytics Zernio scheduled-session bootstrap/access path
 4. #30 concise Telegram failure alerts consuming truthful domain health
 5. #31/#34 decision work may proceed in parallel as planned

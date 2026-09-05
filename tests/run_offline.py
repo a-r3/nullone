@@ -11,6 +11,7 @@ COMMANDS = [
     [sys.executable, "tests/test_acceptance_contracts.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
     [sys.executable, "tests/test_behavioral_regressions.py"],
+    [sys.executable, "tests/test_morning_editorial.py"],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-manifest.py",
@@ -29,6 +30,11 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-publisher-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-morning-editorial-run.py",
         "self-test",
     ],
 ]
