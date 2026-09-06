@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import copy
 import json
+import multiprocessing
 import shutil
 import sys
 import textwrap
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "workspace/social/ops/scripts"
@@ -54,7 +59,7 @@ def make_candidate(**overrides) -> dict:
 
 
 def make_writer(spec: dict, raise_invalid: bool = False):
-    def _writer(candidate, editorial_context):
+    def _writer(editorial_context):
         if raise_invalid:
             return {"layout": "not-a-real-layout"}
         return dict(spec)
@@ -68,6 +73,7 @@ DEFAULT_SPEC = {
     "body": "Rəsmi mənbəyə görə performans artımı təsdiqlənib.",
     "stat": "42%",
     "source_name": "Rəsmi mənbə",
+    "use_source_image": False,
     "cta": "@nullone.az",
 }
 
@@ -126,6 +132,22 @@ class FakeTelegramSender:
         self.sent: list[dict] = []
 
     def send(self, payload: dict) -> dict:
+        media = payload["media"]
+        media_path = bridge_common.resolve_workspace_path(media["local_path"])
+        self_test = unittest.TestCase()
+        self_test.assertTrue(media_path.is_file())
+        self_test.assertEqual(bridge_common.sha256_file(media_path), media["sha256"])
+        with Image.open(media_path) as image:
+            self_test.assertEqual(image.size, (media["width"], media["height"]))
+        self_test.assertEqual((media["width"], media["height"]), (1080, 1920))
+        manifest_path = bridge_common.resolve_workspace_path(
+            f"social/ops/manifests/{payload['manifest_id']}.json"
+        )
+        _, manifest = load_manifest(manifest_path)
+        self_test.assertEqual(media, {
+            key: manifest["media"][0][key]
+            for key in ("local_path", "sha256", "width", "height", "content_type")
+        })
         self.sent.append(payload)
         if self.should_fail:
             return {"status": "FAILED", "error": "fake delivery failure"}
@@ -178,6 +200,41 @@ class StoryPipelineTestCase(unittest.TestCase):
         d = self.tmp_path / "social/ops/manifests"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def source_image(self, name="source.png") -> str:
+        path = self.tmp_path / "social/source-assets" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1600, 900), (20, 30, 40)).save(path, "PNG")
+        return bridge_common.workspace_relative(path)
+
+    def persist_final_spec(self, candidate=None, story_fields=None):
+        candidate = candidate or make_candidate()
+        fields = dict(story_fields or DEFAULT_SPEC)
+        request_id = pipeline.compute_story_request_id(candidate)
+        fields.update({
+            "schema": pipeline.SCHEMA,
+            "contract_version": pipeline.CONTRACT_VERSION,
+            "story_request_id": request_id,
+            "candidate_id": candidate["candidate_id"],
+            "candidate_version": candidate.get("candidate_version"),
+            "revision_of": candidate.get("revision_of"),
+            "source_image": (
+                pipeline._candidate_source_image(candidate)
+                if fields.get("use_source_image")
+                else None
+            ),
+            "evidence_refs": list(candidate["evidence_refs"]),
+            "final_verification": {
+                "status": "PASS",
+                "reason": "test",
+                "verifier": "test",
+                "checked_at": now_iso(),
+            },
+        })
+        fields["story_version_id"] = pipeline.compute_story_version_id(candidate, fields)
+        path = pipeline._story_spec_path(request_id)
+        atomic_write_json(path, fields)
+        return fields, path
 
     def run_pipeline(self, candidate=None, writer=None, verifier=PASS_VERIFIER, connector=None, sender=None):
         candidate = candidate or make_candidate()
@@ -268,7 +325,10 @@ class CandidateEligibilityTests(StoryPipelineTestCase):
         self.assertEqual(result.outcome, "CANDIDATE_NOT_ELIGIBLE")
 
     def test_writer_context_excludes_mechanics(self):
-        candidate = make_candidate(candidate_id="secret-mechanics-check")
+        source_path = self.source_image("private-source.png")
+        candidate = make_candidate(
+            candidate_id="secret-mechanics-check", source_image=source_path
+        )
         context = pipeline.build_writer_context(candidate)
         forbidden_keys = {
             "candidate_id",
@@ -277,8 +337,11 @@ class CandidateEligibilityTests(StoryPipelineTestCase):
             "review",
             "publication",
             "story_version_id",
+            "source_image",
         }
         self.assertFalse(forbidden_keys & context.keys())
+        self.assertIs(context["source_image_available"], True)
+        self.assertNotIn(source_path, json.dumps(context))
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +367,61 @@ class WriterOutputTests(StoryPipelineTestCase):
         result = self.run_pipeline(writer=make_writer(spec), verifier=BLOCKED_VERIFIER)
         self.assertEqual(result.outcome, "VERIFICATION_BLOCKED")
 
+    def test_writer_provider_exception_is_typed(self):
+        def writer(_context):
+            raise RuntimeError("provider unavailable")
+
+        result = self.run_pipeline(writer=writer)
+        self.assertEqual(result.outcome, "WRITER_FAILED")
+        self.assertEqual(result.context["error_type"], "RuntimeError")
+
+    def test_writer_non_mapping_is_invalid_not_provider_failure(self):
+        result = self.run_pipeline(writer=lambda _context: "bad output")
+        self.assertEqual(result.outcome, "WRITER_OUTPUT_INVALID")
+
+    def test_image_available_and_writer_selects_use(self):
+        self.install_real_renderer()
+        source_image = self.source_image()
+        spec = dict(DEFAULT_SPEC, use_source_image=True)
+        result = self.run_pipeline(
+            candidate=make_candidate(source_image=source_image),
+            writer=make_writer(spec),
+        )
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        persisted = json.loads(
+            bridge_common.resolve_workspace_path(result.story_spec_path).read_text()
+        )
+        self.assertEqual(persisted["source_image"], source_image)
+
+    def test_image_available_and_writer_declines(self):
+        self.install_real_renderer()
+        result = self.run_pipeline(
+            candidate=make_candidate(source_image=self.source_image()),
+            writer=make_writer(dict(DEFAULT_SPEC, use_source_image=False)),
+        )
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        persisted = json.loads(
+            bridge_common.resolve_workspace_path(result.story_spec_path).read_text()
+        )
+        self.assertIsNone(persisted["source_image"])
+
+    def test_no_image_and_writer_requests_one_is_blocked(self):
+        result = self.run_pipeline(
+            writer=make_writer(dict(DEFAULT_SPEC, use_source_image=True))
+        )
+        self.assertEqual(result.outcome, "WRITER_OUTPUT_INVALID")
+
+    def test_real_writer_schema_exposes_semantic_image_choice_only(self):
+        properties = pipeline.WRITER_SCHEMA["properties"]
+        self.assertEqual(properties["use_source_image"], {"type": "boolean"})
+        self.assertIn("use_source_image", pipeline.WRITER_SCHEMA["required"])
+        self.assertNotIn("source_image", properties)
+
+    def test_writer_cannot_invent_source_image_path(self):
+        spec = dict(DEFAULT_SPEC, source_image="/private/source.png")
+        result = self.run_pipeline(writer=make_writer(spec))
+        self.assertEqual(result.outcome, "WRITER_OUTPUT_INVALID")
+
 
 # ---------------------------------------------------------------------------
 # Final verification
@@ -328,6 +446,18 @@ class VerificationTests(StoryPipelineTestCase):
         self.install_real_renderer()
         result = self.run_pipeline(verifier=pipeline.numeric_scope_verifier)
         self.assertEqual(result.outcome, "DRAFT_CREATED")
+
+    def test_verifier_exception_is_typed_and_never_renders(self):
+        def verifier(_spec, _candidate):
+            raise RuntimeError("verifier unavailable")
+
+        result = self.run_pipeline(verifier=verifier)
+        self.assertEqual(result.outcome, "VERIFIER_FAILED")
+        self.assertFalse((self.tmp_path / "social/ops/manifests").exists())
+
+    def test_verifier_malformed_result_is_typed(self):
+        result = self.run_pipeline(verifier=lambda _spec, _candidate: {})
+        self.assertEqual(result.outcome, "VERIFIER_FAILED")
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +500,117 @@ class RenderTests(StoryPipelineTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Request identity / finalized-spec persistence
+# ---------------------------------------------------------------------------
+
+
+class StoryRequestPersistenceTests(StoryPipelineTestCase):
+    def test_finalized_spec_is_persisted_before_render(self):
+        result = self.run_pipeline()
+        self.assertEqual(result.outcome, "RENDER_FAILED")
+        spec_path = bridge_common.resolve_workspace_path(result.story_spec_path)
+        spec = json.loads(spec_path.read_text())
+        self.assertEqual(spec["schema"], "nullone.story-spec.v1")
+        self.assertEqual(spec["contract_version"], "1.0.0")
+        self.assertEqual(spec["story_request_id"], result.story_request_id)
+        self.assertEqual(spec["story_version_id"], result.story_version_id)
+        self.assertEqual(spec["candidate_id"], "cand-001")
+        self.assertEqual(spec["final_verification"]["status"], "PASS")
+
+    def test_same_request_reuses_spec_before_writer_and_verifier(self):
+        calls = {"writer": 0, "verifier": 0}
+        specs = [dict(DEFAULT_SPEC), dict(DEFAULT_SPEC, headline="Different retry")]
+
+        def writer(_context):
+            result = specs[calls["writer"]]
+            calls["writer"] += 1
+            return result
+
+        def verifier(_spec, _candidate):
+            calls["verifier"] += 1
+            return {"status": "PASS", "reason": "ok"}
+
+        first = self.run_pipeline(writer=writer, verifier=verifier)
+        second = self.run_pipeline(writer=writer, verifier=verifier)
+        self.assertEqual(first.outcome, "RENDER_FAILED")
+        self.assertEqual(second.outcome, "RENDER_FAILED")
+        self.assertEqual(calls, {"writer": 1, "verifier": 1})
+        self.assertEqual(first.story_request_id, second.story_request_id)
+        self.assertEqual(first.story_version_id, second.story_version_id)
+
+    def test_render_failure_retry_reuses_exact_spec_then_succeeds(self):
+        writer_calls = 0
+
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC)
+
+        first = self.run_pipeline(writer=writer)
+        self.assertEqual(first.outcome, "RENDER_FAILED")
+        persisted_before = bridge_common.resolve_workspace_path(
+            first.story_spec_path
+        ).read_bytes()
+        self.install_real_renderer()
+        second = self.run_pipeline(writer=writer)
+        self.assertEqual(second.outcome, "DRAFT_CREATED")
+        self.assertEqual(writer_calls, 1)
+        self.assertEqual(
+            bridge_common.resolve_workspace_path(second.story_spec_path).read_bytes(),
+            persisted_before,
+        )
+
+    def test_manifest_failure_retry_reuses_exact_spec(self):
+        self.install_real_renderer()
+        writer_calls = 0
+
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC)
+
+        real_builder = pipeline.build_story_manifest
+        with patch.object(
+            pipeline,
+            "build_story_manifest",
+            side_effect=pipeline.StoryManifestBlocked("synthetic manifest failure"),
+        ):
+            first = self.run_pipeline(writer=writer)
+        self.assertEqual(first.outcome, "MANIFEST_BLOCKED")
+        second = self.run_pipeline(writer=writer)
+        self.assertEqual(second.outcome, "DRAFT_CREATED")
+        self.assertEqual(writer_calls, 1)
+        self.assertEqual(first.story_version_id, second.story_version_id)
+        self.assertIs(pipeline.build_story_manifest, real_builder)
+
+    def test_candidate_version_distinguishes_genuine_upstream_revision(self):
+        first = pipeline.compute_story_request_id(make_candidate(candidate_version="v1"))
+        second = pipeline.compute_story_request_id(make_candidate(candidate_version="v2"))
+        self.assertNotEqual(first, second)
+
+    def test_selected_source_image_must_still_match_persisted_request(self):
+        source_image = self.source_image()
+        candidate = make_candidate(source_image=source_image)
+        first = self.run_pipeline(
+            candidate=candidate,
+            writer=make_writer(dict(DEFAULT_SPEC, use_source_image=True)),
+        )
+        self.assertEqual(first.outcome, "RENDER_FAILED")
+        bridge_common.resolve_workspace_path(source_image).unlink()
+
+        writer_calls = 0
+
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC)
+
+        second = self.run_pipeline(candidate=candidate, writer=writer)
+        self.assertEqual(second.outcome, "STORY_SPEC_BLOCKED")
+        self.assertEqual(writer_calls, 0)
+
+
+# ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
 
@@ -389,6 +630,13 @@ class ManifestTests(StoryPipelineTestCase):
         self.assertFalse(manifest["approval"]["first_stage"])
         self.assertFalse(manifest["approval"]["final_publish"])
         self.assertEqual(manifest["publication"]["attempts"], 0)
+        self.assertEqual(manifest["story_request_id"], result.story_request_id)
+        spec_path = bridge_common.resolve_workspace_path(result.story_spec_path)
+        self.assertEqual(manifest["story_spec"]["file"], result.story_spec_path)
+        self.assertEqual(
+            manifest["story_spec"]["sha256"],
+            bridge_common.sha256_bytes(spec_path.read_bytes()),
+        )
 
     def test_same_version_manifest_is_not_recreated(self):
         self.install_real_renderer()
@@ -411,18 +659,14 @@ class ManifestTests(StoryPipelineTestCase):
     def test_build_story_manifest_refuses_to_overwrite(self):
         self.install_real_renderer()
         candidate = make_candidate()
-        spec = dict(DEFAULT_SPEC)
-        spec["schema"] = pipeline.SCHEMA
-        spec["candidate_id"] = candidate["candidate_id"]
-        spec["final_verification"] = {"status": "PASS", "reason": "", "verifier": "x", "checked_at": now_iso()}
-        spec["story_version_id"] = pipeline.compute_story_version_id(candidate, spec)
+        spec, spec_path = self.persist_final_spec(candidate)
         manifest_id = pipeline._manifest_id_for_version(candidate["candidate_id"], spec["story_version_id"])
 
         media = pipeline.render_story_asset(spec, manifest_id)
-        pipeline.build_story_manifest(candidate, spec, media, manifest_id)
+        pipeline.build_story_manifest(candidate, spec, media, manifest_id, spec_path)
 
         with self.assertRaises(pipeline.StoryManifestBlocked):
-            pipeline.build_story_manifest(candidate, spec, media, manifest_id)
+            pipeline.build_story_manifest(candidate, spec, media, manifest_id, spec_path)
 
 
 # ---------------------------------------------------------------------------
@@ -442,13 +686,22 @@ class DraftCreationTests(StoryPipelineTestCase):
     def test_reentry_after_draft_created_never_calls_connector_again(self):
         self.install_real_renderer()
         connector = FakeDraftConnector("success")
-        first = self.run_pipeline(connector=connector)
+        calls = 0
+
+        def changing_writer(_context):
+            nonlocal calls
+            calls += 1
+            return dict(DEFAULT_SPEC, headline=f"Version {calls}")
+
+        first = self.run_pipeline(connector=connector, writer=changing_writer)
         self.assertEqual(first.outcome, "DRAFT_CREATED")
 
-        second = self.run_pipeline(connector=connector)
+        second = self.run_pipeline(connector=connector, writer=changing_writer)
         self.assertEqual(second.outcome, "REVIEW_DRAFT_ALREADY_CONSUMED")
         self.assertEqual(second.review_post_id, first.review_post_id)
         self.assertEqual(connector.calls, 1)
+        self.assertEqual(calls, 1)
+        self.assertEqual(second.story_version_id, first.story_version_id)
 
     def test_create_in_flight_blocks_retry(self):
         self.install_real_renderer()
@@ -463,12 +716,21 @@ class DraftCreationTests(StoryPipelineTestCase):
     def test_review_unknown_blocks_retry(self):
         self.install_real_renderer()
         connector = FakeDraftConnector("review_unknown")
-        first = self.run_pipeline(connector=connector)
+        calls = 0
+
+        def changing_writer(_context):
+            nonlocal calls
+            calls += 1
+            return dict(DEFAULT_SPEC, headline=f"Version {calls}")
+
+        first = self.run_pipeline(connector=connector, writer=changing_writer)
         self.assertEqual(first.outcome, "REVIEW_DRAFT_AMBIGUOUS")
 
-        second = self.run_pipeline(connector=connector)
+        second = self.run_pipeline(connector=connector, writer=changing_writer)
         self.assertEqual(second.outcome, "REVIEW_DRAFT_ALREADY_CONSUMED")
         self.assertEqual(connector.calls, 1)
+        self.assertEqual(calls, 1)
+        self.assertEqual(second.story_version_id, first.story_version_id)
 
     def test_connector_exception_after_attempt_preserves_consumed_attempt(self):
         self.install_real_renderer()
@@ -495,27 +757,34 @@ class DraftCreationTests(StoryPipelineTestCase):
 
     def test_blocked_before_attempt_is_retryable(self):
         self.install_real_renderer()
+        writer_calls = 0
+
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC, headline=f"First spec {writer_calls}")
+
         blocking_connector = FakeDraftConnector("blocked_before_attempt")
-        first = self.run_pipeline(connector=blocking_connector)
-        self.assertEqual(first.outcome, "REVIEW_DRAFT_PREFLIGHT_BLOCKED")
+        first = self.run_pipeline(connector=blocking_connector, writer=writer)
+        self.assertEqual(first.outcome, "REVIEW_DRAFT_BLOCKED_BEFORE_ATTEMPT")
         self.assertEqual(blocking_connector.calls, 1)
 
         success_connector = FakeDraftConnector("success")
-        second = self.run_pipeline(connector=success_connector)
+        second = self.run_pipeline(connector=success_connector, writer=writer)
         self.assertEqual(second.outcome, "DRAFT_CREATED")
         self.assertEqual(success_connector.calls, 1)
+        self.assertEqual(writer_calls, 1)
+        self.assertEqual(first.story_version_id, second.story_version_id)
 
     def test_attempts_already_one_blocks_before_connector_is_ever_called(self):
         self.install_real_renderer()
         candidate = make_candidate()
-        spec = dict(DEFAULT_SPEC)
-        spec["schema"] = pipeline.SCHEMA
-        spec["candidate_id"] = candidate["candidate_id"]
-        spec["final_verification"] = {"status": "PASS", "reason": "", "verifier": "x", "checked_at": now_iso()}
-        spec["story_version_id"] = pipeline.compute_story_version_id(candidate, spec)
+        spec, spec_path = self.persist_final_spec(candidate)
         manifest_id = pipeline._manifest_id_for_version(candidate["candidate_id"], spec["story_version_id"])
         media = pipeline.render_story_asset(spec, manifest_id)
-        manifest = pipeline.build_story_manifest(candidate, spec, media, manifest_id)
+        manifest = pipeline.build_story_manifest(
+            candidate, spec, media, manifest_id, spec_path
+        )
 
         manifest_path = self.tmp_path / f"social/ops/manifests/{manifest_id}.json"
         manifest["review"]["create_attempts"] = 1
@@ -526,6 +795,99 @@ class DraftCreationTests(StoryPipelineTestCase):
         result = self.run_pipeline(candidate=candidate, writer=make_writer(spec), connector=connector)
         self.assertEqual(result.outcome, "REVIEW_DRAFT_ALREADY_CONSUMED")
         self.assertEqual(connector.calls, 0)
+
+    def test_concurrent_same_request_calls_connector_at_most_once(self):
+        self.install_real_renderer()
+        connector = FakeDraftConnector("success")
+        writer_calls = 0
+        writer_entered = threading.Event()
+
+        def slow_writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            writer_entered.set()
+            time.sleep(0.1)
+            return dict(DEFAULT_SPEC)
+
+        results = []
+
+        def invoke():
+            results.append(self.run_pipeline(writer=slow_writer, connector=connector))
+
+        first = threading.Thread(target=invoke)
+        second = threading.Thread(target=invoke)
+        first.start()
+        self.assertTrue(writer_entered.wait(timeout=2))
+        second.start()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(connector.calls, 1)
+        self.assertEqual(writer_calls, 1)
+        self.assertEqual(
+            {result.outcome for result in results},
+            {"DRAFT_CREATED", "REVIEW_DRAFT_ALREADY_CONSUMED"},
+        )
+        self.assertEqual(len({result.story_request_id for result in results}), 1)
+        self.assertEqual(len({result.story_version_id for result in results}), 1)
+
+    def test_interprocess_same_request_calls_connector_at_most_once(self):
+        self.install_real_renderer()
+        process_context = multiprocessing.get_context("fork")
+        connector_calls = process_context.Value("i", 0)
+        writer_calls = process_context.Value("i", 0)
+        results = process_context.Queue()
+
+        class SharedConnector:
+            def create_review_draft(self, manifest_path):
+                with connector_calls.get_lock():
+                    connector_calls.value += 1
+                _, manifest = load_manifest(manifest_path)
+                manifest["review"].update(
+                    {
+                        "create_attempts": 1,
+                        "state": "DRAFT_CREATED",
+                        "zernio_draft_id": "interprocess-review",
+                        "created_at": now_iso(),
+                    }
+                )
+                atomic_write_json(manifest_path, manifest)
+
+        def slow_writer(_context):
+            with writer_calls.get_lock():
+                writer_calls.value += 1
+            time.sleep(0.2)
+            return dict(DEFAULT_SPEC)
+
+        def invoke():
+            result = pipeline.run_story_pipeline(
+                make_candidate(),
+                writer=slow_writer,
+                verifier=PASS_VERIFIER,
+                draft_connector=SharedConnector(),
+            )
+            results.put(
+                (result.outcome, result.story_request_id, result.story_version_id)
+            )
+
+        processes = [process_context.Process(target=invoke) for _ in range(2)]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 0)
+
+        observed = [results.get(timeout=2) for _ in processes]
+        self.assertEqual(connector_calls.value, 1)
+        self.assertEqual(writer_calls.value, 1)
+        self.assertEqual(
+            {outcome for outcome, _request_id, _version_id in observed},
+            {"DRAFT_CREATED", "REVIEW_DRAFT_ALREADY_CONSUMED"},
+        )
+        self.assertEqual(len({request_id for _, request_id, _ in observed}), 1)
+        self.assertEqual(len({version_id for _, _, version_id in observed}), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -543,9 +905,12 @@ class TelegramPreviewTests(StoryPipelineTestCase):
         payload = result.preview_payload
         self.assertEqual(payload["format"], "STORY")
         self.assertEqual(payload["story_version_id"], result.story_version_id)
+        self.assertEqual(payload["story_request_id"], result.story_request_id)
         self.assertEqual(payload["manifest_id"], result.manifest_id)
         self.assertEqual(payload["review_post_id"], result.review_post_id)
-        self.assertTrue(payload["media_fingerprint"])
+        self.assertTrue(payload["media"]["sha256"])
+        self.assertEqual(payload["media"]["width"], 1080)
+        self.assertEqual(payload["media"]["height"], 1920)
         self.assertEqual(len(sender.sent), 1)
 
     def test_buttons_use_legacy_value_not_typed_action(self):
@@ -580,15 +945,29 @@ class TelegramPreviewTests(StoryPipelineTestCase):
         self.install_real_renderer()
         connector = FakeDraftConnector("success")
         sender = FakeTelegramSender(should_fail=True)
-        result = self.run_pipeline(connector=connector, sender=sender)
+        writer_calls = 0
 
-        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC, headline=f"Attempt {writer_calls}")
+
+        result = self.run_pipeline(connector=connector, sender=sender, writer=writer)
+
+        self.assertEqual(result.outcome, "PREVIEW_DELIVERY_FAILED")
         self.assertEqual(result.preview_delivery["status"], "FAILED")
         self.assertEqual(connector.calls, 1)
 
         manifest_path = self.tmp_path / f"social/ops/manifests/{result.manifest_id}.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["review"]["state"], "DRAFT_CREATED")
+        self.assertEqual(manifest["publication"]["attempts"], 0)
+
+        second = self.run_pipeline(connector=connector, sender=sender, writer=writer)
+        self.assertEqual(second.outcome, "REVIEW_DRAFT_ALREADY_CONSUMED")
+        self.assertEqual(connector.calls, 1)
+        self.assertEqual(len(sender.sent), 1)
+        self.assertEqual(writer_calls, 1)
 
     def test_delivery_exception_is_reported_not_raised(self):
         self.install_real_renderer()
@@ -598,8 +977,44 @@ class TelegramPreviewTests(StoryPipelineTestCase):
                 raise RuntimeError("telegram is down")
 
         result = self.run_pipeline(sender=ExplodingSender())
-        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        self.assertEqual(result.outcome, "PREVIEW_DELIVERY_FAILED")
         self.assertEqual(result.preview_delivery["status"], "FAILED")
+        self.assertTrue(result.manifest_id)
+        self.assertTrue(result.story_version_id)
+        self.assertTrue(result.review_post_id)
+        self.assertIsNotNone(result.preview_payload)
+
+    def test_arbitrary_sender_mapping_is_not_success(self):
+        self.install_real_renderer()
+
+        class AmbiguousSender:
+            def send(self, payload):
+                return {"message_id": "not-a-success-contract"}
+
+        result = self.run_pipeline(sender=AmbiguousSender())
+        self.assertEqual(result.outcome, "PREVIEW_DELIVERY_FAILED")
+        self.assertEqual(result.preview_delivery["status"], "FAILED")
+
+    def test_sent_sender_preserves_draft_created_outcome(self):
+        self.install_real_renderer()
+        result = self.run_pipeline(sender=FakeTelegramSender())
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        self.assertEqual(result.preview_delivery, {"status": "SENT"})
+
+    def test_preview_media_exactly_matches_manifest(self):
+        self.install_real_renderer()
+        result = self.run_pipeline(sender=FakeTelegramSender())
+        manifest = json.loads(
+            bridge_common.resolve_workspace_path(result.manifest_path).read_text()
+        )
+        expected = {
+            key: manifest["media"][0][key]
+            for key in ("local_path", "sha256", "width", "height", "content_type")
+        }
+        self.assertEqual(result.preview_payload["media"], expected)
+        path = bridge_common.resolve_workspace_path(expected["local_path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(bridge_common.sha256_file(path), expected["sha256"])
 
 
 # ---------------------------------------------------------------------------
@@ -608,21 +1023,28 @@ class TelegramPreviewTests(StoryPipelineTestCase):
 
 
 class RevisionTests(StoryPipelineTestCase):
-    def test_revision_creates_new_version_and_preserves_old_manifest(self):
+    def _create_parent(self):
         self.install_real_renderer()
-        original = self.run_pipeline(sender=FakeTelegramSender())
+        candidate = make_candidate()
+        original = self.run_pipeline(candidate=candidate, sender=FakeTelegramSender())
         self.assertEqual(original.outcome, "DRAFT_CREATED")
+        path = bridge_common.resolve_workspace_path(original.manifest_path)
+        return candidate, original, path
 
-        original_manifest_path = self.tmp_path / f"social/ops/manifests/{original.manifest_id}.json"
+    def _revision(self, candidate, original, **overrides):
+        values = {
+            "operator_instruction": "Faizi vurğula, başlığı qısalt.",
+            "parent_manifest_id": original.manifest_id,
+            "parent_review_post_id": original.review_post_id,
+        }
+        values.update(overrides)
+        return pipeline.build_revision_candidate(candidate, **values)
+
+    def test_revision_creates_new_version_and_preserves_old_manifest(self):
+        candidate, original, original_manifest_path = self._create_parent()
         original_bytes_before = original_manifest_path.read_bytes()
 
-        candidate = make_candidate()
-        revised_candidate = pipeline.build_revision_candidate(
-            candidate,
-            operator_instruction="Faizi vurğula, başlığı qısalt.",
-            parent_manifest_id=original.manifest_id,
-            parent_review_post_id=original.review_post_id,
-        )
+        revised_candidate = self._revision(candidate, original)
         revised_spec = dict(DEFAULT_SPEC)
         revised_spec["headline"] = "42% sürət artımı"
 
@@ -637,6 +1059,7 @@ class RevisionTests(StoryPipelineTestCase):
 
         self.assertEqual(revised.outcome, "DRAFT_CREATED")
         self.assertNotEqual(revised.story_version_id, original.story_version_id)
+        self.assertNotEqual(revised.story_request_id, original.story_request_id)
         self.assertNotEqual(revised.manifest_id, original.manifest_id)
         self.assertNotEqual(revised.review_post_id, original.review_post_id)
 
@@ -650,8 +1073,17 @@ class RevisionTests(StoryPipelineTestCase):
         self.assertFalse(revised_manifest["approval"]["final_publish"])
         self.assertEqual(revised_manifest["publication"]["attempts"], 0)
         self.assertEqual(revised_manifest["review"]["create_attempts"], 1)
+        revised_spec = json.loads(
+            bridge_common.resolve_workspace_path(revised.story_spec_path).read_text()
+        )
+        self.assertEqual(
+            revised_spec["revision_of"]["parent_manifest_id"], original.manifest_id
+        )
+        self.assertEqual(
+            revised_spec["revision_of"]["parent_review_post_id"], original.review_post_id
+        )
 
-    def test_blocked_revision_never_creates_review_draft(self):
+    def test_missing_revision_parent_is_typed_and_never_calls_writer(self):
         self.install_real_renderer()
         candidate = make_candidate()
         revised_candidate = pipeline.build_revision_candidate(
@@ -661,19 +1093,77 @@ class RevisionTests(StoryPipelineTestCase):
             parent_review_post_id="r-parent",
         )
 
+        writer_calls = 0
+
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC)
+
         connector = FakeDraftConnector("success")
         result = pipeline.run_story_pipeline(
             revised_candidate,
-            writer=make_writer(DEFAULT_SPEC),
+            writer=writer,
             verifier=BLOCKED_VERIFIER,
             draft_connector=connector,
             telegram_sender=FakeTelegramSender(),
         )
 
-        self.assertEqual(result.outcome, "VERIFICATION_BLOCKED")
+        self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
         self.assertEqual(connector.calls, 0)
+        self.assertEqual(writer_calls, 0)
         manifests_dir = self.tmp_path / "social/ops/manifests"
         self.assertEqual(list(manifests_dir.glob("*.json")) if manifests_dir.exists() else [], [])
+
+    def test_parent_review_post_mismatch_is_blocked(self):
+        candidate, original, _path = self._create_parent()
+        revision = self._revision(
+            candidate, original, parent_review_post_id="wrong-review-id"
+        )
+        result = self.run_pipeline(candidate=revision)
+        self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
+
+    def test_parent_candidate_mismatch_is_blocked(self):
+        _candidate, original, _path = self._create_parent()
+        revision = self._revision(
+            make_candidate(candidate_id="different-candidate"), original
+        )
+        result = self.run_pipeline(candidate=revision)
+        self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
+
+    def test_non_story_parent_is_blocked(self):
+        candidate, original, path = self._create_parent()
+        manifest = json.loads(path.read_text())
+        feed_path = self.tmp_path / "social/drafts/production/feed-parent.png"
+        feed_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1080, 1350), (1, 2, 3)).save(feed_path, "PNG")
+        manifest["format"] = "FEED"
+        manifest["media"] = [bridge_common.inspect_media(feed_path, "FEED")]
+        atomic_write_json(path, manifest)
+        revision = self._revision(candidate, original)
+        result = self.run_pipeline(candidate=revision)
+        self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
+        self.assertIn("not a Story", result.reason_text)
+
+    def test_published_or_attempted_parent_is_blocked(self):
+        candidate, original, path = self._create_parent()
+        for state in ("UNKNOWN", "PUBLISHED"):
+            with self.subTest(state=state):
+                manifest = json.loads(path.read_text())
+                manifest["publication"]["attempts"] = 1
+                manifest["publication"]["state"] = state
+                manifest["publication"]["live_zernio_post_id"] = "live-parent"
+                atomic_write_json(path, manifest)
+                revision = self._revision(candidate, original)
+                result = self.run_pipeline(candidate=revision)
+                self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
+                self.assertIn("published, attempted", result.reason_text)
+
+    def test_empty_operator_instruction_is_blocked(self):
+        candidate, original, _path = self._create_parent()
+        revision = self._revision(candidate, original, operator_instruction="   ")
+        result = self.run_pipeline(candidate=revision)
+        self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
 
 
 # ---------------------------------------------------------------------------

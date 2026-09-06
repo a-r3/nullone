@@ -11,15 +11,16 @@ the full contract this implements):
 
     trigger adapter (cadence PREPARE_STORY, or a future #36 adapter)
     -> validate_candidate (VERIFICATION: PASS required)
-    -> writer (Haiku or a fake, given only minimal editorial context)
-    -> separate final verifier (writer output can never self-certify PASS)
+    -> deterministic story_request_id + exclusive per-request lock
+    -> reuse immutable finalized spec, or writer (Haiku or a fake, given
+       only minimal editorial context) + separate final verifier
+    -> persist nullone.story-spec.v1 before render/manifest/review work
     -> deterministic story_version_id
     -> render_story_v2.py (reused, unchanged) + Production Bridge media
        inspection (dimension/hash authority reused from
        nullone_bridge_common, not reinvented)
     -> nullone.production.v1 manifest (reused schema/validator, immutable
-       once written -- a retry for the same logical version reuses the
-       existing manifest instead of minting a second one)
+       once written and bound to the persisted request/spec)
     -> at most one review-draft attempt, delegated to an injected
        DraftConnector (the real one shells out to
        nullone-draft-bridge.py; tests inject a fake -- no network)
@@ -37,11 +38,13 @@ logic, the draft connector, or the Telegram preview builder.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -103,30 +106,27 @@ WRITER_CONTEXT_CANDIDATE_FIELDS = (
     "source_attribution",
     "evidence_refs",
     "factual_inputs",
-    "source_image",
     "operator_revision_instruction",
 )
 
 STORY_PIPELINE_OUTCOMES = frozenset(
     {
         "DRAFT_CREATED",
+        "PREVIEW_DELIVERY_FAILED",
         "CANDIDATE_NOT_ELIGIBLE",
+        "REVISION_PARENT_INVALID",
+        "WRITER_FAILED",
         "WRITER_OUTPUT_INVALID",
+        "VERIFIER_FAILED",
         "VERIFICATION_BLOCKED",
+        "STORY_SPEC_BLOCKED",
         "RENDER_FAILED",
         "MANIFEST_BLOCKED",
         "REVIEW_DRAFT_ALREADY_CONSUMED",
-        "REVIEW_DRAFT_PREFLIGHT_BLOCKED",
+        "REVIEW_DRAFT_BLOCKED_BEFORE_ATTEMPT",
         "REVIEW_DRAFT_AMBIGUOUS",
     }
 )
-
-# nullone-draft-bridge.py review states that mean "an attempt was already
-# consumed and it is unsafe to retry automatically" (issue #33 section 13).
-_UNSAFE_TO_RETRY_REVIEW_STATES = frozenset(
-    {"CREATE_IN_FLIGHT", "DRAFT_CREATED", "REVIEW_UNKNOWN"}
-)
-
 
 class StoryPipelineError(RuntimeError):
     """Base class for all #33 Story pipeline errors."""
@@ -161,6 +161,14 @@ class StoryManifestBlocked(StoryPipelineError):
     """Manifest construction/validation failed (nullone.production.v1)."""
 
 
+class StoryRevisionParentInvalid(StoryPipelineError):
+    """A revision does not identify an eligible existing Story review draft."""
+
+
+class StorySpecBlocked(StoryPipelineError):
+    """A persisted finalized Story spec is missing, malformed or inconsistent."""
+
+
 # ---------------------------------------------------------------------------
 # Typed pipeline result
 # ---------------------------------------------------------------------------
@@ -172,7 +180,9 @@ class StoryPipelineResult:
     reason_code: str
     reason_text: str
     manifest_id: str | None = None
+    story_request_id: str | None = None
     story_version_id: str | None = None
+    story_spec_path: str | None = None
     review_post_id: str | None = None
     manifest_path: str | None = None
     preview_payload: dict[str, Any] | None = None
@@ -285,6 +295,22 @@ def validate_candidate(candidate: Any) -> dict[str, Any]:
     return candidate
 
 
+def _candidate_source_image(candidate: dict[str, Any]) -> str | None:
+    """Return a contained workspace-relative source image only when it exists."""
+
+    value = candidate.get("source_image")
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    try:
+        path = resolve_workspace_path(value)
+        relative = workspace_relative(path)
+    except (BridgeError, OSError):
+        return None
+
+    return relative if path.is_file() else None
+
+
 def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
     """Minimum editorial context sent to the writer -- the Haiku boundary.
 
@@ -298,6 +324,7 @@ def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
         for field_name in WRITER_CONTEXT_CANDIDATE_FIELDS
         if candidate.get(field_name) is not None
     }
+    context["source_image_available"] = _candidate_source_image(candidate) is not None
     context["allowed_layouts"] = sorted(ALLOWED_LAYOUTS)
     context["scope_rule"] = (
         "Preserve claim scope exactly as supported by the evidence. Never "
@@ -320,13 +347,15 @@ _WRITER_SPEC_FIELDS = (
     "body",
     "stat",
     "source_name",
-    "source_image",
+    "use_source_image",
     "cta",
     "left_stat",
     "right_stat",
     "left_label",
     "right_label",
 )
+
+_FINAL_STORY_FIELDS = (*_WRITER_SPEC_FIELDS, "source_image")
 
 # Fields a writer output must never be trusted to set; the pipeline strips
 # and recomputes them itself so a writer can never self-certify PASS.
@@ -360,10 +389,21 @@ def validate_story_spec_shape(raw_spec: Any) -> dict[str, Any]:
 
     for optional_field in _WRITER_SPEC_FIELDS[2:]:
         value = raw_spec.get(optional_field)
-        if value is not None and not isinstance(value, str):
+        expected_type = bool if optional_field == "use_source_image" else str
+        if value is not None and not isinstance(value, expected_type):
             raise StoryWriterOutputInvalid(
-                f"writer field {optional_field!r} must be a string or absent"
+                f"writer field {optional_field!r} must be a {expected_type.__name__} or absent"
             )
+
+    if "source_image" in raw_spec:
+        raise StoryWriterOutputInvalid("writer must not provide a source_image path")
+    unexpected = set(raw_spec) - set(_WRITER_SPEC_FIELDS)
+    if unexpected:
+        raise StoryWriterOutputInvalid(
+            f"writer output has unexpected field(s): {sorted(unexpected)}"
+        )
+    if not isinstance(raw_spec.get("use_source_image"), bool):
+        raise StoryWriterOutputInvalid("writer field 'use_source_image' must be boolean")
 
     return raw_spec
 
@@ -380,6 +420,7 @@ WRITER_SCHEMA = {
         "body": {"type": "string"},
         "stat": {"type": "string"},
         "source_name": {"type": "string"},
+        "use_source_image": {"type": "boolean"},
         "cta": {"type": "string"},
         "left_stat": {"type": "string"},
         "right_stat": {"type": "string"},
@@ -392,6 +433,7 @@ WRITER_SCHEMA = {
         "body",
         "stat",
         "source_name",
+        "use_source_image",
         "cta",
         "left_stat",
         "right_stat",
@@ -419,8 +461,10 @@ comparison beyond what is given.
 {json.dumps(editorial_context, ensure_ascii=False, indent=2)}
 
 Leave any field that does not apply to the chosen layout as an empty
-string. You do not decide verification -- a separate process verifies
-your exact wording afterward.
+string. Set use_source_image to true only when source_image_available is
+true and the official image materially improves this Story. You never
+receive or invent a filesystem path. You do not decide verification -- a
+separate process verifies your exact wording afterward.
 """
 
 
@@ -435,7 +479,7 @@ class HaikuStoryWriter:
     model = "haiku"
 
     def __call__(
-        self, candidate: dict[str, Any], editorial_context: dict[str, Any]
+        self, editorial_context: dict[str, Any]
     ) -> dict[str, Any]:
         if run_structured is None:  # pragma: no cover
             raise StoryPipelineError("nullone_claude.run_structured is unavailable")
@@ -451,9 +495,7 @@ class HaikuStoryWriter:
 
 
 class StoryWriter(Protocol):
-    def __call__(
-        self, candidate: dict[str, Any], editorial_context: dict[str, Any]
-    ) -> dict[str, Any]: ...
+    def __call__(self, editorial_context: dict[str, Any]) -> dict[str, Any]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -518,27 +560,67 @@ def make_fake_verifier(status: str, reason: str = "fake verifier") -> StoryVerif
 
 
 # ---------------------------------------------------------------------------
-# Story version identity
+# Story request/version identity and immutable finalized spec
 # ---------------------------------------------------------------------------
 
 
+def _canonical_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def compute_story_request_id(candidate: dict[str, Any]) -> str:
+    """Identify one logical initial or operator-revision production request.
+
+    Initial requests bind candidate identity/version and optional upstream
+    request lineage. Revisions bind the exact parent review draft and exact
+    operator instruction. Time and generated content never participate.
+    """
+
+    revision = candidate.get("revision_of")
+    if revision is None:
+        lineage = {
+            "kind": "INITIAL",
+            "candidate_id": candidate["candidate_id"],
+            "candidate_version": candidate.get("candidate_version"),
+            "request_lineage": candidate.get("request_lineage"),
+        }
+    else:
+        lineage = {
+            "kind": "OPERATOR_REVISION",
+            "candidate_id": candidate["candidate_id"],
+            "parent_manifest_id": revision.get("parent_manifest_id"),
+            "parent_review_post_id": revision.get("parent_review_post_id"),
+            "operator_instruction": revision.get("operator_instruction"),
+        }
+
+    return f"story-request-{_canonical_hash(lineage)[:32]}"
+
+
 def compute_story_version_id(candidate: dict[str, Any], spec: dict[str, Any]) -> str:
-    """Deterministic fingerprint of one logical Story version.
+    """Deterministic fingerprint of the exact finalized Story content.
 
     Depends only on the candidate identity/version, any revision linkage,
-    and the finalized (writer + verifier passed) spec content -- never on
-    wall-clock time or a random UUID, so a retry with the same inputs
-    resolves to the same version.
+    request identity and finalized (writer + verifier passed) Story fields.
+    Retry stability comes from reusing the persisted finalized spec before
+    invoking the writer, rather than assuming nondeterministic model output
+    can be reconstructed.
     """
 
     payload = {
+        "story_request_id": spec.get("story_request_id")
+        or compute_story_request_id(candidate),
         "candidate_id": candidate["candidate_id"],
         "candidate_version": candidate.get("candidate_version"),
         "revision_of": candidate.get("revision_of"),
-        "spec": {field_name: spec.get(field_name) for field_name in _WRITER_SPEC_FIELDS},
+        "spec": {field_name: spec.get(field_name) for field_name in _FINAL_STORY_FIELDS},
     }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _canonical_hash(payload)
 
 
 def _slug(value: str) -> str:
@@ -550,6 +632,196 @@ def _slug(value: str) -> str:
 
 def _manifest_id_for_version(candidate_id: str, story_version_id: str) -> str:
     return f"story-{_slug(candidate_id)}-{story_version_id[:16]}"
+
+
+def _story_spec_path(story_request_id: str) -> Path:
+    return resolve_workspace_path(
+        f"social/drafts/production/story/specs/{story_request_id}.json"
+    )
+
+
+def _story_request_lock_path(story_request_id: str) -> Path:
+    return resolve_workspace_path(
+        f"social/drafts/production/story/locks/{story_request_id}.lock"
+    )
+
+
+@contextmanager
+def _story_request_lock(story_request_id: str):
+    """Serialize the complete side-effecting lifecycle of one request."""
+
+    lock_path = _story_request_lock_path(story_request_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _validate_finalized_story_spec(
+    spec: Any,
+    candidate: dict[str, Any],
+    story_request_id: str,
+) -> dict[str, Any]:
+    if not isinstance(spec, dict):
+        raise StorySpecBlocked("Persisted Story spec must be an object")
+    if spec.get("schema") != SCHEMA or spec.get("contract_version") != CONTRACT_VERSION:
+        raise StorySpecBlocked("Persisted Story spec schema/version mismatch")
+    if spec.get("story_request_id") != story_request_id:
+        raise StorySpecBlocked("Persisted Story request identity mismatch")
+    if spec.get("candidate_id") != candidate["candidate_id"]:
+        raise StorySpecBlocked("Persisted Story candidate identity mismatch")
+    if spec.get("candidate_version") != candidate.get("candidate_version"):
+        raise StorySpecBlocked("Persisted Story candidate version mismatch")
+    if spec.get("revision_of") != candidate.get("revision_of"):
+        raise StorySpecBlocked("Persisted Story revision lineage mismatch")
+    if spec.get("evidence_refs") != list(candidate["evidence_refs"]):
+        raise StorySpecBlocked("Persisted Story evidence references do not match candidate")
+    verification = spec.get("final_verification")
+    if not isinstance(verification, dict) or verification.get("status") != "PASS":
+        raise StorySpecBlocked("Persisted Story final verification is not PASS")
+    if not isinstance(verification.get("reason"), str):
+        raise StorySpecBlocked("Persisted Story verification reason is invalid")
+    if not isinstance(verification.get("verifier"), str) or not verification["verifier"]:
+        raise StorySpecBlocked("Persisted Story verifier identity is invalid")
+    if not isinstance(verification.get("checked_at"), str) or not verification["checked_at"]:
+        raise StorySpecBlocked("Persisted Story verification timestamp is invalid")
+
+    writer_shape = {field_name: spec.get(field_name) for field_name in _WRITER_SPEC_FIELDS}
+    try:
+        validate_story_spec_shape(writer_shape)
+    except StoryWriterOutputInvalid as e:
+        raise StorySpecBlocked(str(e)) from e
+
+    source_image = spec.get("source_image")
+    if spec.get("use_source_image"):
+        if not isinstance(source_image, str) or not source_image:
+            raise StorySpecBlocked("Persisted Story selected source image is missing")
+        try:
+            source_path = resolve_workspace_path(source_image)
+            workspace_relative(source_path)
+        except BridgeError as e:
+            raise StorySpecBlocked("Persisted Story source image escapes workspace") from e
+        if not source_path.is_file():
+            raise StorySpecBlocked("Persisted Story source image no longer exists")
+        if source_image != _candidate_source_image(candidate):
+            raise StorySpecBlocked("Persisted Story source image no longer matches candidate")
+    elif source_image is not None:
+        raise StorySpecBlocked("Persisted Story has an unselected source image")
+
+    expected_version = compute_story_version_id(candidate, spec)
+    if spec.get("story_version_id") != expected_version:
+        raise StorySpecBlocked("Persisted Story content/version identity mismatch")
+    return spec
+
+
+def _load_or_persist_story_spec(
+    candidate: dict[str, Any],
+    story_request_id: str,
+    *,
+    writer: StoryWriter,
+    verifier: StoryVerifier,
+) -> tuple[dict[str, Any] | None, StoryPipelineResult | None]:
+    """Reuse a valid spec before writer, or finalize and persist it exactly once."""
+
+    spec_path = _story_spec_path(story_request_id)
+    if spec_path.exists():
+        try:
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            return _validate_finalized_story_spec(spec, candidate, story_request_id), None
+        except (OSError, json.JSONDecodeError, StorySpecBlocked) as e:
+            return None, _result(
+                "STORY_SPEC_BLOCKED",
+                f"Persisted Story spec is invalid: {e}",
+                story_request_id=story_request_id,
+                story_spec_path=workspace_relative(spec_path),
+            )
+
+    editorial_context = build_writer_context(candidate)
+    try:
+        raw_spec = writer(editorial_context)
+    except Exception as e:
+        return None, _result(
+            "WRITER_FAILED",
+            "Story writer provider failed.",
+            story_request_id=story_request_id,
+            context={"error_type": type(e).__name__},
+        )
+
+    try:
+        if not isinstance(raw_spec, dict):
+            raise StoryWriterOutputInvalid("writer output must be an object")
+        raw_spec = _strip_self_certification(raw_spec)
+        validate_story_spec_shape(raw_spec)
+        source_image = _candidate_source_image(candidate)
+        if raw_spec.get("use_source_image") and source_image is None:
+            raise StoryWriterOutputInvalid(
+                "writer requested source imagery but no valid source image is available"
+            )
+    except StoryWriterOutputInvalid as e:
+        return None, _result(
+            "WRITER_OUTPUT_INVALID",
+            str(e),
+            story_request_id=story_request_id,
+        )
+
+    try:
+        verify_result = verifier(raw_spec, candidate)
+    except Exception as e:
+        return None, _result(
+            "VERIFIER_FAILED",
+            "Story verifier failed.",
+            story_request_id=story_request_id,
+            context={"error_type": type(e).__name__},
+        )
+    if not isinstance(verify_result, dict) or verify_result.get("status") not in {
+        "PASS",
+        "BLOCKED",
+    }:
+        return None, _result(
+            "VERIFIER_FAILED",
+            "Story verifier returned an invalid result.",
+            story_request_id=story_request_id,
+        )
+    if verify_result["status"] != "PASS":
+        return None, _result(
+            "VERIFICATION_BLOCKED",
+            str(verify_result.get("reason") or "Final verification blocked"),
+            story_request_id=story_request_id,
+        )
+
+    spec = dict(raw_spec)
+    spec["schema"] = SCHEMA
+    spec["contract_version"] = CONTRACT_VERSION
+    spec["story_request_id"] = story_request_id
+    spec["candidate_id"] = candidate["candidate_id"]
+    spec["candidate_version"] = candidate.get("candidate_version")
+    spec["revision_of"] = candidate.get("revision_of")
+    spec["source_image"] = source_image if spec.get("use_source_image") else None
+    spec["evidence_refs"] = list(candidate["evidence_refs"])
+    spec["final_verification"] = {
+        "status": "PASS",
+        "reason": str(verify_result.get("reason") or ""),
+        "verifier": getattr(verifier, "__name__", type(verifier).__name__),
+        "checked_at": now_iso(),
+    }
+    spec["story_version_id"] = compute_story_version_id(candidate, spec)
+    try:
+        _validate_finalized_story_spec(spec, candidate, story_request_id)
+        if spec_path.exists():
+            raise StorySpecBlocked("Story spec appeared during locked creation")
+        atomic_write_json(spec_path, spec)
+    except (BridgeError, OSError, StorySpecBlocked) as e:
+        return None, _result(
+            "STORY_SPEC_BLOCKED",
+            f"Finalized Story spec could not be persisted: {e}",
+            story_request_id=story_request_id,
+            story_version_id=spec["story_version_id"],
+            story_spec_path=workspace_relative(spec_path),
+        )
+    return spec, None
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +923,7 @@ def build_story_manifest(
     spec: dict[str, Any],
     media: dict[str, Any],
     manifest_id: str,
+    spec_path: Path,
 ) -> dict[str, Any]:
     """Build and persist a new immutable nullone.production.v1 STORY manifest.
 
@@ -713,6 +986,11 @@ def build_story_manifest(
             "error": None,
         },
         "story_version_id": spec["story_version_id"],
+        "story_request_id": spec["story_request_id"],
+        "story_spec": {
+            "file": workspace_relative(spec_path),
+            "sha256": sha256_bytes(spec_path.read_bytes()),
+        },
         "story_final_verification": spec["final_verification"],
     }
 
@@ -784,7 +1062,8 @@ def _review_is_untouched(manifest: dict[str, Any]) -> bool:
 
 
 class TelegramPreviewSender(Protocol):
-    def send(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+    def send(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return exactly a mapping whose status is SENT on success."""
 
 
 def build_story_preview_payload(
@@ -806,11 +1085,17 @@ def build_story_preview_payload(
         "format": "STORY",
         "topic": candidate["topic"],
         "candidate_id": candidate["candidate_id"],
+        "story_request_id": spec["story_request_id"],
         "story_version_id": spec["story_version_id"],
         "manifest_id": manifest["manifest_id"],
         "review_post_id": review_post_id,
-        "media_fingerprint": media["sha256"],
-        "media_dimensions": f"{media['width']}x{media['height']}",
+        "media": {
+            "local_path": media["local_path"],
+            "sha256": media["sha256"],
+            "width": media["width"],
+            "height": media["height"],
+            "content_type": media["content_type"],
+        },
         "caption_excerpt": spec["headline"],
         "text": (
             "📰 Yeni NullOne Story draft\n\n"
@@ -851,6 +1136,73 @@ def build_story_preview_payload(
 # ---------------------------------------------------------------------------
 
 
+_MANIFEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_revision_parent(candidate: dict[str, Any]) -> None:
+    revision = candidate.get("revision_of")
+    if revision is None:
+        if candidate.get("operator_revision_instruction") is not None:
+            raise StoryRevisionParentInvalid(
+                "operator revision instruction requires proven revision lineage"
+            )
+        return
+    if not isinstance(revision, dict):
+        raise StoryRevisionParentInvalid("revision_of must be an object")
+
+    instruction = revision.get("operator_instruction")
+    parent_manifest_id = revision.get("parent_manifest_id")
+    parent_review_post_id = revision.get("parent_review_post_id")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise StoryRevisionParentInvalid("operator revision instruction is required")
+    if candidate.get("operator_revision_instruction") != instruction:
+        raise StoryRevisionParentInvalid("operator revision instruction lineage mismatch")
+    if (
+        not isinstance(parent_manifest_id, str)
+        or not _MANIFEST_ID_RE.fullmatch(parent_manifest_id)
+    ):
+        raise StoryRevisionParentInvalid("parent manifest ID is invalid")
+    if not isinstance(parent_review_post_id, str) or not parent_review_post_id.strip():
+        raise StoryRevisionParentInvalid("parent review post ID is required")
+
+    parent_path = resolve_workspace_path(
+        f"social/ops/manifests/{parent_manifest_id}.json"
+    )
+    try:
+        _, parent = load_manifest(parent_path)
+    except (BridgeError, OSError) as e:
+        raise StoryRevisionParentInvalid("parent manifest is missing or invalid") from e
+
+    if parent.get("manifest_id") != parent_manifest_id:
+        raise StoryRevisionParentInvalid("parent manifest identity mismatch")
+    if parent.get("format") != MANIFEST_FORMAT:
+        raise StoryRevisionParentInvalid("revision parent is not a Story")
+    if parent.get("candidate_id") != candidate["candidate_id"]:
+        raise StoryRevisionParentInvalid("revision parent candidate mismatch")
+
+    review = parent.get("review") or {}
+    if (
+        review.get("state") != "DRAFT_CREATED"
+        or review.get("create_attempts") != 1
+        or review.get("zernio_draft_id") != parent_review_post_id
+    ):
+        raise StoryRevisionParentInvalid(
+            "revision parent does not prove the exact existing review draft"
+        )
+
+    publication = parent.get("publication") or {}
+    if (
+        publication.get("attempts") != 0
+        or publication.get("state") != "NOT_REQUESTED"
+        or publication.get("live_zernio_post_id")
+        or publication.get("platform_post_id")
+        or publication.get("permalink")
+    ):
+        raise StoryRevisionParentInvalid(
+            "published, attempted or consequential parent cannot use review-draft revision"
+        )
+
+
 def run_story_pipeline(
     candidate: dict[str, Any],
     *,
@@ -873,131 +1225,177 @@ def run_story_pipeline(
     except StoryCandidateNotEligible as e:
         return _result("CANDIDATE_NOT_ELIGIBLE", str(e))
 
-    editorial_context = build_writer_context(candidate)
-
     try:
-        raw_spec = writer(candidate, editorial_context)
-        raw_spec = _strip_self_certification(raw_spec)
-        validate_story_spec_shape(raw_spec)
-    except StoryWriterOutputInvalid as e:
-        return _result("WRITER_OUTPUT_INVALID", str(e))
+        _validate_revision_parent(candidate)
+    except StoryRevisionParentInvalid as e:
+        return _result("REVISION_PARENT_INVALID", str(e))
 
-    verify_result = verifier(raw_spec, candidate)
-    if not isinstance(verify_result, dict) or verify_result.get("status") != "PASS":
-        reason = (verify_result or {}).get("reason", "Final verification did not return PASS")
-        return _result("VERIFICATION_BLOCKED", reason)
+    story_request_id = compute_story_request_id(candidate)
+    spec_path = _story_spec_path(story_request_id)
 
-    spec = dict(raw_spec)
-    spec["schema"] = SCHEMA
-    spec["candidate_id"] = candidate["candidate_id"]
-    spec["evidence_refs"] = list(candidate.get("evidence_refs", []))
-    spec["final_verification"] = {
-        "status": "PASS",
-        "reason": verify_result.get("reason", ""),
-        "verifier": getattr(verifier, "__name__", type(verifier).__name__),
-        "checked_at": now_iso(),
-    }
+    with _story_request_lock(story_request_id):
+        spec, blocked = _load_or_persist_story_spec(
+            candidate,
+            story_request_id,
+            writer=writer,
+            verifier=verifier,
+        )
+        if blocked is not None:
+            return blocked
+        assert spec is not None
 
-    story_version_id = compute_story_version_id(candidate, spec)
-    spec["story_version_id"] = story_version_id
+        story_version_id = spec["story_version_id"]
+        manifest_id = _manifest_id_for_version(candidate["candidate_id"], story_version_id)
+        manifest_path = resolve_workspace_path(f"social/ops/manifests/{manifest_id}.json")
 
-    manifest_id = _manifest_id_for_version(candidate["candidate_id"], story_version_id)
-    manifest_path = resolve_workspace_path(f"social/ops/manifests/{manifest_id}.json")
+        if manifest_path.is_file():
+            try:
+                _, manifest = load_manifest(manifest_path)
+            except BridgeError as e:
+                return _result(
+                    "MANIFEST_BLOCKED",
+                    str(e),
+                    manifest_id=manifest_id,
+                    story_request_id=story_request_id,
+                    story_version_id=story_version_id,
+                    story_spec_path=workspace_relative(spec_path),
+                )
+            if (
+                manifest.get("story_request_id") != story_request_id
+                or manifest.get("story_version_id") != story_version_id
+                or (manifest.get("story_spec") or {}).get("file")
+                != workspace_relative(spec_path)
+                or (manifest.get("story_spec") or {}).get("sha256")
+                != sha256_bytes(spec_path.read_bytes())
+            ):
+                return _result(
+                    "MANIFEST_BLOCKED",
+                    "Existing manifest does not match the Story request/version.",
+                    manifest_id=manifest_id,
+                    story_request_id=story_request_id,
+                    story_version_id=story_version_id,
+                    story_spec_path=workspace_relative(spec_path),
+                )
+        else:
+            try:
+                media = render_story_asset(spec, manifest_id)
+            except StoryRenderFailed as e:
+                return _result(
+                    "RENDER_FAILED",
+                    str(e),
+                    story_request_id=story_request_id,
+                    story_version_id=story_version_id,
+                    story_spec_path=workspace_relative(spec_path),
+                )
 
-    if manifest_path.is_file():
-        # Same logical Story version already has a manifest: reuse it
-        # rather than re-rendering or minting a second one.
-        _, manifest = load_manifest(manifest_path)
-    else:
-        try:
-            media = render_story_asset(spec, manifest_id)
-        except StoryRenderFailed as e:
-            return _result("RENDER_FAILED", str(e), story_version_id=story_version_id)
+            try:
+                manifest = build_story_manifest(
+                    candidate, spec, media, manifest_id, spec_path
+                )
+            except (StoryManifestBlocked, OSError) as e:
+                return _result(
+                    "MANIFEST_BLOCKED",
+                    str(e),
+                    story_request_id=story_request_id,
+                    story_version_id=story_version_id,
+                    manifest_id=manifest_id,
+                    story_spec_path=workspace_relative(spec_path),
+                )
 
-        try:
-            manifest = build_story_manifest(candidate, spec, media, manifest_id)
-        except StoryManifestBlocked as e:
-            return _result(
-                "MANIFEST_BLOCKED",
-                str(e),
-                story_version_id=story_version_id,
-                manifest_id=manifest_id,
-            )
+        common = {
+            "manifest_id": manifest_id,
+            "story_request_id": story_request_id,
+            "story_version_id": story_version_id,
+            "story_spec_path": workspace_relative(spec_path),
+            "manifest_path": workspace_relative(manifest_path),
+        }
 
-    if not _review_is_untouched(manifest):
-        attempts, state, draft_id = _review_state(manifest)
-        if state == "DRAFT_CREATED" and draft_id:
-            # Idempotent re-entry after a prior successful run: report the
-            # existing draft, but never send a duplicate preview here --
-            # preview delivery is only attempted on the call that actually
-            # created the draft.
+        if not _review_is_untouched(manifest):
+            attempts, state, draft_id = _review_state(manifest)
+            if state == "DRAFT_CREATED" and draft_id:
+                return _result(
+                    "REVIEW_DRAFT_ALREADY_CONSUMED",
+                    "A review draft already exists for this Story request.",
+                    review_post_id=draft_id,
+                    **common,
+                )
             return _result(
                 "REVIEW_DRAFT_ALREADY_CONSUMED",
-                "A review draft already exists for this Story version.",
-                manifest_id=manifest_id,
-                story_version_id=story_version_id,
-                review_post_id=draft_id,
-                manifest_path=workspace_relative(manifest_path),
+                f"Review create attempt already consumed (attempts={attempts}, state={state}).",
+                **common,
             )
+
+        try:
+            draft_connector.create_review_draft(manifest_path)
+        except Exception:
+            pass
+
+        try:
+            _, manifest = load_manifest(manifest_path)
+        except BridgeError as e:
+            return _result(
+                "REVIEW_DRAFT_AMBIGUOUS",
+                f"Review manifest could not be validated after connector call: {e}",
+                **common,
+            )
+        attempts, state, draft_id = _review_state(manifest)
+
+        if state == "DRAFT_CREATED" and draft_id:
+            preview_payload = build_story_preview_payload(candidate, spec, manifest, draft_id)
+            preview_delivery = None
+            outcome = "DRAFT_CREATED"
+            reason = "Story review draft created."
+            if telegram_sender is not None:
+                try:
+                    sender_result = telegram_sender.send(preview_payload)
+                    if not isinstance(sender_result, dict) or sender_result.get("status") != "SENT":
+                        preview_delivery = {
+                            "status": "FAILED",
+                            "sender_status": (
+                                sender_result.get("status")
+                                if isinstance(sender_result, dict)
+                                else None
+                            ),
+                            "error": (
+                                str(sender_result.get("error") or "Sender did not return SENT")
+                                if isinstance(sender_result, dict)
+                                else "Sender returned an invalid result"
+                            ),
+                        }
+                        outcome = "PREVIEW_DELIVERY_FAILED"
+                        reason = "Story draft exists, but Telegram preview delivery failed."
+                    else:
+                        preview_delivery = dict(sender_result)
+                except Exception as e:
+                    preview_delivery = {
+                        "status": "FAILED",
+                        "error": "Telegram preview sender raised an exception.",
+                        "error_type": type(e).__name__,
+                    }
+                    outcome = "PREVIEW_DELIVERY_FAILED"
+                    reason = "Story draft exists, but Telegram preview delivery failed."
+            return _result(
+                outcome,
+                reason,
+                review_post_id=draft_id,
+                preview_payload=preview_payload,
+                preview_delivery=preview_delivery,
+                **common,
+            )
+
+        if attempts == 0 and state == "NOT_CREATED":
+            return _result(
+                "REVIEW_DRAFT_BLOCKED_BEFORE_ATTEMPT",
+                "Review draft connector was blocked before a create attempt was consumed.",
+                **common,
+            )
+
         return _result(
-            "REVIEW_DRAFT_ALREADY_CONSUMED",
-            f"Review create attempt already consumed (attempts={attempts}, state={state}).",
-            manifest_id=manifest_id,
-            story_version_id=story_version_id,
-            manifest_path=workspace_relative(manifest_path),
+            "REVIEW_DRAFT_AMBIGUOUS",
+            f"Review draft outcome is ambiguous (attempts={attempts}, state={state}). "
+            "Manual reconciliation required; no automatic retry.",
+            **common,
         )
-
-    try:
-        draft_connector.create_review_draft(manifest_path)
-    except Exception:
-        # Ambiguity is resolved below purely from the reloaded manifest
-        # state -- a connector-level exception never causes a retry here.
-        pass
-
-    _, manifest = load_manifest(manifest_path)
-    attempts, state, draft_id = _review_state(manifest)
-
-    if state == "DRAFT_CREATED" and draft_id:
-        preview_payload = build_story_preview_payload(candidate, spec, manifest, draft_id)
-        preview_delivery = None
-        if telegram_sender is not None:
-            try:
-                preview_delivery = telegram_sender.send(preview_payload)
-            except Exception as e:
-                preview_delivery = {"status": "FAILED", "error": str(e)}
-
-        return _result(
-            "DRAFT_CREATED",
-            "Story review draft created.",
-            manifest_id=manifest_id,
-            story_version_id=story_version_id,
-            review_post_id=draft_id,
-            manifest_path=workspace_relative(manifest_path),
-            preview_payload=preview_payload,
-            preview_delivery=preview_delivery,
-        )
-
-    if attempts == 0 and state == "NOT_CREATED":
-        # Preflight validation blocked before the create attempt was
-        # consumed: a clean, non-ambiguous failure. Safe to retry later.
-        return _result(
-            "REVIEW_DRAFT_PREFLIGHT_BLOCKED",
-            "Review draft preflight validation blocked before create attempt.",
-            manifest_id=manifest_id,
-            story_version_id=story_version_id,
-            manifest_path=workspace_relative(manifest_path),
-        )
-
-    # attempts >= 1 and state in {CREATE_IN_FLIGHT, REVIEW_UNKNOWN, ...}:
-    # the attempt is consumed and the outcome is unconfirmed. Never retry.
-    return _result(
-        "REVIEW_DRAFT_AMBIGUOUS",
-        f"Review draft outcome is ambiguous (attempts={attempts}, state={state}). "
-        "Manual reconciliation required; no automatic retry.",
-        manifest_id=manifest_id,
-        story_version_id=story_version_id,
-        manifest_path=workspace_relative(manifest_path),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1012,9 +1410,13 @@ def build_revision_candidate(
     parent_manifest_id: str,
     parent_review_post_id: str,
 ) -> dict[str, Any]:
-    """Derive a revision candidate from an approved candidate + an exact
-    operator instruction. The evidence/claim scope is carried over
-    unchanged; only the instruction is added to the writer context.
+    """Build revision lineage for later proof by run_story_pipeline().
+
+    This helper does not authorize a revision. Before any writer or spec
+    work, the pipeline loads and validates the exact parent manifest and
+    review post and proves the parent is an unpublished Story review draft.
+    The evidence/claim scope is carried over unchanged; only the operator
+    instruction is added to the writer context.
 
     Passing the result to run_story_pipeline() naturally produces a new
     story_version_id (different content => different hash), a new
