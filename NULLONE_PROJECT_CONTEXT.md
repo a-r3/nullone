@@ -37,8 +37,17 @@ No blind autonomous publishing.
 ## Current execution priority
 Operational workstreams remain ahead of large migration/product work:
 
-1. Repo-level M0 engineering complete (#27–#36)
-2. Controlled production activation/validation (#37)
+Component-level repo engineering for #27–#36 is complete. Deployable
+end-to-end M0 integration is not complete.
+
+1. Review and accept #65 while #60 and #66 proceed independently.
+2. Implement #59 and #61 after #65; implement #62 after #65 + #60; then
+   implement #63 after #62. Each dependency uses normal Git/PR review.
+3. Rerun the strictly read-only #37 preflight only after #65, #59, #61, #62,
+   #63 and #66 are accepted.
+4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
+   controlled deployment under #37.
+5. Observe natural production behavior; do not manufacture live proof.
 
 Existing M1/M2/M3 remain intact.
 
@@ -55,7 +64,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational issues #27, #28, #29, #30, #31, #32, #33, #34, #35 and #36 are CLOSED/COMPLETED; #37 remains OPEN
+- operational component issues #27, #28, #29, #30, #31, #32, #33, #34, #35 and #36 are CLOSED/COMPLETED; application-runtime architecture issue #65, integration dependencies #59–#63, the narrow legacy-publication-instruction blocker #66, and parent deployment issue #37 remain OPEN; #6 remains OPEN in M1 (its narrow M0-relevant subset is tracked by #66) and #13 remains OPEN in M3, generalizing #65's boundary without blocking it
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -74,7 +83,14 @@ Relevant issues:
 - #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
-- #37 controlled production activation/validation — OPEN; remains the final controlled deployment/preflight/live-validation boundary under its existing, unchanged contract
+- #37 controlled production activation/validation — OPEN; its 2026-09-07 read-only preflight returned `BLOCKED`, so deployment remains prohibited while #65, #59–#63 and #66 are open
+- #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only
+- #60 cadence-state backward compatibility — OPEN; makes historical publish-ledger rows safe for #32 without ad hoc production edits or guessed formats
+- #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
+- #62 `StoryWorkflow` and shared review-delivery adapter — OPEN; depends on #65 + #60 and owns the NullOne cadence-to-Story application workflow, `DraftProvider`, reusable `ReviewDelivery`, and scheduled-path Zernio proof
+- #63 `BreakingWorkflow` orchestration — OPEN; depends on #65 + #62 (and indirectly #60) and owns the NullOne Radar-candidate-to-#35-to-#36 application workflow; OpenClaw Breaking Radar is only the current trigger adapter
+- #65 NullOne Application Runtime architecture — OPEN; contract-first M0 decision establishing NullOne workflow ownership and OpenClaw/provider integrations as replaceable adapters; blocks #59, #61, #62 and #63, but not #60; generalized (not superseded) by future M3 issue #13, which does not block #65
+- #66 remove reachable legacy publication instructions/capabilities — OPEN; narrow M0-relevant subset of #6 (see below); blocks #37; independent of #59/#60/#61/#62/#63
 
 ### Verified #5 completion — 2026-09-05 18:32–18:34
 PR #39 `Add isolated behavioral regression tests to CI` was verified with local authenticated `gh` and, after the repository became public, independently visible through the GitHub connector.
@@ -469,6 +485,154 @@ performs controlled activation:
 - no real #36 Telegram/Zernio breaking cycle has occurred;
 - #37 remains the explicit deployment/preflight/live-validation boundary.
 
+### #37 preflight — 2026-09-07
+
+Verdict: `BLOCKED`. The preflight was strictly read-only against canonical
+desired Git SHA `0d68aebc3d83cc528398ca0e3348b7306db6ffe4`. No production
+file, job/config, service, scheduler/model, credential, ledger, Zernio,
+Telegram, approval or publication mutation occurred.
+
+Durable production facts at preflight:
+- OpenClaw `2026.8.2` was installed and the Gateway was healthy at host
+  level;
+- 10 scheduler jobs were enabled; Morning Editorial and Daily Analytics
+  still used legacy job payloads, and no Story-specific live job existed;
+- scheduler-native `failureAlert` was supported but not configured for
+  Morning Editorial or Daily Analytics;
+- the private Telegram owner target was `PRESENT/READABLE` without its
+  value being disclosed;
+- host-level Zernio OAuth/MCP was healthy, but scheduled-session bootstrap
+  errors were still observed;
+- the dedicated #29 `ZERNIO_ANALYTICS_API_TOKEN` was absent; the deprecated
+  `ZERNIO_API_KEY` path remains rejected;
+- the production publish ledger contained historical rows incompatible
+  with the strict #32 cadence adapter because two valid JSON rows lacked
+  `format`;
+- the existing Astra publication `UNKNOWN` and two `CHECK_REQUIRED`
+  records remain operator decisions and must not be touched automatically.
+
+Confirmed deployability blockers:
+1. no reviewed scheduler occurrence → Morning/Daily runtime → persisted
+   #27 outcome → #30 notifier orchestration;
+2. no reviewed compatibility path for historical cadence ledger rows;
+3. no reviewed cadence → Story production runner;
+4. no production implementation of the injected Story/main Telegram
+   preview-sender protocol;
+5. no reviewed Radar → #35 identity → #36 router/dispatcher → Story/main
+   runner;
+6. no reviewed secure injection mechanism for
+   `ZERNIO_ANALYTICS_API_TOKEN`;
+7. scheduled-session Zernio bootstrap remains unproven for the MCP-backed
+   Story/main draft bridge despite healthy host-level service;
+8. exact safe cron/job payloads cannot be authored until the missing
+   orchestration and occurrence-ID boundaries exist.
+
+Dependencies created from this evidence and architecture review:
+- #65 NullOne Application Runtime and replaceable-adapter contract;
+- #59 scheduled outcome orchestration;
+- #60 cadence-state backward compatibility;
+- #61 secure #29 analytics credential/runtime path;
+- #62 Story runtime orchestration plus shared Telegram preview sender;
+- #63 breaking runtime orchestration;
+- #66 removal of the reachable legacy direct-Zernio-call instructions in
+  `agents/approval/AGENTS.md`/`agents/publisher/AGENTS.md` (the narrow #6
+  subset that stays reachable after this integration).
+
+#65, #60 and #66 can begin independently. #59 and #61 depend on #65. #62
+depends on #65 + #60. #63 depends on #65 + #62 and indirectly on #60.
+#37 depends on #65, all five integration dependencies, and #66. A separate
+generic scheduled-session Zernio issue was not created: #29's direct GET-only
+adapter deliberately removes that dependency for Daily Analytics, while #62
+must prove or replace the MCP-backed review-draft path used by Story and
+inherited by #63.
+
+#6's read-only M0 relevance check (2026-09-07) found `agents/approval/AGENTS.md`
+still contains dead `## FIRST APPROVAL`/`## FINAL PUBLISH` instructions
+directing the approval agent to call Zernio directly, contradicted only
+textually (not structurally) by later override sections in the same file;
+none of #65/#59/#61/#62/#63 touch that file, so the risk remains reachable on
+the human-approval → publish path after M0 activation. Verdict:
+`#6_HAS_M0_BLOCKING_SUBSET`, narrowly scoped to #66; the remainder of #6
+(Morning/Radar/Strategy prompt consolidation, the capability matrix, legacy
+production-skill source ownership) stays M1 cleanup and is not a #37
+dependency. The separately-confirmed legacy Daily Analytics
+`toolsAllow=['*']` job-config risk is not part of #66: it is already retired
+by #59/#61's planned replacement of that legacy prompt-only job.
+
+The sanitized evidence summary is
+`docs/deployment/37-preflight-2026-09-07.md`. #27–#36 remain complete at
+component/repository level; this preflight records previously uncaptured
+integration prerequisites and does not reopen them.
+
+### NullOne Application Runtime architecture — #65
+
+OpenClaw independence was already a product/architecture intent, and the
+#27–#36 component designs reflected it through deterministic cores and
+injected dependencies. The missing first-class contract was the
+NullOne-owned application/orchestration layer that composes those components
+for a real run. The #37 preflight exposed that omission. It is an M0
+deployability requirement, not optional future cleanup.
+
+The governing invariant is:
+
+> NullOne owns workflow/application orchestration. OpenClaw is one
+> replaceable infrastructure adapter that triggers NullOne; it is not the
+> owner of NullOne business workflow semantics.
+
+The architecture has three dependency layers:
+- Domain/Core: #27–#36 run outcomes, cadence, Story, breaking identity,
+  routing/dispatch, verification and publication safety; no OpenClaw
+  dependency;
+- NullOne Application Runtime: `MorningWorkflow`, `AnalyticsWorkflow`,
+  `StoryWorkflow` and `BreakingWorkflow`; owns ordering and composes domain
+  components through ports;
+- adapters: OpenClaw scheduler, Zernio draft/analytics, Telegram review,
+  filesystem state and systemd/runtime secret implementations.
+
+Only current portability boundaries are introduced: normalized
+`SchedulerInvocation`, `ReviewDelivery`, `DraftProvider`,
+`AnalyticsProvider`, `SecretProvider`, a state/filesystem boundary where
+workflow composition needs it, and an injectable clock only where
+deterministic time testing requires it. Existing narrow writer/verifier
+protocols remain authoritative; no abstract interface is added merely for
+aesthetic layering.
+
+Application/runtime modules must not import OpenClaw internals, shell out to
+`openclaw`, derive business identity from an OpenClaw-specific model, embed
+cron syntax or provider details, or require OpenClaw-specific environment or
+layout as their core contract. Such details belong in edge adapters and job
+payloads outside workflow implementation. A Telegram adapter may use the
+OpenClaw CLI internally, but `StoryWorkflow`/`BreakingWorkflow` only see
+`ReviewDelivery`.
+
+The versioned scheduler-independent contract is
+`nullone.scheduler-invocation.v1`: stable `workflow_id`, source namespace,
+opaque source `external_occurrence_id`, timezone-aware `scheduled_for` and
+`triggered_at`, plus a deterministic NullOne `occurrence_id`. The latter is
+derived from stable occurrence fields and excludes `triggered_at`, so retry
+observation time cannot mint a new logical run. #27 then derives its stable
+run ID from the normalized workflow/occurrence pair. An OpenClaw, systemd,
+Temporal or cloud adapter can map into the same contract; application/domain
+logic never requires an OpenClaw UUID.
+
+Full proposed contract: `docs/architecture/nullone-application-runtime.md`.
+Issue #65 owns its review. #59, #61, #62 and #63 must implement against it;
+#60 remains scheduler-independent and can proceed in parallel. Replacing
+OpenClaw later must not require rewriting core workflow/domain logic. The
+contract adds no publication capability and does not change #27–#36.
+
+**Relationship to #13.** #65 is the current M0 minimum: only the
+Domain/Core, NullOne Application Runtime, and the adapters/ports #59/#61/#62/#63
+need today. #13 (M3) is a separate, later, generalized Core/product capability
+contract — model/runtime capability taxonomy, connector versioning,
+scopes/permissions, idempotency evidence, provider reconciliation. #13
+extends/generalizes the accepted #65 boundary; it does not redefine,
+contradict, or block it, and #59/#61/#62/#63 implement against #65's current
+M0 boundary, not #13's speculative M3 scope. Any change to #65's boundary that
+a future #13 implementation requires needs an explicit reviewed
+migration/ADR. No universal provider/plugin abstraction is introduced in #65
+merely to anticipate #13.
+
 ### Verified #34 completion — 2026-09-06
 
 Issue #34 `Define breaking severity, deduplication and immediate-draft
@@ -736,9 +900,9 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 - Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
 - `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
 
-Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so all required reviewed repo-level M0 changes are now ready in Git. #37 is the sole remaining milestone issue and remains the final, explicit controlled production deployment/preflight/live-validation boundary; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The later 2026-09-07 #37 read-only preflight identified previously uncaptured deployable-integration prerequisites, now tracked by #59–#63, and #65 makes the required NullOne-owned application/runtime boundary explicit; #37 remains open and deployment remains prohibited until those dependencies are reviewed/merged and preflight is rerun. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order (updated 2026-09-07 after #36 merged): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), #35 (breaking identity/dedup), and #36 (breaking draft routing) are all accepted and merged — see their verified-completion sections above. There is no remaining pre-#37 M0 engineering issue. The remaining sequence is `#37` only. #37 remains the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27–#36 work as applicable and observes genuine scheduled behavior before controlled production activation is considered complete. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order (updated after the 2026-09-07 #37 preflight and consistency-hardening pass): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), #35 (breaking identity/dedup), and #36 (breaking draft routing) are all accepted and merged — see their verified-completion sections above. Deployable end-to-end M0 integration is incomplete. The current sequence is: review #65 while #60 and #66 proceed; implement #59/#61 after #65, #62 after #65 + #60, and #63 after #62; rerun the strictly read-only #37 preflight only after #65/#59/#61/#62/#63/#66 are accepted; only on `READY_FOR_CONTROLLED_DEPLOYMENT`, deploy under #37; then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -809,9 +973,9 @@ No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
 
-### Repo-level M0 engineering complete
+### #27–#36 component-level repo engineering complete
 
-The required reviewed engineering sequence is complete in Git:
+The accepted component-level engineering sequence is complete in Git:
 - #27 domain outcomes — DONE;
 - #28 Morning Editorial runtime hardening — DONE;
 - #29 Daily Analytics runtime — DONE;
@@ -826,8 +990,16 @@ The required reviewed engineering sequence is complete in Git:
 #4 and #5 are also complete. #36 merged via PR #57 as
 `36f358a539fedf90e0c5cffda9b503b87594e3f1`; the earlier issue/merge SHAs
 remain recorded in their verified-completion sections. No production
-deployment has been performed for #27–#36. Repo-level engineering
-complete does not mean production activation complete.
+deployment has been performed for #27–#36. Component-level repo
+engineering complete does not mean deployable end-to-end integration or
+production activation is complete.
+
+The #37 preflight discovered integration prerequisites between those
+accepted components and the live scheduler/runtime. They are tracked by
+#59–#63, with the missing NullOne-owned application/runtime contract tracked
+by #65, and the narrow reachable-legacy-instruction subset of #6 tracked by
+#66. This is not a resurrection of #27–#36; those issues remain legitimately
+CLOSED/COMPLETED.
 
 The #3 read-only reliability proof evaluation is complete at repo/report
 level with a final verdict of FAIL — see
@@ -835,11 +1007,20 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Next and only remaining M0 step
+### Current M0 execution order
 
-`#37 — controlled deployment / preflight / live validation`
+1. Review #65 while #60 and #66 proceed independently.
+2. Implement #59 and #61 after #65; implement #62 after #65 + #60; then
+   implement #63 after #62, all through normal Git/PR review.
+3. Rerun the strictly read-only #37 preflight only after #65, #59, #61, #62,
+   #63 and #66 are accepted.
+4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
+   controlled deployment under #37.
+5. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
 
-#37 remains OPEN and will separately:
+#37 remains OPEN under its unchanged acceptance criteria. Once its
+integration dependencies are merged and preflight permits deployment, it
+will separately:
 - select exact reviewed commit(s);
 - perform preflight;
 - deploy deliberately;
