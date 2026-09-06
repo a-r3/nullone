@@ -40,11 +40,13 @@ Operational workstreams remain ahead of large migration/product work:
 Component-level repo engineering for #27–#36 is complete. Deployable
 end-to-end M0 integration is not complete.
 
-1. Close #59–#63 through normal Git/PR review.
-2. Rerun the strictly read-only #37 preflight.
-3. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
+1. Review and accept #65 while #60 proceeds independently.
+2. Implement #59 and #61 after #65; implement #62 after #65 + #60; then
+   implement #63 after #62. Each dependency uses normal Git/PR review.
+3. Rerun the strictly read-only #37 preflight.
+4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
    controlled deployment under #37.
-4. Observe natural production behavior; do not manufacture live proof.
+5. Observe natural production behavior; do not manufacture live proof.
 
 Existing M1/M2/M3 remain intact.
 
@@ -61,7 +63,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational component issues #27, #28, #29, #30, #31, #32, #33, #34, #35 and #36 are CLOSED/COMPLETED; integration dependencies #59–#63 and parent deployment issue #37 remain OPEN
+- operational component issues #27, #28, #29, #30, #31, #32, #33, #34, #35 and #36 are CLOSED/COMPLETED; application-runtime architecture issue #65, integration dependencies #59–#63 and parent deployment issue #37 remain OPEN
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -80,12 +82,13 @@ Relevant issues:
 - #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
-- #37 controlled production activation/validation — OPEN; its 2026-09-07 read-only preflight returned `BLOCKED`, so deployment remains prohibited while #59–#63 are open
-- #59 scheduler-facing outcome orchestration — OPEN; binds exact Morning/Daily scheduler occurrences to the existing runtime, persisted #27 outcome and #30 domain notifier
+- #37 controlled production activation/validation — OPEN; its 2026-09-07 read-only preflight returned `BLOCKED`, so deployment remains prohibited while #65 and #59–#63 are open
+- #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only
 - #60 cadence-state backward compatibility — OPEN; makes historical publish-ledger rows safe for #32 without ad hoc production edits or guessed formats
-- #61 secure scheduled analytics credential injection — OPEN; defines the non-committed `ZERNIO_ANALYTICS_API_TOKEN` path for the actual OpenClaw/systemd runtime
-- #62 Story orchestration and shared Telegram preview delivery — OPEN; depends on #60 and owns the reviewed cadence-to-Story runner, shared preview sender and scheduled-session Zernio draft-path proof
-- #63 breaking-routing orchestration — OPEN; depends on #62 and owns the reviewed Radar-to-#35-to-#36 production runner
+- #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
+- #62 `StoryWorkflow` and shared review-delivery adapter — OPEN; depends on #65 + #60 and owns the NullOne cadence-to-Story application workflow, `DraftProvider`, reusable `ReviewDelivery`, and scheduled-path Zernio proof
+- #63 `BreakingWorkflow` orchestration — OPEN; depends on #65 + #62 (and indirectly #60) and owns the NullOne Radar-candidate-to-#35-to-#36 application workflow; OpenClaw Breaking Radar is only the current trigger adapter
+- #65 NullOne Application Runtime architecture — OPEN; contract-first M0 decision establishing NullOne workflow ownership and OpenClaw/provider integrations as replaceable adapters; blocks #59, #61, #62 and #63, but not #60
 
 ### Verified #5 completion — 2026-09-05 18:32–18:34
 PR #39 `Add isolated behavioral regression tests to CI` was verified with local authenticated `gh` and, after the repository became public, independently visible through the GitHub connector.
@@ -522,24 +525,83 @@ Confirmed deployability blockers:
 8. exact safe cron/job payloads cannot be authored until the missing
    orchestration and occurrence-ID boundaries exist.
 
-Dependencies created from this evidence:
+Dependencies created from this evidence and architecture review:
+- #65 NullOne Application Runtime and replaceable-adapter contract;
 - #59 scheduled outcome orchestration;
 - #60 cadence-state backward compatibility;
 - #61 secure #29 analytics credential/runtime path;
 - #62 Story runtime orchestration plus shared Telegram preview sender;
 - #63 breaking runtime orchestration.
 
-#59, #60 and #61 can proceed independently. #62 depends on #60. #63
-depends on #62 and indirectly on #60. #37 depends on all five. A separate
-generic scheduled-session Zernio issue was not created: #29's direct
-GET-only adapter deliberately removes that dependency for Daily Analytics,
-while #62 must prove or replace the MCP-backed review-draft path used by
-Story and inherited by #63.
+#65 and #60 can begin independently. #59 and #61 depend on #65. #62
+depends on #65 + #60. #63 depends on #65 + #62 and indirectly on #60.
+#37 depends on #65 and all five integration dependencies. A separate generic
+scheduled-session Zernio issue was not created: #29's direct GET-only adapter
+deliberately removes that dependency for Daily Analytics, while #62 must
+prove or replace the MCP-backed review-draft path used by Story and inherited
+by #63.
 
 The sanitized evidence summary is
 `docs/deployment/37-preflight-2026-09-07.md`. #27–#36 remain complete at
 component/repository level; this preflight records previously uncaptured
 integration prerequisites and does not reopen them.
+
+### NullOne Application Runtime architecture — #65
+
+OpenClaw independence was already a product/architecture intent, and the
+#27–#36 component designs reflected it through deterministic cores and
+injected dependencies. The missing first-class contract was the
+NullOne-owned application/orchestration layer that composes those components
+for a real run. The #37 preflight exposed that omission. It is an M0
+deployability requirement, not optional future cleanup.
+
+The governing invariant is:
+
+> NullOne owns workflow/application orchestration. OpenClaw is one
+> replaceable infrastructure adapter that triggers NullOne; it is not the
+> owner of NullOne business workflow semantics.
+
+The architecture has three dependency layers:
+- Domain/Core: #27–#36 run outcomes, cadence, Story, breaking identity,
+  routing/dispatch, verification and publication safety; no OpenClaw
+  dependency;
+- NullOne Application Runtime: `MorningWorkflow`, `AnalyticsWorkflow`,
+  `StoryWorkflow` and `BreakingWorkflow`; owns ordering and composes domain
+  components through ports;
+- adapters: OpenClaw scheduler, Zernio draft/analytics, Telegram review,
+  filesystem state and systemd/runtime secret implementations.
+
+Only current portability boundaries are introduced: normalized
+`SchedulerInvocation`, `ReviewDelivery`, `DraftProvider`,
+`AnalyticsProvider`, `SecretProvider`, a state/filesystem boundary where
+workflow composition needs it, and an injectable clock only where
+deterministic time testing requires it. Existing narrow writer/verifier
+protocols remain authoritative; no abstract interface is added merely for
+aesthetic layering.
+
+Application/runtime modules must not import OpenClaw internals, shell out to
+`openclaw`, derive business identity from an OpenClaw-specific model, embed
+cron syntax or provider details, or require OpenClaw-specific environment or
+layout as their core contract. Such details belong in edge adapters and job
+payloads outside workflow implementation. A Telegram adapter may use the
+OpenClaw CLI internally, but `StoryWorkflow`/`BreakingWorkflow` only see
+`ReviewDelivery`.
+
+The versioned scheduler-independent contract is
+`nullone.scheduler-invocation.v1`: stable `workflow_id`, source namespace,
+opaque source `external_occurrence_id`, timezone-aware `scheduled_for` and
+`triggered_at`, plus a deterministic NullOne `occurrence_id`. The latter is
+derived from stable occurrence fields and excludes `triggered_at`, so retry
+observation time cannot mint a new logical run. #27 then derives its stable
+run ID from the normalized workflow/occurrence pair. An OpenClaw, systemd,
+Temporal or cloud adapter can map into the same contract; application/domain
+logic never requires an OpenClaw UUID.
+
+Full proposed contract: `docs/architecture/nullone-application-runtime.md`.
+Issue #65 owns its review. #59, #61, #62 and #63 must implement against it;
+#60 remains scheduler-independent and can proceed in parallel. Replacing
+OpenClaw later must not require rewriting core workflow/domain logic. The
+contract adds no publication capability and does not change #27–#36.
 
 ### Verified #34 completion — 2026-09-06
 
@@ -808,9 +870,9 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 - Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
 - `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
 
-Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The later 2026-09-07 #37 read-only preflight identified previously uncaptured deployable-integration prerequisites, now tracked by #59–#63; #37 remains open and deployment remains prohibited until those dependencies are reviewed/merged and preflight is rerun. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The later 2026-09-07 #37 read-only preflight identified previously uncaptured deployable-integration prerequisites, now tracked by #59–#63, and #65 makes the required NullOne-owned application/runtime boundary explicit; #37 remains open and deployment remains prohibited until those dependencies are reviewed/merged and preflight is rerun. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order (updated after the 2026-09-07 #37 preflight): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), #35 (breaking identity/dedup), and #36 (breaking draft routing) are all accepted and merged — see their verified-completion sections above. Deployable end-to-end M0 integration is incomplete. The current sequence is: close #59–#63 through normal review; rerun the strictly read-only #37 preflight; only on `READY_FOR_CONTROLLED_DEPLOYMENT`, deploy under #37; then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order (updated after the 2026-09-07 #37 preflight): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), #35 (breaking identity/dedup), and #36 (breaking draft routing) are all accepted and merged — see their verified-completion sections above. Deployable end-to-end M0 integration is incomplete. The current sequence is: review #65 while #60 proceeds; implement #59/#61 after #65, #62 after #65 + #60, and #63 after #62; rerun the strictly read-only #37 preflight; only on `READY_FOR_CONTROLLED_DEPLOYMENT`, deploy under #37; then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -904,7 +966,8 @@ production activation is complete.
 
 The #37 preflight discovered integration prerequisites between those
 accepted components and the live scheduler/runtime. They are tracked by
-#59–#63. This is not a resurrection of #27–#36; those issues remain
+#59–#63, with the missing NullOne-owned application/runtime contract tracked
+by #65. This is not a resurrection of #27–#36; those issues remain
 legitimately CLOSED/COMPLETED.
 
 The #3 read-only reliability proof evaluation is complete at repo/report
@@ -915,11 +978,13 @@ rewrite historical production evidence or authorize deployment.
 
 ### Current M0 execution order
 
-1. Close #59–#63 through normal Git/PR review.
-2. Rerun the strictly read-only #37 preflight.
-3. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
+1. Review #65 while #60 proceeds independently.
+2. Implement #59 and #61 after #65; implement #62 after #65 + #60; then
+   implement #63 after #62, all through normal Git/PR review.
+3. Rerun the strictly read-only #37 preflight.
+4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
    controlled deployment under #37.
-4. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
+5. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
 
 #37 remains OPEN under its unchanged acceptance criteria. Once its
 integration dependencies are merged and preflight permits deployment, it
