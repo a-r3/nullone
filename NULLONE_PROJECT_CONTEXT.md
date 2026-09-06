@@ -55,7 +55,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #4 and #5 are now CLOSED, while #3 and the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational issues #27 and #28 are CLOSED; #29–#37 remain open
+- operational issues #27, #28 and #29 are CLOSED; #30–#37 remain open
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -66,7 +66,7 @@ Relevant issues:
 - #5 offline behavioral regression tests — CLOSED; PR #39 squash-merged as `72e5c31e5bb3db922f30a2f8ea91c5b2d7ef8b41`
 - #27 explicit domain run outcomes/health — CLOSED; PR #40 squash-merged as `c70047a9e3123d19b46968715c3fc294a51d69d4`
 - #28 Morning Editorial network failure behavior — CLOSED; PR #42 squash-merged as `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`
-- #29 Daily Analytics Zernio access/runtime bootstrap — repo-level implementation complete, PR open (not yet merged, production NOT deployed); #30 is now the next main engineering issue
+- #29 Daily Analytics Zernio access/runtime bootstrap — CLOSED; PR #44 squash-merged as `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; production NOT deployed; #30 is now the next main engineering issue
 - #30 Telegram failure alerts
 - #31–#33 cadence/Story
 - #34–#36 breaking
@@ -145,7 +145,7 @@ Verified merge state:
 - issue #28: CLOSED / completed
 - production deployment of #28: NOT PERFORMED
 - reliability proof #3: UNTOUCHED; nominal end remains 2026-09-06 03:47 Asia/Baku
-- #29 Daily Analytics Zernio access/runtime bootstrap — repo-level implementation now complete, PR open pending human review (see below); production deployment NOT performed
+- #29 Daily Analytics Zernio access/runtime bootstrap was the next main engineering issue at this point in the timeline; see "Verified #29 completion" below for its final merged state
 
 Added:
 - `workspace/social/ops/scripts/nullone_editorial_runtime.py`: `run_morning_editorial()` classifies provider failures via `nullone_run_outcome`, retries only the confirmed transient `PROVIDER_UNREACHABLE` (ENOTFOUND/timeout/reachability) pattern up to the configured bounded attempts with deterministic backoff, and checks the required editorial-board artifact before every provider call so a retry or re-entry for the same occurrence can never repeat the board write or any state mutation. Every attempt for one scheduled occurrence shares the same `run_id`; once that run_id has a persisted terminal result the provider is never called again for it. Non-reachability errors fail immediately as `EDITORIAL_PROVIDER_ERROR` without retry.
@@ -154,18 +154,32 @@ Added:
 
 This implementation does not touch `nullone-publish-bridge.py`, `nullone-publisher-run.py`, or `nullone-publish-notify.py`; publication `UNKNOWN`/no-auto-retry invariants are unchanged, and no retry behavior from this issue applies to publication. No publication behavior was changed.
 
-### #29 repo-level implementation — 2026-09-06 (production deployment NOT performed)
+### Verified #29 completion — 2026-09-06
 
-Issue #29 `Restore Daily Analytics through a working Zernio analytics access path` has a repo-level implementation on branch `feature/n29-daily-analytics-zernio-access`, pending human PR review. **No production deployment and no real authorized scheduled validation were performed as part of this change.**
+Issue #29 `Restore Daily Analytics through a working Zernio analytics access path` is complete in the development repository.
+
+Verified merge state:
+- PR #44: MERGED
+- final PR head before merge: `ccf3ddea5373df6313b98547a043aec767bfa285`
+- squash merge commit: `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`
+- issue #29: CLOSED / completed
+- production deployment of #29: NOT PERFORMED
+- real authorized scheduled Zernio validation: NOT PERFORMED
+- reliability proof #3: UNTOUCHED
 
 Added:
-- `workspace/social/ops/scripts/nullone_zernio_analytics_adapter.py`: the only module aware of Zernio-specific HTTPS paths, response shapes and credentials. `ZernioReadOnlyAnalyticsConnector` exposes exactly four GET-only methods (`get_account`, `get_follower_history`, `get_account_insights`, `get_post_analytics`) mapped to Zernio's documented read-only analytics endpoints, and never calls anything on its transport but `.get(...)`. There is no create/update/delete/publish/draft/schedule/message/comment method anywhere in this module. This deliberately bypasses generic MCP tool dispatch — the confirmed #29 root cause is a scheduled-session `bundle-mcp` bootstrap/runtime-availability failure, not a Zernio outage or allowlist defect — so analytics no longer depends on that bootstrap path. The credential is read from `ZERNIO_ANALYTICS_API_TOKEN` at call time and is never embedded in code, logs, or reason text; the real HTTPS transport (`UrllibAnalyticsTransport`/`build_default_transport`) is not exercised by any test and is not wired into a scheduled runner.
-- `workspace/social/ops/scripts/nullone_analytics_runtime.py`: connector-agnostic domain runtime (`run_daily_analytics`) reusing the #27 workflow/domain contract with `workflow_id="daily-analytics"` and an occurrence-scoped run_id. Connector bootstrap/auth failure becomes `BLOCKED` (`ZERNIO_ANALYTICS_UNAVAILABLE` / `ZERNIO_ANALYTICS_UNAUTHORIZED`), a malformed/partial response becomes `FAILED` (`ANALYTICS_RESPONSE_INVALID`) with no partial artifacts, a valid but empty response is `SUCCEEDED` with `empty_success="NO_DATA"`, and a valid response writes `social/analytics/raw/<date>.md` and `social/analytics/reports/<date>.md` atomically only after all four responses validate, then reports `SUCCEEDED` with those as required artifacts. `scheduler_status="succeeded"` is reported even on `BLOCKED`, reproducing (and now correctly resolving the domain side of) the exact Sep 4-5 symptom where scheduler `ok/succeeded` masked a blocked business result.
+- `workspace/social/ops/scripts/nullone_zernio_analytics_adapter.py`: the only module aware of Zernio-specific HTTPS paths, response envelopes and credentials. `ZernioReadOnlyAnalyticsConnector` exposes exactly four GET-only methods (`get_account`, `get_follower_history`, `get_account_insights`, `get_post_analytics`) mapped to Zernio's documented read-only analytics endpoints, and never calls anything on its transport but `.get(...)` — there is no create/update/delete/publish/draft/schedule/message/comment capability anywhere in this module. This deliberately bypasses generic MCP tool dispatch — the confirmed #29 root cause is a scheduled-session `bundle-mcp` bootstrap/runtime-availability failure, not a Zernio outage or allowlist defect — so analytics no longer depends on that bootstrap path. The credential is read from `ZERNIO_ANALYTICS_API_TOKEN` at call time and is never embedded in code, logs, or reason text; no credential is committed. The real HTTPS transport (`UrllibAnalyticsTransport`/`build_default_transport`) is not exercised by any test and is not wired into a scheduled runner.
+
+  Endpoint contract, verified against Zernio's official OpenAPI spec (`docs.zernio.com/api/openapi`, `info.version: "1.0.4"`): base `https://zernio.com/api/v1`; `GET /accounts` (account selected by matching `_id` in the returned list — there is no documented `GET /accounts/{id}`); `GET /analytics/instagram/account-insights`; `GET /analytics/instagram/follower-history`; `GET /analytics` (post analytics, scoped by `accountId`+`platform`). A metric documented as unavailable is preserved as unavailable (never coerced to zero).
+
+  Domain classification: `hasAnalyticsAccess=false` on `GET /accounts` (checked before any analytics endpoint is called) or a documented HTTP `402` (`analytics_addon_required`) on any analytics endpoint → `BLOCKED` / `ZERNIO_ANALYTICS_ADDON_REQUIRED`; `401`/`403` → `BLOCKED` / `ZERNIO_ANALYTICS_UNAUTHORIZED`; dependency/unreachable/`5xx` → `BLOCKED` / `ZERNIO_ANALYTICS_UNAVAILABLE`; malformed `400`/`404`/invalid response → `FAILED` / `ANALYTICS_RESPONSE_INVALID`; valid no-data → `SUCCEEDED` / `NO_DATA`; artifact commit failure → `FAILED` / `ANALYTICS_ARTIFACT_COMMIT_FAILED`.
+
+- `workspace/social/ops/scripts/nullone_analytics_runtime.py`: connector-agnostic domain runtime (`run_daily_analytics`) reusing the #27 workflow/domain contract with `workflow_id="daily-analytics"` and an occurrence-scoped run_id. `scheduler_status="succeeded"` is reported even on `BLOCKED`, reproducing (and now correctly resolving the domain side of) the exact Sep 4-5 symptom where scheduler `ok/succeeded` masked a blocked business result. The raw+report artifact pair is committed via staging both rendered/validated contents as temp files, then swapping each into place with an ordered `os.replace`; if a later swap in the same call fails, every target already committed in that call is rolled back to its exact pre-call state (restored from an in-memory backup, or removed if it did not exist before). This is call-scoped atomicity via staging + ordered swap + rollback-on-failure — it is **not** a filesystem transaction and does **not** claim crash/power-loss atomicity (it does not protect against the process being killed mid-`os.replace`).
 - `workspace/social/ops/scripts/nullone-daily-analytics-run.py`: thin CLI wrapper (`execute`, `self-test`); its default connector-building path is untested/unwired to production, matching the pattern already used for Morning Editorial in #28.
-- `tests/test_daily_analytics.py`: 10 offline tests covering fake success producing both artifacts, valid `NO_DATA` semantics, connector/bootstrap unavailability with no artifacts, unauthorized credential with no secret leakage (including a transport double that holds the fake credential internally and is never read back by the connector), a direct check that a missing `ZERNIO_ANALYTICS_API_TOKEN` blocks the default transport builder, malformed/partial payload with no partial artifacts, a static+dynamic capability-negative proof that the connector exposes only the four read-only `get_*` methods and never issues a non-GET call, a later healthy occurrence recovering after an earlier blocked one with independent run IDs, and a scheduler-success/domain-BLOCKED case whose CLI wrapper still exits non-zero.
+- `tests/test_daily_analytics.py`: 25 offline tests covering the exact documented paths/query parameters, response-envelope parsing (including the omitted-metric-is-unavailable-not-zero case), a static source-scan proving the earlier invented `/v2/...` paths are absent, account selection from the accounts list (and the not-found case), `hasAnalyticsAccess=false` blocking before any analytics call, documented `402` → `BLOCKED` (never `FAILED`/`SUCCEEDED`, no response-body leak), `400`/`404` explicitly remaining `FAILED`, fake success producing both artifacts, valid `NO_DATA` semantics, connector/bootstrap unavailability with no artifacts, unauthorized credential with no secret leakage, a missing-credential guard on the default transport builder, malformed/partial payloads with no partial artifacts, a static+dynamic capability-negative proof that the connector exposes only the four read-only `get_*` methods and never issues a non-GET call, a later healthy occurrence recovering after an earlier blocked one, a scheduler-success/domain-BLOCKED case whose CLI wrapper still exits non-zero, and two artifact-commit-failure/rollback tests (no partial pair left behind; a pre-existing valid pair is preserved) plus a narrow unit-level test of the commit helper itself.
 
 Validation:
-- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS`; full offline suite passed, including the 10 new Daily Analytics tests and the existing run-outcome, behavioral-regression, Morning Editorial, and self-test suites
+- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS`; full offline suite passed, including all 25 Daily Analytics tests and the existing run-outcome, behavioral-regression, Morning Editorial, and self-test suites
 - `git diff --check` → clean
 - no real Zernio/MCP/network/Telegram/Instagram/publication calls occur in any test; all connector/transport dependencies are fake doubles
 - this change does not touch `nullone-publish-bridge.py`, `nullone-publisher-run.py`, or `nullone-publish-notify.py`; publication `UNKNOWN`/no-auto-retry invariants are unchanged
@@ -183,7 +197,7 @@ Validation:
 ## Reliability proof
 Baseline: 2026-09-04 03:47 Asia/Baku
 Nominal end: 2026-09-06 03:47 Asia/Baku
-Proof remains `INCOMPLETE` until the time window closes and exercised evidence is evaluated.
+The nominal proof window has now closed. The proof verdict is pending the separate read-only evidence evaluation required by issue #3; this context does not assign a PASS/FAIL/INCOMPLETE verdict. Issue #3 remains OPEN, and that evaluation is now the immediate separate operational task. No synthetic production cycle or state mutation is part of closing this window.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -253,11 +267,11 @@ Direction:
 No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
-#4, #5, #27 and #28 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`). No production deployment has been performed for #27 or #28. #29's repo-level implementation is complete on `feature/n29-daily-analytics-zernio-access` with a PR open against `main` (not yet merged); production deployment of #29 is NOT performed.
+#4, #5, #27, #28 and #29 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`). No production deployment has been performed for #27, #28, or #29.
 
 Current order:
-1. keep #3 proof/evidence evaluation separate; do not mutate or synthetically contaminate proof state
-2. #29 PR awaits human merge review; #30 concise Telegram failure alerts consuming truthful domain health is the next main engineering issue to start
+1. the nominal proof window has closed; #3 proof/evidence evaluation is now the immediate separate operational task — do not mutate or synthetically contaminate proof state, and do not assign a verdict outside that evaluation
+2. #30 concise Telegram failure alerts consuming truthful domain health is the next main engineering implementation item
 3. #31/#34 decision work may proceed in parallel as planned
 4. later Story/breaking implementation
 5. #37 remains the separate controlled production activation/validation gate
