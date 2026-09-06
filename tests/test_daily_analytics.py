@@ -460,6 +460,121 @@ class DailyAnalyticsRuntimeTests(unittest.TestCase):
             self.assertEqual(result["reason_code"], "ZERNIO_ANALYTICS_UNAVAILABLE")
             self.assertFalse((root / "social/analytics").exists())
 
+    def test_has_analytics_access_false_is_blocked_before_any_analytics_call(self):
+        responses = _full_success_responses()
+        responses[ACCOUNTS_PATH] = (
+            200,
+            {
+                "accounts": [
+                    {
+                        "_id": ACCOUNT_ID,
+                        "platform": "instagram",
+                        "username": "nullone.az",
+                        "isActive": True,
+                    }
+                ],
+                "hasAnalyticsAccess": False,
+            },
+        )
+        connector, transport = _connector(responses)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            result = run_daily_analytics(
+                occurrence_id="2026-09-05T03:20:00+04:00",
+                analytics_date="2026-09-05",
+                build_connector=lambda: connector,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["scheduler_status"], "succeeded")
+            self.assertEqual(result["domain_outcome"], "BLOCKED")
+            self.assertEqual(result["health"], "UNHEALTHY")
+            self.assertEqual(
+                result["reason_code"], "ZERNIO_ANALYTICS_ADDON_REQUIRED"
+            )
+            self.assertFalse((root / "social/analytics").exists())
+
+            # Stopped before any analytics endpoint was even called.
+            called_paths = [path for path, _params in transport.calls]
+            self.assertEqual(called_paths, [ACCOUNTS_PATH])
+
+    def test_documented_402_analytics_addon_required_is_blocked(self):
+        responses = _full_success_responses()
+        responses[INSIGHTS_PATH] = (
+            402,
+            {"error": "Analytics add-on required", "code": "analytics_addon_required"},
+        )
+        connector, transport = _connector(responses)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            result = run_daily_analytics(
+                occurrence_id="2026-09-05T03:20:00+04:00",
+                analytics_date="2026-09-05",
+                build_connector=lambda: connector,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["domain_outcome"], "BLOCKED")
+            self.assertEqual(result["health"], "UNHEALTHY")
+            self.assertEqual(
+                result["reason_code"], "ZERNIO_ANALYTICS_ADDON_REQUIRED"
+            )
+            self.assertNotEqual(result["domain_outcome"], "FAILED")
+            self.assertNotEqual(result["domain_outcome"], "SUCCEEDED")
+            self.assertFalse((root / "social/analytics").exists())
+            # Never leaks the raw response body into the persisted result.
+            serialized = json.dumps(result)
+            self.assertNotIn("analytics_addon_required", serialized)
+
+    def test_400_malformed_request_remains_failed_not_blocked(self):
+        responses = _full_success_responses()
+        responses[INSIGHTS_PATH] = (
+            400,
+            {"error": "Invalid metrics: bogus_metric"},
+        )
+        connector, _ = _connector(responses)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            result = run_daily_analytics(
+                occurrence_id="2026-09-05T03:20:00+04:00",
+                analytics_date="2026-09-05",
+                build_connector=lambda: connector,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "ANALYTICS_RESPONSE_INVALID")
+            self.assertFalse((root / "social/analytics").exists())
+
+    def test_404_account_not_found_remains_failed_not_blocked(self):
+        responses = _full_success_responses()
+        responses[INSIGHTS_PATH] = (404, {"error": "Account not found"})
+        connector, _ = _connector(responses)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            result = run_daily_analytics(
+                occurrence_id="2026-09-05T03:20:00+04:00",
+                analytics_date="2026-09-05",
+                build_connector=lambda: connector,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "ANALYTICS_RESPONSE_INVALID")
+            self.assertFalse((root / "social/analytics").exists())
+
     def test_missing_or_unauthorized_credential_blocked_without_secret_leak(self):
         transport = SecretLeakGuardTransport(FAKE_SECRET)
         connector = ZernioReadOnlyAnalyticsConnector(transport, account_id=ACCOUNT_ID)

@@ -37,6 +37,16 @@ reported as a zero." This adapter preserves that: a requested metric
 absent from the response is surfaced as `None` (unavailable), never
 coerced to `0`.
 
+Analytics-add-on/capability unavailability is also documented and
+distinct from a malformed request: `GET /accounts` carries a top-level
+`hasAnalyticsAccess` flag, and an analytics endpoint can return HTTP
+`402` with `code: analytics_addon_required`. Both are surfaced here as
+`AnalyticsCapabilityUnavailableError` (a `ConnectorUnavailableError`
+subclass), so they become domain BLOCKED like any other capability
+unavailability — never FAILED, and never SUCCEEDED. A malformed
+request (400) or an unknown account (404) is unaffected and remains an
+`AnalyticsResponseError` (domain FAILED).
+
 By construction this module exposes GET-only, read-only analytics
 capability:
 - there is no method that can create, update, delete, publish, draft,
@@ -108,6 +118,19 @@ class ConnectorUnavailableError(AnalyticsAdapterError):
     Reproduces the confirmed #29 symptom class (e.g. a `bundle-mcp`
     style startup failure, unreachable host, or 5xx). Must always
     surface as domain BLOCKED, never SUCCEEDED.
+    """
+
+
+class AnalyticsCapabilityUnavailableError(ConnectorUnavailableError):
+    """The Zernio Analytics add-on is not available for this account/plan.
+
+    Documented signals: the `GET /accounts` response's top-level
+    `hasAnalyticsAccess: false`, or an analytics endpoint's documented
+    HTTP 402 (`code: analytics_addon_required`). This is a capability
+    unavailability, not a malformed request, so it is still a
+    `ConnectorUnavailableError` subclass and must surface as domain
+    BLOCKED, never FAILED or SUCCEEDED. The reason text is always a
+    fixed, generic string — never the response body or credential.
     """
 
 
@@ -317,6 +340,16 @@ class ZernioReadOnlyAnalyticsConnector:
                 "Zernio analytics credential is missing or was rejected."
             )
 
+        if status == 402:
+            # Documented: "Analytics access required. Legacy plans need
+            # the Analytics add-on ... code: analytics_addon_required".
+            # A missing add-on is a capability unavailability, not a
+            # malformed request: BLOCKED, never FAILED.
+            raise AnalyticsCapabilityUnavailableError(
+                "Zernio analytics add-on is required but not enabled "
+                "for this account."
+            )
+
         if status >= 500 or status == 0:
             raise ConnectorUnavailableError(
                 f"Zernio analytics endpoint returned status {status}"
@@ -338,6 +371,16 @@ class ZernioReadOnlyAnalyticsConnector:
         if not isinstance(body, dict) or not isinstance(body.get("accounts"), list):
             raise AnalyticsResponseError(
                 "accounts response was not a valid AccountsListResponse"
+            )
+
+        # Documented top-level capability gate: stop before any
+        # analytics endpoint is called at all when the plan does not
+        # have analytics access, rather than letting each analytics
+        # call fail separately.
+        if body.get("hasAnalyticsAccess") is False:
+            raise AnalyticsCapabilityUnavailableError(
+                "Zernio analytics add-on is required but not enabled "
+                "for this account."
             )
 
         for account in body["accounts"]:

@@ -34,6 +34,7 @@ from typing import Any, Callable
 from nullone_bridge_common import WORKSPACE
 from nullone_run_outcome import assess_run, emit_result_once, make_run_id, result_path
 from nullone_zernio_analytics_adapter import (
+    AnalyticsCapabilityUnavailableError,
     AnalyticsResponseError,
     ConnectorUnauthorizedError,
     ConnectorUnavailableError,
@@ -376,6 +377,17 @@ def run_daily_analytics(
             return _blocked(
                 "ZERNIO_ANALYTICS_UNAUTHORIZED",
                 "Zernio analytics credential is missing or was rejected.",
+            )
+        except AnalyticsCapabilityUnavailableError:
+            # Must be caught before the parent ConnectorUnavailableError
+            # clause below: documented `hasAnalyticsAccess: false` or
+            # HTTP 402 (analytics_addon_required) is a capability
+            # unavailability, not a bootstrap failure or a malformed
+            # request — still BLOCKED, with a more specific reason.
+            return _blocked(
+                "ZERNIO_ANALYTICS_ADDON_REQUIRED",
+                "Zernio analytics add-on is required but not enabled "
+                "for this account.",
             )
         except ConnectorUnavailableError:
             return _blocked(
