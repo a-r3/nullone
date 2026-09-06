@@ -2,10 +2,40 @@
 """Read-only Zernio analytics adapter (issue #29).
 
 This module is the ONLY place that knows about Zernio-specific HTTPS
-paths, response shapes and credentials. `nullone_analytics_runtime`
+paths, response envelopes and credentials. `nullone_analytics_runtime`
 depends only on the small connector this module exposes, so a future
 connector replacement (see issue #13) does not require changing domain
 outcome semantics.
+
+Endpoint contract confirmed 2026-09-06 against Zernio's official
+OpenAPI specification (docs.zernio.com/api/openapi, `openapi: 3.1.0`,
+`info.version: "1.0.4"`):
+
+- base URL: `https://zernio.com/api/v1`
+- `GET /accounts` (operationId `listAccounts`) -> `AccountsListResponse`
+  `{accounts: [{_id, platform, profileId, username, displayName,
+  profileUrl, isActive}], hasAnalyticsAccess}`. There is no documented
+  `GET /accounts/{id}`; the configured account is selected by matching
+  `_id` inside this list.
+- `GET /analytics/instagram/account-insights` (operationId
+  `getInstagramAccountInsights`), required query `accountId`, optional
+  `metrics` (comma-separated; we pass the full documented Instagram
+  metric set) -> `InstagramAccountInsightsResponse`.
+- `GET /analytics/instagram/follower-history` (operationId
+  `getInstagramFollowerHistory`), required query `accountId`, same
+  `InstagramAccountInsightsResponse` envelope ("Response envelope
+  matches /v1/analytics/instagram/account-insights").
+- `GET /analytics` (operationId `getAnalytics`), no `postId` ->
+  `AnalyticsListResponse` `{overview, posts: [...], pagination,
+  accounts, hasAnalyticsAccess}`, scoped here with `accountId` and
+  `platform=instagram`.
+
+`InstagramAccountInsightsResponse.metrics` is documented as: "A metric
+that could not be served is absent from this object and listed in
+`unavailableMetrics` instead, so an unavailable metric is never
+reported as a zero." This adapter preserves that: a requested metric
+absent from the response is surfaced as `None` (unavailable), never
+coerced to `0`.
 
 By construction this module exposes GET-only, read-only analytics
 capability:
@@ -36,10 +66,36 @@ from urllib import request as urllib_request
 
 CREDENTIAL_ENV_VAR = "ZERNIO_ANALYTICS_API_TOKEN"
 
-# Base host for Zernio's documented read-only analytics HTTPS surface.
-# Overridable via ZERNIO_ANALYTICS_BASE_URL; this adapter never uses it
-# for anything but GET requests.
-DEFAULT_BASE_URL = "https://api.zernio.com"
+# Confirmed base URL (see module docstring). Overridable via
+# ZERNIO_ANALYTICS_BASE_URL; this adapter never uses it for anything
+# but GET requests.
+DEFAULT_BASE_URL = "https://zernio.com/api/v1"
+
+# Documented Instagram account-insights metric names (valid list from
+# the 400 response's validMetrics example), minus the ones this report
+# does not use (replies, reposts, follows_and_unfollows).
+INSTAGRAM_INSIGHT_METRICS: tuple[str, ...] = (
+    "reach",
+    "views",
+    "accounts_engaged",
+    "total_interactions",
+    "comments",
+    "likes",
+    "saves",
+    "shares",
+    "profile_links_taps",
+)
+
+# Documented follower-history metric names.
+FOLLOWER_HISTORY_METRICS: tuple[str, ...] = (
+    "follower_count",
+    "followers_gained",
+    "followers_lost",
+)
+
+# Page size for the post-analytics list call; well within the
+# documented 1-100 `limit` range.
+POST_ANALYTICS_PAGE_SIZE = 25
 
 
 class AnalyticsAdapterError(RuntimeError):
@@ -177,12 +233,61 @@ def _require_keys(
     return body
 
 
+def _validate_insights_envelope(body: Any, *, what: str) -> dict[str, Any]:
+    """Validate one `InstagramAccountInsightsResponse` envelope.
+
+    Deliberately does not require every requested metric to be
+    present: a metric Zernio could not serve is documented to be
+    OMITTED from `metrics` (and optionally listed in
+    `unavailableMetrics`) rather than reported as zero. Callers read
+    missing metrics as `None` via `metric_total`.
+    """
+
+    body = _require_keys(
+        body,
+        ("success", "accountId", "platform", "metricType", "metrics"),
+        what=what,
+    )
+
+    if body["success"] is not True:
+        raise AnalyticsResponseError(f"{what} response reported success=false")
+
+    metrics = body["metrics"]
+
+    if not isinstance(metrics, dict):
+        raise AnalyticsResponseError(f"{what} response 'metrics' was not an object")
+
+    for name, entry in metrics.items():
+        if not isinstance(entry, dict) or "total" not in entry:
+            raise AnalyticsResponseError(
+                f"{what} response metric '{name}' entry was malformed"
+            )
+
+    return body
+
+
+def metric_total(envelope: dict[str, Any], name: str) -> int | float | None:
+    """Read one metric's `total` from an insights envelope.
+
+    Returns `None` when the metric is absent (Zernio's documented
+    "unavailable" signal) rather than coercing it to `0`.
+    """
+
+    entry = envelope.get("metrics", {}).get(name)
+
+    if not isinstance(entry, dict):
+        return None
+
+    total = entry.get("total")
+    return total if isinstance(total, (int, float)) else None
+
+
 class ZernioReadOnlyAnalyticsConnector:
     """GET-only Zernio analytics connector.
 
     Every public method here maps to one documented read-only endpoint:
-    connected-account metadata, follower history, Instagram account
-    insights, and post analytics. There is intentionally no
+    connected-account listing, Instagram account insights, Instagram
+    follower history, and post analytics. There is intentionally no
     create/update/delete/publish/draft/schedule/message/comment method
     on this class, and it never calls anything on its transport other
     than `.get(...)`.
@@ -197,7 +302,7 @@ class ZernioReadOnlyAnalyticsConnector:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         try:
             status, body = self._transport.get(path, params=params)
         except AnalyticsAdapterError:
@@ -222,60 +327,80 @@ class ZernioReadOnlyAnalyticsConnector:
                 f"Zernio analytics endpoint returned unexpected status {status}"
             )
 
-        if not isinstance(body, dict):
-            raise AnalyticsResponseError(
-                f"Zernio analytics response for {path} was not a JSON object"
-            )
-
         return body
 
     def get_account(self) -> dict[str, Any]:
-        body = self._get(f"/v2/accounts/{self._account_id}")
-        return _require_keys(
-            body, ("account_id", "username", "status"), what="account"
+        """Select the configured account from the documented `GET /accounts`
+        list response. There is no documented `GET /accounts/{id}`."""
+
+        body = self._get("/accounts")
+
+        if not isinstance(body, dict) or not isinstance(body.get("accounts"), list):
+            raise AnalyticsResponseError(
+                "accounts response was not a valid AccountsListResponse"
+            )
+
+        for account in body["accounts"]:
+            if not isinstance(account, dict):
+                raise AnalyticsResponseError(
+                    "accounts response contained a non-object account entry"
+                )
+
+            if account.get("_id") == self._account_id:
+                return _require_keys(
+                    account,
+                    ("_id", "platform", "username", "isActive"),
+                    what="account",
+                )
+
+        raise AnalyticsResponseError(
+            f"configured account {self._account_id} was not present in the "
+            "accounts response"
         )
 
     def get_follower_history(self) -> dict[str, Any]:
-        body = self._get(f"/v2/accounts/{self._account_id}/follower-history")
-        body = _require_keys(
-            body, ("account_id", "history"), what="follower history"
+        body = self._get(
+            "/analytics/instagram/follower-history",
+            params={
+                "accountId": self._account_id,
+                "metrics": ",".join(FOLLOWER_HISTORY_METRICS),
+            },
         )
-
-        if not isinstance(body["history"], list):
-            raise AnalyticsResponseError(
-                "follower history 'history' field was not a list"
-            )
-
-        return body
+        return _validate_insights_envelope(body, what="follower history")
 
     def get_account_insights(self) -> dict[str, Any]:
-        body = self._get(f"/v2/accounts/{self._account_id}/insights")
-        return _require_keys(
-            body,
-            (
-                "account_id",
-                "reach",
-                "views",
-                "accounts_engaged",
-                "total_interactions",
-                "comments",
-                "likes",
-                "saves",
-                "shares",
-                "profile_links_taps",
-            ),
-            what="account insights",
+        body = self._get(
+            "/analytics/instagram/account-insights",
+            params={
+                "accountId": self._account_id,
+                "metrics": ",".join(INSTAGRAM_INSIGHT_METRICS),
+            },
         )
+        return _validate_insights_envelope(body, what="account insights")
 
     def get_post_analytics(self) -> dict[str, Any]:
-        body = self._get(f"/v2/accounts/{self._account_id}/posts/analytics")
-        body = _require_keys(
-            body, ("account_id", "posts"), what="post analytics"
+        body = self._get(
+            "/analytics",
+            params={
+                "accountId": self._account_id,
+                "platform": "instagram",
+                "sortBy": "date",
+                "order": "desc",
+                "limit": POST_ANALYTICS_PAGE_SIZE,
+            },
         )
 
-        if not isinstance(body["posts"], list):
+        if not isinstance(body, dict) or not isinstance(body.get("posts"), list):
             raise AnalyticsResponseError(
-                "post analytics 'posts' field was not a list"
+                "analytics response was not a valid AnalyticsListResponse"
             )
+
+        for post in body["posts"]:
+            if not isinstance(post, dict) or not isinstance(
+                post.get("analytics"), dict
+            ):
+                raise AnalyticsResponseError(
+                    "analytics response contained a malformed post entry"
+                )
 
         return body

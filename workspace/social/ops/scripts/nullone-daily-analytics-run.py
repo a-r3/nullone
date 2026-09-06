@@ -51,45 +51,64 @@ def execute(occurrence_id: str, analytics_date: str | None) -> int:
 
 
 def self_test() -> int:
+    def _insights_envelope(**metrics: int) -> dict:
+        return {
+            "success": True,
+            "accountId": CANONICAL_ACCOUNT_ID,
+            "platform": "instagram",
+            "metricType": "total_value",
+            "metrics": {
+                name: {"total": value} for name, value in metrics.items()
+            },
+        }
+
     class _FakeSuccessTransport:
         def get(self, path, *, params=None):
-            if path.endswith("/follower-history"):
+            if path == "/analytics/instagram/follower-history":
+                return 200, _insights_envelope(
+                    follower_count=100, followers_gained=5, followers_lost=1
+                )
+            if path == "/analytics/instagram/account-insights":
+                return 200, _insights_envelope(
+                    reach=500,
+                    views=900,
+                    accounts_engaged=80,
+                    total_interactions=42,
+                    comments=3,
+                    likes=30,
+                    saves=5,
+                    shares=4,
+                    profile_links_taps=2,
+                )
+            if path == "/analytics":
                 return 200, {
-                    "account_id": CANONICAL_ACCOUNT_ID,
-                    "history": [{"date": "2026-01-01", "followers": 100}],
-                }
-            if path.endswith("/insights"):
-                return 200, {
-                    "account_id": CANONICAL_ACCOUNT_ID,
-                    "reach": 500,
-                    "views": 900,
-                    "accounts_engaged": 80,
-                    "total_interactions": 42,
-                    "comments": 3,
-                    "likes": 30,
-                    "saves": 5,
-                    "shares": 4,
-                    "profile_links_taps": 2,
-                }
-            if path.endswith("/posts/analytics"):
-                return 200, {
-                    "account_id": CANONICAL_ACCOUNT_ID,
                     "posts": [
                         {
-                            "post_id": "p1",
-                            "reach": 400,
-                            "likes": 20,
-                            "comments": 2,
-                            "saves": 3,
-                            "shares": 1,
+                            "_id": "p1",
+                            "analytics": {
+                                "reach": 400,
+                                "likes": 20,
+                                "comments": 2,
+                                "saves": 3,
+                                "shares": 1,
+                            },
                         }
                     ],
+                    "pagination": {"page": 1, "limit": 25, "total": 1, "pages": 1},
                 }
-            return 200, {
-                "account_id": CANONICAL_ACCOUNT_ID,
-                "username": "nullone.az",
-                "status": "active",
-            }
+            if path == "/accounts":
+                return 200, {
+                    "accounts": [
+                        {
+                            "_id": CANONICAL_ACCOUNT_ID,
+                            "platform": "instagram",
+                            "username": "nullone.az",
+                            "isActive": True,
+                        }
+                    ],
+                    "hasAnalyticsAccess": True,
+                }
+            raise AssertionError(f"unexpected path in self-test: {path}")
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
