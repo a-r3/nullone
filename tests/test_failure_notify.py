@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -16,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 from nullone_run_outcome import assess_run  # noqa: E402
 from nullone_failure_notify import (  # noqa: E402
     NOTIFICATION_DEFERRED_POLICY,
+    UNKNOWN_WORKFLOW_DISPLAY_NAME,
     NotifierError,
     TransportAmbiguousError,
     TransportFailedError,
@@ -721,6 +724,287 @@ class PathContainmentTests(unittest.TestCase):
             self.assertTrue((root / "daily-analytics").is_dir())
 
 
+class UnknownWorkflowRenderingTests(unittest.TestCase):
+    """#27 deliberately does not define workflow_id as public display
+    text — only a non-empty single-line identifier. A workflow not
+    explicitly allowlisted in WORKFLOW_DISPLAY_NAMES must never have its
+    raw ID enter the outbound Telegram message."""
+
+    def test_known_workflow_displays_correctly(self):
+        result = _blocked_result(workflow_id="morning-editorial")
+        message = render_alert_text(result)
+        self.assertIn("Morning Editorial", message)
+
+    def test_other_known_workflow_displays_correctly(self):
+        result = _blocked_result(workflow_id="daily-analytics")
+        message = render_alert_text(result)
+        self.assertIn("Daily Analytics", message)
+
+    def test_unknown_workflow_id_not_emitted_verbatim(self):
+        opaque_workflow_id = "internal-service-x9f2-session"
+        result = _blocked_result(workflow_id=opaque_workflow_id)
+        message = render_alert_text(result)
+
+        self.assertNotIn(opaque_workflow_id, message)
+        self.assertIn(UNKNOWN_WORKFLOW_DISPLAY_NAME, message)
+
+    def test_unknown_workflow_alert_still_has_traceability(self):
+        opaque_workflow_id = "internal-service-x9f2-session"
+        result = _blocked_result(workflow_id=opaque_workflow_id)
+        message = render_alert_text(result)
+
+        self.assertIn(f"Status: {result['domain_outcome']}", message)
+        self.assertIn(f"Reason: {result['reason_code']}", message)
+        self.assertIn(result["run_id"], message)
+
+
+class NotificationRecordValidationTests(unittest.TestCase):
+    """A persisted notification record is never trusted blindly. A
+    corrupt or conflicting record must fail closed (raise NotifierError,
+    zero additional sends) and must never be repaired/overwritten
+    automatically."""
+
+    @staticmethod
+    def _record_path(root: Path, result: dict, failure_identity: str) -> Path:
+        slug = failure_identity.replace(":", "_")
+        return root / result["workflow_id"] / f"{slug}.json"
+
+    def _send_once(self, root: Path, result: dict) -> tuple[dict, Path]:
+        transport = RecordingTransport()
+        first = notify_if_required(result, transport=transport, output_root=root)
+        self.assertEqual(first["status"], "SENT")
+        record_path = self._record_path(
+            root, result, first["record"]["failure_identity"]
+        )
+        return first["record"], record_path
+
+    def test_schema_only_truncated_record_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result()
+            _, record_path = self._send_once(root, result)
+
+            record_path.write_text(
+                json.dumps({"schema": "nullone.failure-notification.v1"}),
+                encoding="utf-8",
+            )
+
+            transport = RecordingTransport()
+            with self.assertRaises(NotifierError):
+                notify_if_required(result, transport=transport, output_root=root)
+
+            self.assertEqual(len(transport.messages), 0)
+
+    def test_invalid_state_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result()
+            record, record_path = self._send_once(root, result)
+
+            tampered = dict(record)
+            tampered["state"] = "CANCELLED"
+            record_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+            transport = RecordingTransport()
+            with self.assertRaises(NotifierError):
+                notify_if_required(result, transport=transport, output_root=root)
+
+            self.assertEqual(len(transport.messages), 0)
+
+            on_disk = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["state"], "CANCELLED")
+
+    def test_attempts_not_one_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result()
+            record, record_path = self._send_once(root, result)
+
+            tampered = dict(record)
+            tampered["attempts"] = 2
+            record_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+            transport = RecordingTransport()
+            with self.assertRaises(NotifierError):
+                notify_if_required(result, transport=transport, output_root=root)
+
+            self.assertEqual(len(transport.messages), 0)
+
+    def test_mismatched_failure_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result()
+            record, record_path = self._send_once(root, result)
+
+            tampered = dict(record)
+            tampered["failure_identity"] = (
+                "run_" + ("1" * 24) + ":OTHER_REASON_CODE"
+            )
+            record_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+            transport = RecordingTransport()
+            with self.assertRaises(NotifierError):
+                notify_if_required(result, transport=transport, output_root=root)
+
+            self.assertEqual(len(transport.messages), 0)
+
+            # never auto-repaired: the tampered value is still on disk
+            on_disk = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                on_disk["failure_identity"],
+                "run_" + ("1" * 24) + ":OTHER_REASON_CODE",
+            )
+
+    def test_valid_records_in_every_durable_state_block_resend(self):
+        for state in ("PENDING", "SENT", "FAILED", "UNKNOWN"):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                result = _blocked_result()
+                record, record_path = self._send_once(root, result)
+
+                tampered = dict(record)
+                tampered["state"] = state
+                record_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+                transport = RecordingTransport()
+                outcome = notify_if_required(
+                    result, transport=transport, output_root=root
+                )
+
+                self.assertEqual(outcome["status"], f"ALREADY_{state}")
+                self.assertEqual(len(transport.messages), 0)
+
+
+class CliFailClosedTests(unittest.TestCase):
+    """The CLI runner must convert notifier-local state failures (not
+    just #27 contract failures) into a controlled BridgeError/BLOCKED
+    result — never an uncaught traceback — and must never leak raw
+    workflow IDs, opaque identifiers, secrets, or raw JSON into that
+    error, and must never reach the Telegram transport."""
+
+    def test_notify_wraps_notifier_error_as_bridge_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result_file = root / "result.json"
+            result = _blocked_result(workflow_id="../../outside")
+            result_file.write_text(json.dumps(result), encoding="utf-8")
+
+            with self.assertRaises(runner.BridgeError):
+                runner.notify(str(result_file), str(root / "notifications"))
+
+    def test_notify_wraps_invalid_result_as_bridge_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result_file = root / "result.json"
+            result_file.write_text(
+                json.dumps({"not": "a valid result"}), encoding="utf-8"
+            )
+
+            with self.assertRaises(runner.BridgeError):
+                runner.notify(str(result_file), str(root / "notifications"))
+
+    def test_cli_subprocess_unsafe_path_is_controlled_not_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result_file = root / "result.json"
+            result = _blocked_result(workflow_id="../../outside")
+            result_file.write_text(json.dumps(result), encoding="utf-8")
+
+            cp = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "nullone-failure-notify-run.py"),
+                    "notify",
+                    "--result-file",
+                    str(result_file),
+                    "--output-root",
+                    str(root / "notifications"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(cp.returncode, 2)
+            self.assertIn("BLOCKED=", cp.stdout)
+            self.assertNotIn("Traceback", cp.stderr)
+            self.assertNotIn("../../outside", cp.stdout)
+            self.assertFalse((root / "notifications").exists())
+
+    def test_cli_subprocess_invalid_result_is_controlled_not_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result_file = root / "result.json"
+            result_file.write_text(
+                json.dumps({"not": "a valid result"}), encoding="utf-8"
+            )
+
+            cp = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "nullone-failure-notify-run.py"),
+                    "notify",
+                    "--result-file",
+                    str(result_file),
+                    "--output-root",
+                    str(root / "notifications"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(cp.returncode, 2)
+            self.assertIn("BLOCKED=", cp.stdout)
+            self.assertNotIn("Traceback", cp.stderr)
+
+    def test_cli_subprocess_corrupt_notification_state_is_controlled(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output_root = root / "notifications"
+            result = _blocked_result()
+            result_file = root / "result.json"
+            result_file.write_text(json.dumps(result), encoding="utf-8")
+
+            first = notify_if_required(
+                result, transport=RecordingTransport(), output_root=output_root
+            )
+            record_path = (
+                output_root
+                / result["workflow_id"]
+                / (
+                    first["record"]["failure_identity"].replace(":", "_")
+                    + ".json"
+                )
+            )
+            tampered = dict(first["record"])
+            tampered["attempts"] = 99
+            record_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+            cp = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "nullone-failure-notify-run.py"),
+                    "notify",
+                    "--result-file",
+                    str(result_file),
+                    "--output-root",
+                    str(output_root),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(cp.returncode, 2)
+            self.assertIn("BLOCKED=", cp.stdout)
+            self.assertNotIn("Traceback", cp.stderr)
+
+            # never auto-repaired
+            on_disk = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["attempts"], 99)
+
+
 class RunnerCliTests(unittest.TestCase):
     def test_self_test_passes(self):
         self.assertEqual(runner.self_test(), 0)
@@ -730,8 +1014,6 @@ class RunnerCliTests(unittest.TestCase):
             root = Path(td)
             result_file = root / "result.json"
             result = _blocked_result()
-
-            import json
 
             result_file.write_text(json.dumps(result), encoding="utf-8")
 

@@ -34,9 +34,20 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from nullone_bridge_common import WORKSPACE, atomic_write_json, now_iso
-from nullone_run_outcome import health_decision, validate_result_structure
+from nullone_run_outcome import (
+    REASON_CODE_RE,
+    RUN_ID_RE,
+    health_decision,
+    validate_result_structure,
+)
 
 SCHEMA = "nullone.failure-notification.v1"
+
+# Durable states this notifier itself ever writes. An existing record
+# claiming any other value is corrupt, not merely unusual.
+NOTIFICATION_STATES: frozenset[str] = frozenset(
+    {"PENDING", "SENT", "FAILED", "UNKNOWN"}
+)
 
 NOTIFICATION_ROOT = WORKSPACE / "social/ops/notifications"
 OWNER_ID_FILE = WORKSPACE / "social/ops/private/telegram-owner-id"
@@ -45,6 +56,16 @@ WORKFLOW_DISPLAY_NAMES: dict[str, str] = {
     "morning-editorial": "Morning Editorial",
     "daily-analytics": "Daily Analytics",
 }
+
+# #27 deliberately does not define workflow_id as public display text —
+# only a non-empty single-line identifier. A workflow not explicitly
+# allowlisted above must never have its raw ID put into the outbound
+# Telegram message; this neutral placeholder is used instead.
+# Traceability stays available via the deterministic run_id. Add a
+# deliberate, reviewed entry to WORKFLOW_DISPLAY_NAMES when a new
+# workflow's notifications are actually implemented — never broaden
+# this by falling back to the raw ID.
+UNKNOWN_WORKFLOW_DISPLAY_NAME = "Unknown workflow"
 
 # UNKNOWN reason codes that do NOT require operator action/reconciliation.
 # Empty by default: no workflow currently emits a non-actionable UNKNOWN
@@ -261,7 +282,9 @@ def render_alert_text(result: dict[str, Any]) -> str:
     validate_result_structure(result)
 
     workflow_id = result["workflow_id"]
-    display_name = WORKFLOW_DISPLAY_NAMES.get(workflow_id, workflow_id)
+    display_name = WORKFLOW_DISPLAY_NAMES.get(
+        workflow_id, UNKNOWN_WORKFLOW_DISPLAY_NAME
+    )
     time_text = format_occurrence_time(result["occurrence_id"])
     reason_text = sanitize_reason_text(result.get("reason_text"))
 
@@ -307,9 +330,10 @@ def _notification_dir(workflow_id: str, output_root: Path) -> Path:
     """
 
     if Path(workflow_id).is_absolute():
-        raise NotifierError(
-            f"workflow_id must not be an absolute path: {workflow_id!r}"
-        )
+        # Message deliberately omits the raw workflow_id: it may be
+        # opaque/operator-facing text (e.g. surfaced via a CLI error)
+        # and should never be echoed verbatim.
+        raise NotifierError("workflow_id must not be an absolute path")
 
     root = output_root.resolve()
     candidate = (root / workflow_id).resolve()
@@ -318,7 +342,7 @@ def _notification_dir(workflow_id: str, output_root: Path) -> Path:
         candidate.relative_to(root)
     except ValueError as exc:
         raise NotifierError(
-            f"workflow_id would escape the notification root: {workflow_id!r}"
+            "workflow_id would escape the notification root"
         ) from exc
 
     return candidate
@@ -340,7 +364,92 @@ def _notification_record_path(
     return _notification_dir(workflow_id, output_root) / f"{slug}.json"
 
 
-def _read_existing_record(path: Path) -> dict[str, Any] | None:
+def _validate_notification_record(
+    value: Any,
+    *,
+    expected_failure_identity: str,
+    expected_run_id: str,
+    expected_workflow_id: str,
+    expected_reason_code: str,
+) -> dict[str, Any]:
+    """Fail closed on any corrupt or conflicting persisted notification
+    record rather than trusting its shape.
+
+    A record that fails this check is never repaired or overwritten
+    automatically: the caller receives a `NotifierError` and the
+    on-disk file is left exactly as found, requiring manual/operator
+    reconciliation. This is deliberately stricter than trusting bare
+    JSON-object-plus-schema, because a wrong read here directly gates
+    whether a second automatic Telegram send is allowed.
+    """
+
+    if not isinstance(value, dict):
+        raise NotifierError("existing notification record must be a JSON object")
+
+    if value.get("schema") != SCHEMA:
+        raise NotifierError("existing notification record has an invalid schema")
+
+    failure_identity = value.get("failure_identity")
+    if not isinstance(failure_identity, str) or not failure_identity:
+        raise NotifierError(
+            "existing notification record is missing failure_identity"
+        )
+
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+        raise NotifierError("existing notification record has an invalid run_id")
+
+    workflow_id = value.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id:
+        raise NotifierError("existing notification record is missing workflow_id")
+
+    reason_code = value.get("reason_code")
+    if not isinstance(reason_code, str) or not REASON_CODE_RE.fullmatch(reason_code):
+        raise NotifierError(
+            "existing notification record has an invalid reason_code"
+        )
+
+    if value.get("state") not in NOTIFICATION_STATES:
+        raise NotifierError("existing notification record has an invalid state")
+
+    if value.get("attempts") != 1:
+        raise NotifierError(
+            "existing notification record has an invalid attempts count"
+        )
+
+    if failure_identity != expected_failure_identity:
+        raise NotifierError(
+            "existing notification record does not match the current "
+            "failure identity"
+        )
+
+    if run_id != expected_run_id:
+        raise NotifierError(
+            "existing notification record does not match the current run"
+        )
+
+    if workflow_id != expected_workflow_id:
+        raise NotifierError(
+            "existing notification record does not match the current workflow"
+        )
+
+    if reason_code != expected_reason_code:
+        raise NotifierError(
+            "existing notification record does not match the current "
+            "reason code"
+        )
+
+    return value
+
+
+def _read_existing_record(
+    path: Path,
+    *,
+    expected_failure_identity: str,
+    expected_run_id: str,
+    expected_workflow_id: str,
+    expected_reason_code: str,
+) -> dict[str, Any] | None:
     if not path.is_file():
         return None
 
@@ -351,10 +460,13 @@ def _read_existing_record(path: Path) -> dict[str, Any] | None:
             "existing notification record is unreadable"
         ) from exc
 
-    if not isinstance(value, dict) or value.get("schema") != SCHEMA:
-        raise NotifierError("existing notification record is invalid")
-
-    return value
+    return _validate_notification_record(
+        value,
+        expected_failure_identity=expected_failure_identity,
+        expected_run_id=expected_run_id,
+        expected_workflow_id=expected_workflow_id,
+        expected_reason_code=expected_reason_code,
+    )
 
 
 def notify_if_required(
@@ -379,6 +491,16 @@ def notify_if_required(
     is serialized by an exclusive `fcntl.flock` on a lock file named
     after it, so two processes racing on the same failure cannot both
     reach the transport.
+
+    An existing record is never trusted blindly: `_read_existing_record`
+    validates its schema, field types/values (including that `state` is
+    one of this module's own durable states and `attempts == 1`), and
+    cross-checks `failure_identity`/`run_id`/`workflow_id`/`reason_code`
+    against the current call. A corrupt or conflicting record raises
+    `NotifierError` and is left on disk untouched — it is never repaired
+    or overwritten automatically, and no second Telegram send is
+    attempted; this always fails closed, requiring manual/operator
+    reconciliation of the actual file.
 
     Recovery (a later healthy result for the same workflow) is not
     detected or announced here — there is no code path that compares
@@ -428,7 +550,13 @@ def notify_if_required(
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-        existing = _read_existing_record(record_path)
+        existing = _read_existing_record(
+            record_path,
+            expected_failure_identity=failure_identity,
+            expected_run_id=result["run_id"],
+            expected_workflow_id=workflow_id,
+            expected_reason_code=result["reason_code"],
+        )
 
         if existing is not None:
             return {"status": f"ALREADY_{existing['state']}", "record": existing}

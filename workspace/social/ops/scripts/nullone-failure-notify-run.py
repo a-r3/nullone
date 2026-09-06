@@ -9,6 +9,7 @@ from pathlib import Path
 from nullone_bridge_common import BridgeError
 from nullone_failure_notify import (
     NOTIFICATION_ROOT,
+    NotifierError,
     OpenClawTelegramTransport,
     notify_if_required,
 )
@@ -50,6 +51,11 @@ def notify(result_file: str, output_root: str | None = None) -> int:
         )
     except CompletionContractError as exc:
         raise BridgeError(f"Invalid run-outcome record: {exc}") from exc
+    except NotifierError as exc:
+        # NotifierError messages are already scrubbed of raw
+        # workflow_id/identity/state content at the source — never add
+        # any raw record/file content here.
+        raise BridgeError(f"Notifier state error: {exc}") from exc
 
     print(f"NOTIFICATION_STATUS={outcome['status']}")
     return 0
