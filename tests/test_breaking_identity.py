@@ -123,6 +123,13 @@ def write_publish_ledger_row(workspace: Path, candidate_id: str, result: str) ->
         f.write(json.dumps(row) + "\n")
 
 
+def write_topic_ledger_row(workspace: Path, **fields) -> None:
+    path = workspace / "social" / "state" / "topic-ledger.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    path.write_text(existing + json.dumps(fields) + "\n", encoding="utf-8")
+
+
 def write_queue_block(workspace: Path, topic: str, status: str) -> None:
     path = workspace / "social" / "state" / "candidate-queue.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,15 +219,76 @@ class IdentityDeterminismTests(unittest.TestCase):
         self.assertNotEqual(i1.event_id, i2.event_id)
 
 
+def init_empty_required_stores(workspace: Path) -> None:
+    """Explicitly prove all four required stores initialized-empty.
+
+    Uses only directory/file creation (mkdir/touch), never a write helper,
+    so this fixture itself never exercises the module's own no-write
+    capability guarantee.
+    """
+    (workspace / "social" / "ops" / "manifests").mkdir(parents=True, exist_ok=True)
+    state_dir = workspace / "social" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "publish-ledger.jsonl").touch()
+    (state_dir / "topic-ledger.jsonl").touch()
+    (state_dir / "candidate-queue.md").touch()
+
+
 class ExactDuplicateTests(unittest.TestCase):
-    def test_same_source_unchanged_claims_no_prior_state(self):
+    def test_completely_missing_state_is_ambiguous_not_distinct(self):
+        # Nothing initialized at all: a missing store must never silently
+        # mean "no history" - this is a first sighting only in appearance.
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td)
             state = bi.load_repository_state(workspace)
+            self.assertEqual(state.manifests_status, bi.STATE_MISSING)
+            self.assertEqual(state.publish_ledger_status, bi.STATE_MISSING)
+            self.assertEqual(state.topic_ledger_status, bi.STATE_MISSING)
+            self.assertEqual(state.queue_status, bi.STATE_MISSING)
+            self.assertTrue(state.state_gate_failed)
+
             candidate = make_candidate()
             result = bi.evaluate(candidate, state)
-            # No matching history at all yet: this is the first sighting.
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertEqual(result.reason_code, "STATE_UNAVAILABLE_OR_CONFLICTING")
+            self.assertTrue(result.reconciliation_required)
+
+    def test_all_required_stores_initialized_empty_allows_distinct(self):
+        # Proven initialized-empty (not merely absent) plus sufficient
+        # structured occurrence evidence (product) can reach DISTINCT_EVENT.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            state = bi.load_repository_state(workspace, prior_developments=[])
+            self.assertTrue(state.required_sources_proven)
+            self.assertFalse(state.state_gate_failed)
+
+            candidate = make_candidate(evidence=(
+                bi.EvidenceItem(
+                    ref="e1",
+                    supported_claim="claim",
+                    product="widget",
+                    version="1.0",
+                ),
+            ))
+            result = bi.evaluate(candidate, state)
             self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertEqual(result.event["identity_basis"], "NORMALIZED_CLAIM")
+            self.assertFalse(result.reconciliation_required)
+
+    def test_bare_url_only_evidence_never_reaches_distinct_even_when_state_proven(self):
+        # A canonical-source-only basis (no exact id, no structured fields)
+        # must never mint DISTINCT_EVENT by itself, even with fully proven
+        # empty state - only a positive match or ambiguity.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            state = bi.load_repository_state(workspace, prior_developments=[])
+            candidate = make_candidate()  # default evidence: URL only, no product
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.event["identity_basis"], "CANONICAL_SOURCE")
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertTrue(result.reconciliation_required)
 
     def test_repeat_candidate_id_is_exact_duplicate(self):
         with tempfile.TemporaryDirectory() as td:
@@ -431,10 +499,64 @@ class MaterialFollowUpTests(unittest.TestCase):
             self.assertEqual(result.dedup["decision"], "SAME_EVENT")
 
 
+class CrossSourceNoAnnouncementIdTests(unittest.TestCase):
+    """No announcement ID: a differing source URL alone must never decide
+    identity, in either direction (never merges, never distinguishes)."""
+
+    def test_different_urls_same_structured_occurrence_is_same_event(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            first = make_candidate("candidate-a", evidence=(
+                bi.EvidenceItem(
+                    ref="e1", supported_claim="claim", product="widget", version="1.0",
+                    source_url="https://example.invalid/outlet-a/story",
+                ),
+            ))
+            identity_a = bi.compute_identity(first)
+            prior = {
+                "ref": "prior:a",
+                "event_id": identity_a.event_id,
+                "development_id": identity_a.development_id,
+                "identity_basis": identity_a.identity_basis,
+            }
+            state = bi.load_repository_state(workspace, prior_developments=[prior])
+
+            second = make_candidate("candidate-b", evidence=(
+                bi.EvidenceItem(
+                    ref="e2", supported_claim="claim", product="widget", version="1.0",
+                    source_url="https://example.invalid/outlet-b/completely-different-url",
+                ),
+            ))
+            result = bi.evaluate(second, state)
+            self.assertEqual(result.dedup["decision"], "SAME_EVENT")
+            self.assertEqual(result.event["event_id"], identity_a.event_id)
+
+    def test_different_urls_insufficient_structure_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            # State is fully proven empty; the ONLY reason this cannot
+            # resolve is insufficient structured evidence, never the URLs
+            # differing.
+            state = bi.load_repository_state(workspace, prior_developments=[])
+            candidate = make_candidate(evidence=(
+                bi.EvidenceItem(
+                    ref="e1", supported_claim="claim",
+                    source_url="https://example.invalid/outlet-a/story-x",
+                ),
+            ))
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.event["identity_basis"], "CANONICAL_SOURCE")
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertEqual(result.reason_code, "IDENTITY_UNRESOLVED")
+
+
 class DistinctEventTests(unittest.TestCase):
     def test_same_topic_cluster_distinct_product_version(self):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td)
+            init_empty_required_stores(workspace)
             first = make_candidate("candidate-a", topic_cluster="shared-topic", evidence=(
                 bi.EvidenceItem(ref="e1", supported_claim="claim", product="widget", version="1.0"),
             ))
@@ -455,6 +577,38 @@ class DistinctEventTests(unittest.TestCase):
             self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
             self.assertEqual(result.event["topic_id"], identity_a.topic_id)
             self.assertNotEqual(result.event["event_id"], identity_a.event_id)
+
+    def test_different_urls_positively_evidenced_distinct_occurrence(self):
+        # Different source URLs, but genuinely different structured
+        # occurrence metadata (product): a URL difference is never itself
+        # the evidence of distinctness, but distinct structured evidence is.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            first = make_candidate("candidate-a", evidence=(
+                bi.EvidenceItem(
+                    ref="e1", supported_claim="claim", product="widget-x",
+                    source_url="https://example.invalid/outlet-a/story",
+                ),
+            ))
+            identity_a = bi.compute_identity(first)
+            prior = {
+                "ref": "prior:a",
+                "event_id": identity_a.event_id,
+                "development_id": identity_a.development_id,
+                "identity_basis": identity_a.identity_basis,
+            }
+            state = bi.load_repository_state(workspace, prior_developments=[prior])
+
+            second = make_candidate("candidate-b", evidence=(
+                bi.EvidenceItem(
+                    ref="e2", supported_claim="claim", product="widget-y",
+                    source_url="https://example.invalid/outlet-b/other-story",
+                ),
+            ))
+            result = bi.evaluate(second, state)
+            self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertEqual(result.event["identity_basis"], "NORMALIZED_CLAIM")
 
 
 class ConsequentialSuppressionTests(unittest.TestCase):
@@ -505,6 +659,66 @@ class ConsequentialSuppressionTests(unittest.TestCase):
         self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
         self.assertTrue(result.reconciliation_required)
 
+    def test_unknown_with_zero_attempts_still_suppresses(self):
+        # UNKNOWN never means empty, even with an inconsistent zero-attempt
+        # counter - it is not permission to regenerate.
+        result = self._evaluate_with_manifest(publication={"state": "UNKNOWN", "attempts": 0})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_check_required_with_zero_attempts_still_suppresses(self):
+        result = self._evaluate_with_manifest(publication={"state": "CHECK_REQUIRED", "attempts": 0})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_readback_failed_with_zero_attempts_still_suppresses(self):
+        result = self._evaluate_with_manifest(publication={"state": "READBACK_FAILED", "attempts": 0})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_failed_with_consumed_attempt_suppresses(self):
+        result = self._evaluate_with_manifest(publication={"state": "FAILED", "attempts": 1})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_not_requested_with_consumed_attempt_suppresses_and_reconciles(self):
+        # Any consumed publication attempt suppresses regardless of the
+        # later/unexplained resulting state - a consumed attempt with
+        # NOT_REQUESTED must never become fresh capacity.
+        result = self._evaluate_with_manifest(publication={"state": "NOT_REQUESTED", "attempts": 1})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_draft_created_with_zero_attempts_still_suppresses(self):
+        # DRAFT_CREATED is consequential as a state in its own right,
+        # independent of the attempt counter.
+        result = self._evaluate_with_manifest(
+            review={"state": "DRAFT_CREATED", "create_attempts": 0, "zernio_draft_id": "z-1"}
+        )
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertFalse(result.reconciliation_required)
+
+    def test_review_unknown_with_zero_attempts_still_suppresses(self):
+        result = self._evaluate_with_manifest(review={"state": "REVIEW_UNKNOWN", "create_attempts": 0})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_not_created_with_consumed_create_attempt_suppresses_and_reconciles(self):
+        # Regression for the exact Blocker C gap: a consumed review-create
+        # attempt must suppress even when the resulting state is literally
+        # NOT_CREATED (previously excluded from the consumed-attempt check).
+        result = self._evaluate_with_manifest(review={"state": "NOT_CREATED", "create_attempts": 1})
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertTrue(result.reconciliation_required)
+
     def test_all_suppress_equivalent_regeneration(self):
         for kwargs in (
             {"publication": {"state": "PUBLISHED"}},
@@ -547,6 +761,203 @@ class ExcludedHistoricalCandidateTests(unittest.TestCase):
         self.assertFalse(result.reconciliation_required)
 
 
+class TopicLedgerLinkageTests(unittest.TestCase):
+    """Topic ledger is inspected via deterministic linkage only, never via
+    a shared topic_cluster/title alone (Blocker D)."""
+
+    def test_candidate_id_linked_topic_ledger_row_is_used(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_topic_ledger_row(
+                workspace, candidate_id="candidate-1", status="LEGACY_DRAFT"
+            )
+            state = bi.load_repository_state(workspace)
+            candidate = make_candidate("candidate-1")
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.reason_code, "CANDIDATE_EXCLUDED")
+            self.assertIn("topic-ledger:0:LEGACY_DRAFT", result.dedup["matched_refs"])
+
+    def test_manifest_id_linked_topic_ledger_row_is_used(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_manifest(workspace, "candidate-1")
+            write_topic_ledger_row(
+                workspace, manifest_id="manifest-candidate-1", status="LEGACY_DRAFT"
+            )
+            state = bi.load_repository_state(workspace)
+            candidate = make_candidate("candidate-1")
+            result = bi.evaluate(candidate, state)
+            # The manifest itself (benign) is resurface's highest-precedence
+            # signal, so it still governs as EXACT_DUPLICATE - but the
+            # linked topic-ledger row is still recorded as matched history.
+            self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+            self.assertTrue(
+                any(ref.startswith("topic-ledger:") for ref in result.dedup["matched_refs"])
+            )
+
+    def test_shared_topic_cluster_alone_is_never_sufficient_linkage(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            write_topic_ledger_row(
+                workspace, topic_cluster="topic-cluster-1", status="LEGACY_DRAFT"
+            )
+            state = bi.load_repository_state(workspace, prior_developments=[])
+            candidate = make_candidate(evidence=(
+                bi.EvidenceItem(ref="e1", supported_claim="claim", product="widget"),
+            ))
+            result = bi.evaluate(candidate, state)
+            # No exact linkage (no candidate_id/manifest_id/post-id/event
+            # match) - the topic-cluster-only row must never be treated as
+            # a match, so this reaches DISTINCT_EVENT on its own evidence.
+            self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertEqual(result.dedup["matched_refs"], [])
+
+
+class AllMatchingHistoryTests(unittest.TestCase):
+    """Record all matching history across every source; the highest-
+    authority positive record decides, stale/lower records cannot
+    downgrade it (Blocker E)."""
+
+    def test_all_sources_recorded_highest_authority_wins(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            # Manifest itself is benign (no unsafe state).
+            write_manifest(workspace, "candidate-x")
+            # Publish ledger independently proves PUBLISHED - higher
+            # authority than the benign manifest state and any lower tier.
+            write_publish_ledger_row(workspace, "candidate-x", "PUBLISHED")
+            # Queue shows a stale READY row for the same slot - must not
+            # downgrade the ledger's PUBLISHED fact.
+            write_queue_block(workspace, "Some queue title", "READY")
+            # Topic ledger, linked via manifest_id, shows a lower-precedence
+            # excluded status - must not override PUBLISHED either.
+            write_topic_ledger_row(
+                workspace, manifest_id="manifest-candidate-x", status="LEGACY_DRAFT"
+            )
+            state = bi.load_repository_state(workspace)
+
+            candidate = make_candidate("candidate-x", topic_title="Some queue title")
+            identity = bi.compute_identity(candidate)
+            prior = {
+                "ref": "prior:candidate-x-lower",
+                "event_id": identity.event_id,
+                "development_id": "development-irrelevant",
+                "identity_basis": identity.identity_basis,
+                "consequential_kind": "FAILED",
+                "unresolved_outcome": True,
+            }
+            state = bi.load_repository_state(workspace, prior_developments=[prior])
+
+            result = bi.evaluate(candidate, state)
+
+            self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+            self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+            self.assertFalse(result.reconciliation_required)
+
+            refs = result.dedup["matched_refs"]
+            self.assertTrue(any(r.startswith("manifest:") for r in refs))
+            self.assertTrue(any(r.startswith("publish-ledger:") for r in refs))
+            self.assertTrue(any(r.startswith("queue:") for r in refs))
+            self.assertTrue(any(r.startswith("topic-ledger:") for r in refs))
+            self.assertIn("prior:candidate-x-lower", refs)
+
+    def test_multiple_prior_development_records_all_collected(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            candidate = make_candidate("candidate-y")
+            identity = bi.compute_identity(candidate)
+            priors = [
+                {
+                    "ref": "prior:y-1",
+                    "event_id": identity.event_id,
+                    "development_id": identity.development_id,
+                    "identity_basis": identity.identity_basis,
+                    "reserved_kind": "DRAFT_CREATED",
+                },
+                {
+                    "ref": "prior:y-2",
+                    "event_id": identity.event_id,
+                    "development_id": identity.development_id,
+                    "identity_basis": identity.identity_basis,
+                    "consequential_kind": "PUBLISHED",
+                },
+            ]
+            state = bi.load_repository_state(workspace, prior_developments=priors)
+            result = bi.evaluate(candidate, state)
+
+            # The most severe (PUBLISHED/consequential) prior record must
+            # govern even though a second, less severe record also matched.
+            self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+            self.assertIn("prior:y-1", result.dedup["matched_refs"])
+            self.assertIn("prior:y-2", result.dedup["matched_refs"])
+
+
+class PriorDevelopmentIndexSafetyTests(unittest.TestCase):
+    def test_malformed_prior_developments_path_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            index_path = workspace / "prior-developments.json"
+            index_path.write_text("{not valid json", encoding="utf-8")
+            state = bi.load_repository_state(workspace, prior_developments_path=index_path)
+            self.assertEqual(state.prior_developments_status, bi.STATE_MALFORMED)
+            self.assertTrue(state.state_gate_failed)
+            candidate = make_candidate(evidence=(
+                bi.EvidenceItem(ref="e1", supported_claim="claim", product="widget"),
+            ))
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertEqual(result.reason_code, "STATE_UNAVAILABLE_OR_CONFLICTING")
+
+    def test_conflicting_duplicate_prior_records_are_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            priors = [
+                {
+                    "ref": "prior:conflict",
+                    "event_id": "event-a",
+                    "development_id": "development-a",
+                    "identity_basis": "EXACT_IDENTIFIER",
+                },
+                {
+                    "ref": "prior:conflict",
+                    "event_id": "event-b",
+                    "development_id": "development-b",
+                    "identity_basis": "EXACT_IDENTIFIER",
+                },
+            ]
+            state = bi.load_repository_state(workspace, prior_developments=priors)
+            self.assertEqual(state.prior_developments_status, bi.STATE_MALFORMED)
+            self.assertTrue(state.state_gate_failed)
+
+    def test_absent_optional_index_does_not_block_a_positive_manifest_match(self):
+        # The optional index's absence never gates a definite match.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_manifest(workspace, "candidate-1", publication={"state": "PUBLISHED"})
+            state = bi.load_repository_state(workspace)
+            self.assertEqual(state.prior_developments_status, bi.STATE_NOT_PROVIDED)
+            candidate = make_candidate("candidate-1")
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+
+    def test_absent_optional_index_cannot_compensate_for_insufficient_evidence(self):
+        # The optional index's absence must not itself enable DISTINCT_EVENT
+        # when required state is otherwise incomplete.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            state = bi.load_repository_state(workspace)
+            self.assertEqual(state.prior_developments_status, bi.STATE_NOT_PROVIDED)
+            candidate = make_candidate(evidence=(
+                bi.EvidenceItem(ref="e1", supported_claim="claim", product="widget"),
+            ))
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertEqual(result.reason_code, "STATE_UNAVAILABLE_OR_CONFLICTING")
+
+
 class AmbiguityTests(unittest.TestCase):
     def test_conflicting_exact_identifiers(self):
         candidate = make_candidate(evidence=(
@@ -560,13 +971,26 @@ class AmbiguityTests(unittest.TestCase):
         self.assertTrue(result.reconciliation_required)
         self.assertIsNone(result.event["event_id"])
 
-    def test_missing_ledger_file_is_empty_not_ambiguous(self):
+    def test_one_required_store_missing_is_ambiguous(self):
+        # Three required stores explicitly initialized empty, but the
+        # publish ledger left entirely missing: the missing store alone
+        # must block as ambiguous, never silently count as empty.
         with tempfile.TemporaryDirectory() as td:
-            state = bi.load_repository_state(Path(td))
-            self.assertTrue(state.publish_ledger_readable)
-            candidate = make_candidate()
+            workspace = Path(td)
+            (workspace / "social" / "ops" / "manifests").mkdir(parents=True)
+            state_dir = workspace / "social" / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "topic-ledger.jsonl").touch()
+            (state_dir / "candidate-queue.md").touch()
+            state = bi.load_repository_state(workspace)
+            self.assertEqual(state.publish_ledger_status, bi.STATE_MISSING)
+            self.assertFalse(state.required_sources_proven)
+            candidate = make_candidate(evidence=(
+                bi.EvidenceItem(ref="e1", supported_claim="claim", product="widget"),
+            ))
             result = bi.evaluate(candidate, state)
-            self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertEqual(result.reason_code, "STATE_UNAVAILABLE_OR_CONFLICTING")
 
     def test_malformed_publish_ledger_is_ambiguous(self):
         with tempfile.TemporaryDirectory() as td:
@@ -575,7 +999,7 @@ class AmbiguityTests(unittest.TestCase):
             ledger.parent.mkdir(parents=True, exist_ok=True)
             ledger.write_text("{not valid json\n", encoding="utf-8")
             state = bi.load_repository_state(workspace)
-            self.assertFalse(state.publish_ledger_readable)
+            self.assertEqual(state.publish_ledger_status, bi.STATE_MALFORMED)
             candidate = make_candidate()
             result = bi.evaluate(candidate, state)
             self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
@@ -589,10 +1013,51 @@ class AmbiguityTests(unittest.TestCase):
             bad = manifest_dir / "broken.json"
             bad.write_text("{not json", encoding="utf-8")
             state = bi.load_repository_state(workspace)
-            self.assertFalse(state.manifests_readable)
+            self.assertEqual(state.manifests_status, bi.STATE_MALFORMED)
             candidate = make_candidate()
             result = bi.evaluate(candidate, state)
             self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+
+    def test_truly_unreadable_manifest_directory_is_ambiguous(self):
+        # A genuine OSError on listing (permission denied), distinct from a
+        # parse failure, still fails closed to ambiguous.
+        import os
+
+        if os.geteuid() == 0:
+            self.skipTest("permission bits are not enforced for root")
+
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            manifest_dir = workspace / "social" / "ops" / "manifests"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "candidate-1.json").write_text("{}", encoding="utf-8")
+            original_mode = manifest_dir.stat().st_mode
+            manifest_dir.chmod(0o000)
+            try:
+                state = bi.load_repository_state(workspace)
+                self.assertEqual(state.manifests_status, bi.STATE_UNREADABLE)
+                candidate = make_candidate()
+                result = bi.evaluate(candidate, state)
+                self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            finally:
+                manifest_dir.chmod(original_mode)
+
+    def test_positive_published_match_wins_even_with_lower_store_missing(self):
+        # An UNKNOWN publication match still suppresses even when the
+        # topic ledger/queue are entirely missing - a definite positive
+        # record is never downgraded by a missing lower-precedence source.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_manifest(workspace, "candidate-1", publication={"state": "UNKNOWN", "attempts": 1})
+            state = bi.load_repository_state(workspace)
+            self.assertEqual(state.publish_ledger_status, bi.STATE_MISSING)
+            self.assertEqual(state.topic_ledger_status, bi.STATE_MISSING)
+            self.assertEqual(state.queue_status, bi.STATE_MISSING)
+            candidate = make_candidate("candidate-1")
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+            self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+            self.assertTrue(result.reconciliation_required)
 
     def test_same_url_unclear_changed_claims_is_ambiguous(self):
         with tempfile.TemporaryDirectory() as td:
@@ -643,8 +1108,8 @@ class PrecedenceTests(unittest.TestCase):
             write_manifest(workspace, "candidate-1", publication={"state": "PUBLISHED"})
             # No publish ledger, no queue file at all.
             state = bi.load_repository_state(workspace)
-            self.assertTrue(state.publish_ledger_readable)
-            self.assertTrue(state.queue_readable)
+            self.assertEqual(state.publish_ledger_status, bi.STATE_MISSING)
+            self.assertEqual(state.queue_status, bi.STATE_MISSING)
             candidate = make_candidate("candidate-1")
             result = bi.evaluate(candidate, state)
             self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
