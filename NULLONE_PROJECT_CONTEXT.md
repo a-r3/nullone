@@ -1,6 +1,6 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-06 Asia/Baku
+Last updated: 2026-09-07 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
 ## Identity
@@ -37,9 +37,8 @@ No blind autonomous publishing.
 ## Current execution priority
 Operational workstreams remain ahead of large migration/product work:
 
-1. Completed M0 repo foundations (#27–#35)
-2. Breaking draft routing (#36)
-3. Controlled production activation/validation (#37)
+1. Repo-level M0 engineering complete (#27–#36)
+2. Controlled production activation/validation (#37)
 
 Existing M1/M2/M3 remain intact.
 
@@ -56,7 +55,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational issues #27, #28, #29, #30, #31, #32, #33, #34 and #35 are CLOSED/COMPLETED; #36 and #37 remain OPEN
+- operational issues #27, #28, #29, #30, #31, #32, #33, #34, #35 and #36 are CLOSED/COMPLETED; #37 remains OPEN
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -74,7 +73,7 @@ Relevant issues:
 - #33 Story draft pipeline — CLOSED/COMPLETED; PR #55 squash-merged as `7404501bdafb224f221bf8c79ee67bf7182bb2f7`; trigger-agnostic repo-level Story production core behind human approval, with no production activation or publication capability (see "Verified #33 completion" below)
 - #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
-- #36 breaking draft routing — OPEN; next engineering issue; can now consume the accepted #34 breaking severity/routing policy, #35 event identity/dedup/follow-up suppression, and #33 reusable Story production core; the remaining sequence is `#36 → #37`, not parallel
+- #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
 - #37 controlled production activation/validation — OPEN; remains the final controlled deployment/preflight/live-validation boundary under its existing, unchanged contract
 
 ### Verified #5 completion — 2026-09-05 18:32–18:34
@@ -449,20 +448,25 @@ supersession/publisher safety `7 PASS`; full merged-main
 `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS`. Validation
 made no live or external calls and is not production validation.
 
-### Production truth after #33
+### Current production truth after #36
 
-GitHub implementation is not production deployment. Current production
-remains pre-new-system activation:
+GitHub implementation is not production deployment. `Git merge !=
+production deployment`, and `production actual != Git desired`. Current
+production still runs the pre-new-system live configuration until #37
+performs controlled activation:
 - #27 repo outcome system is not yet fully live-wired;
-- #28 Morning Editorial runtime is not yet live-wired;
+- #28 Morning Editorial runtime hardening is not yet activated live;
 - #29 Daily Analytics runtime is not yet live-authorized or activated;
 - #30 failure alert/domain notifier is not live-wired;
 - #32 cadence controller is repo-level only;
 - #33 Story pipeline is repo-level only;
-- #35 breaking identity is repo-level only;
+- #35 breaking identity/dedup is repo-level only;
+- #36 breaking router/dispatcher/main pipeline is repo-level only;
 - Story cadence is NOT active in production;
 - Story draft pipeline is NOT active in production;
-- breaking routing is NOT active;
+- breaking routing/dispatch is NOT active;
+- Feed/Carousel breaking main pipeline is NOT active;
+- no real #36 Telegram/Zernio breaking cycle has occurred;
 - #37 remains the explicit deployment/preflight/live-validation boundary.
 
 ### Verified #34 completion — 2026-09-06
@@ -489,8 +493,8 @@ optional AI assistance; a follow-up requires verified material delta plus
 distinct audience value; no routing output authorizes publication. #35
 implemented identity/dedup (see "Verified #35 completion" below); #33
 implemented the reusable Story production core (see "Verified #33
-completion" above); #36 is the next engineering issue and will later
-implement draft routing.
+completion" above); #36 implemented this accepted policy as deterministic
+repo-level draft routing (see "Verified #36 completion" below).
 
 ### Verified #35 completion — 2026-09-06
 
@@ -530,21 +534,166 @@ linkage, and an asserted delta without a proven parent fails closed as
 `AMBIGUOUS_IDENTITY`; no AI/vector DB, no network, no Story/Feed routing,
 no publication capability, no scheduler/live wiring.
 
-Validation at merge: breaking identity behavioral suite 89/89 PASS; full
-offline suite `python3 tests/run_offline.py` →
+Narrow #36 state-reader cardinality hardening now represents manifest
+state as `candidate_id -> tuple of all linked manifests`, rather than
+assuming one manifest per candidate. This permits one accepted
+EXCEPTIONAL development to own Story + Feed or Story + Carousel under the
+same candidate without turning valid state into `MALFORMED`. Valid sibling
+manifests remain `PRESENT_WITH_DATA`; every sibling reference remains
+auditable; an unsafe or unresolved sibling cannot be downgraded by a clean
+sibling; malformed JSON, missing/invalid candidate identity, or conflicting
+use of one `manifest_id` still fails closed. This cardinality change did
+NOT broaden or otherwise change #35 event identity, dedup, follow-up, or
+suppression policy.
+
+Current merged validation: breaking identity behavioral suite 99/99 PASS,
+with all original 89 guarantees still covered; full offline suite
+`python3 tests/run_offline.py` →
 `OFFLINE_REGRESSION_SUITE=PASS`.
 
 Production deployment of #35: NOT PERFORMED. #35 is repo-level only;
 breaking routing is not active in production.
 
-### #36 accepted boundary
+### Verified #36 completion — 2026-09-07
 
-#36 will deterministically route accepted breaking decisions into draft
-preparation. It may route `MATERIAL_BREAKING` to Story, route
-`EXCEPTIONAL_BREAKING` to Story plus an optional justified main draft,
-and reuse the #33 Story core rather than duplicate it. It must not bypass
-verification, load/eligibility gates, dedup, or human approval, and it
-must not publish automatically. #36 is not implemented.
+Issue #36 `Route material breaking to Story drafts and exceptional
+breaking to optional main drafts` is CLOSED/COMPLETED. PR #57 `Implement
+breaking draft routing (#36)` is MERGED; its squash merge SHA is
+`36f358a539fedf90e0c5cffda9b503b87594e3f1`.
+
+Deployment and live-validation state:
+- production deployment: NOT PERFORMED;
+- breaking routing live activation: NOT PERFORMED;
+- real Zernio/Telegram breaking cycle: NOT PERFORMED.
+
+#36 completed repo-level engineering only.
+
+Deterministic router:
+- implementation: `workspace/social/ops/scripts/nullone_breaking_router.py`;
+- output contract: `nullone.breaking-routing.v1`;
+- pure deterministic routing with no network, LLM, or publication
+  capability;
+- consumes upstream verified severity, the #35 identity/dedup result, and
+  structured safety/format findings;
+- `NORMAL` → `NORMAL_QUEUE` with no immediate draft;
+- `MATERIAL_BREAKING` → `[STORY]` only, never automatic Feed/Carousel;
+- `EXCEPTIONAL_BREAKING` → `[STORY, FEED]`, `[STORY, CAROUSEL]`, or
+  Story-only `[STORY]` when main is ineligible or structurally ambiguous;
+  there is no main-only fallback;
+- Feed requires score >= 38; Carousel requires score >= 42 plus meaningful
+  multi-slide value; deterministic structural fit selects Feed versus
+  Carousel, while an ambiguous winner falls back to Story-only;
+  `quality > extra format/quota`.
+
+Breaking overrides ordinary cadence timing only. It never bypasses
+verification, quality, safe load/capacity, dedup, dependency availability,
+or human approval.
+
+Strict routing-artifact boundary:
+- public `validate_routing_result_dict()` strictly validates the exact
+  accepted 14-field `nullone.breaking-routing.v1` object before durable
+  reservation, authoritative recheck, or dispatch;
+- missing/unknown fields, invalid semantic combinations, main-only,
+  reordered or duplicate targets, incompatible reason/severity pairs,
+  acceleration without PASS verification, unresolved identity, an
+  ineligible dedup relation, or reconciliation-required acceleration are
+  rejected;
+- the complete accepted routing decision is SHA-256 bound and semantically
+  revalidated on reload; malformed or tampered decisions fail closed.
+
+Durable Story-first dispatch:
+- implementation: `workspace/social/ops/scripts/nullone_breaking_dispatch.py`;
+- schema: `nullone.breaking-draft-set.v1`;
+- path:
+  `social/drafts/production/breaking/sets/<DRAFT_SET_ID>.json`;
+- `draft_set_id` is deterministic from contract version + `event_id` +
+  `development_id`; target format is not part of set identity;
+- one development owns at most one durable draft set; a different source,
+  candidate, severity escalation, format change, or changed decision cannot
+  mint or hijack another set;
+- the exact decision is persisted and hash-bound; per-set `fcntl.flock`
+  serializes reservation/dispatch;
+- Story always dispatches before optional main, with no main-only fallback.
+
+Crash/replay safety uses target states `PENDING`, `DISPATCH_IN_FLIGHT`,
+`SUCCEEDED`, `BLOCKED_BEFORE_ATTEMPT`, `PREVIEW_DELIVERY_FAILED`, and
+`AMBIGUOUS`. `DISPATCH_IN_FLIGHT` is persisted before a Story/main runner
+is invoked. An unexpected exception after reservation becomes
+`AMBIGUOUS` with reconciliation required; an in-flight state found after
+restart is never automatically replayed. Story failure or ambiguity
+prevents main; main failure or ambiguity never repeats Story; completed
+targets never automatically repeat. Explicit continuation exists only for a target
+proven `BLOCKED_BEFORE_ATTEMPT`; consumed, ambiguous, or in-flight targets
+cannot use it.
+
+Mandatory authoritative rechecks:
+- fresh #35 authoritative state must still permit dispatch immediately
+  before Story;
+- state is re-read again after Story and immediately before main;
+- the exact Story manifest owned by this draft set may be recognized as
+  the expected sibling, while any additional external/unsafe equivalent
+  state blocks main;
+- a fresh main-capacity recheck is mandatory for a main target; a missing
+  recheck is never PASS.
+
+Telegram human-review truth:
+- for both Story and main, target `SUCCEEDED` requires pipeline outcome
+  `DRAFT_CREATED` and `preview_delivery.status == "SENT"`;
+- a Zernio review draft alone is not workflow success;
+- missing, malformed, or non-SENT proof becomes
+  `PREVIEW_DELIVERY_FAILED`; the draft is not recreated, Telegram is not
+  automatically resent, and a Story preview failure prevents optional
+  main;
+- #27 domain outcome is `FAILED`, never `SUCCEEDED`, for preview-delivery
+  failure;
+- legacy internal callbacks remain
+  `texbrif:approve:<POST_ID>`, `texbrif:reject:<POST_ID>`, and
+  `texbrif:revise:<POST_ID>`, while public wording remains NullOne.
+
+Review-only main pipeline:
+- implementation:
+  `workspace/social/ops/scripts/nullone_main_draft_pipeline.py`;
+- closes the confirmed repo gap for programmatic Feed/Carousel review
+  drafts, with no publisher capability;
+- reuses the existing Visual V2 Feed and Carousel renderers and generic
+  Production Bridge manifest/draft infrastructure;
+- candidate `VERIFICATION: PASS` is admission only; exact finalized main
+  wording separately requires `MainFinalVerifier` PASS before render,
+  manifest, or draft;
+- verifier exception → `VERIFIER_FAILED`; non-PASS →
+  `VERIFICATION_BLOCKED`;
+- immutable `nullone.main-draft-spec.v1` is persisted before
+  render/manifest/draft at
+  `social/drafts/production/main/specs/<MAIN_REQUEST_ID>.json`;
+- request/version identity is deterministic; same-request content drift
+  → `MAIN_SPEC_CONFLICT`, and retry cannot mint altered wording/version;
+- Feed is exactly 1080×1350;
+- Carousel has 2–10 ordered 1080×1350 slides, requires meaningful
+  multi-slide value, and preserves ordered media;
+- no Visual V3 and no Reels.
+
+#36 also supplies an offline-testable mapping into #27's domain outcome
+vocabulary: valid NORMAL/suppression `NO_ACTION` → `SUCCEEDED`;
+deterministic pre-attempt policy/safety block → `BLOCKED`;
+preview-delivery failure → `FAILED`; ambiguous/in-flight/possibly consumed
+side effect → `UNKNOWN`. This mapping is repo-level only and is not
+scheduler/live-wired; scheduler success remains distinct from domain
+success.
+
+Validation at merge:
+- router: 54/54 PASS;
+- dispatcher: 60/60 PASS;
+- #35 identity: 99/99 PASS;
+- main pipeline: 34/34 PASS;
+- merged-main `python3 tests/run_offline.py` →
+  `OFFLINE_REGRESSION_SUITE=PASS`;
+- `git diff --check`: PASS;
+- no live/external calls.
+
+This is not production validation and adds no final publication
+authorization. Every target remains its own review object, first-stage
+human approval remains per target, and second final publish confirmation
+remains outside #36.
 
 ## Parallel engineering safety
 
@@ -587,9 +736,9 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 - Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
 - `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
 
-Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. This bundle is not the complete set of everything #37 requires; #36 breaking draft routing is the remaining required M0 engineering issue before #37. #37 remains the final, explicit controlled production deployment/preflight/live-validation boundary once the required reviewed M0 changes (including this bundle) are ready; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so all required reviewed repo-level M0 changes are now ready in Git. #37 is the sole remaining milestone issue and remains the final, explicit controlled production deployment/preflight/live-validation boundary; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order (updated 2026-09-06 after #33 merged): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), and #35 (breaking identity/dedup) are all accepted and merged — see their verified-completion sections above. #36 (breaking draft routing) is the next engineering issue and can consume #34 breaking severity/routing policy, #35 event identity/dedup/follow-up suppression, and the #33 reusable Story production core. The remaining sequence is `#36 → #37`, not parallel. #37 remains the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27/#28/#29/#30 bundle (plus applicable #31–#36 work) and observes genuine scheduled behavior before controlled production activation is considered complete. #36 remains required under the current #37 contract, and #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order (updated 2026-09-07 after #36 merged): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), #35 (breaking identity/dedup), and #36 (breaking draft routing) are all accepted and merged — see their verified-completion sections above. There is no remaining pre-#37 M0 engineering issue. The remaining sequence is `#37` only. #37 remains the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27–#36 work as applicable and observes genuine scheduled behavior before controlled production activation is considered complete. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -659,15 +808,60 @@ Direction:
 No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
-#4, #5, #27, #28, #29, #30, #31, #32, #33, #34 and #35 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; #30 via PR #47, squash merge commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`; #31 via PR #49, squash merge commit `a9334e27576c04f37535e05e8b6bd08e45606ffa`; #32 via PR #52, squash merge commit `a5fc6c69f5133baa9a807fe725f79c1a7ae5d96c`; #33 via PR #55, squash merge commit `7404501bdafb224f221bf8c79ee67bf7182bb2f7`; #34 via PR #50, squash merge commit `33bd7c9114ecaeda675f1565a80268541c95dd68`; #35 via PR #53, squash merge commit `0b0679c2d5aac98d777da34e2257526e9d9a09b5`). No production deployment has been performed for #27, #28, #29, #30, #31, #32, #33, #34, or #35; merged Git code is not production deployment/activation for any of them.
 
-Current order:
-1. the #3 read-only reliability proof evaluation is complete at repo/report level with a final verdict of FAIL — see `docs/reliability/2026-09-proof-verdict.md`; #3 itself is now CLOSED/COMPLETED (PR #46 merged as `875eeb715cac3c933b29694fec3c07fba094a39e`) — this closure records the verdict, it does not itself authorize production deployment or #37
-2. #30 concise Telegram failure alerts consuming truthful domain health is complete and merged (see "Verified #30 completion" above); production activation remains pending #37
-3. completed foundations: #31 cadence contract — DONE; #32 cadence controller — DONE; #33 Story draft pipeline — DONE; #34 breaking policy — DONE; #35 breaking identity/dedup — DONE. #36 breaking draft routing is the next engineering issue and can consume #34 breaking severity/routing policy, #35 event identity/dedup/follow-up suppression, and #33 reusable Story production core; the remaining sequence is `#36 → #37`, not parallel
-4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete; #37 also performs the scheduler-native `failureAlert` activation recorded in `docs/deployment/37-preflight-notification-requirements.md`; #37's acceptance criteria are unchanged
+### Repo-level M0 engineering complete
 
-The #3 evaluation is complete at report level and #3 is now closed (PR #46 merged); GitHub development continues per this order. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles. #31/#32/#33/#34/#35 being merged does not itself change any production/live behavior: #32 (cadence controller) and #33 (Story pipeline) are repo-level only; Story cadence and the Story draft pipeline are not active in production; #35 (breaking identity/dedup) is repo-level only and breaking routing is not active; no scheduler-native `failureAlert` activation or domain notifier live wiring has been activated either.
+The required reviewed engineering sequence is complete in Git:
+- #27 domain outcomes — DONE;
+- #28 Morning Editorial runtime hardening — DONE;
+- #29 Daily Analytics runtime — DONE;
+- #30 failure notification architecture — DONE;
+- #31 cadence contract — DONE;
+- #32 cadence controller — DONE;
+- #33 Story pipeline — DONE;
+- #34 breaking policy — DONE;
+- #35 breaking identity/dedup — DONE;
+- #36 breaking draft routing — DONE.
+
+#4 and #5 are also complete. #36 merged via PR #57 as
+`36f358a539fedf90e0c5cffda9b503b87594e3f1`; the earlier issue/merge SHAs
+remain recorded in their verified-completion sections. No production
+deployment has been performed for #27–#36. Repo-level engineering
+complete does not mean production activation complete.
+
+The #3 read-only reliability proof evaluation is complete at repo/report
+level with a final verdict of FAIL — see
+`docs/reliability/2026-09-proof-verdict.md`. The proof verdict remains
+`PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
+rewrite historical production evidence or authorize deployment.
+
+### Next and only remaining M0 step
+
+`#37 — controlled deployment / preflight / live validation`
+
+#37 remains OPEN and will separately:
+- select exact reviewed commit(s);
+- perform preflight;
+- deploy deliberately;
+- record the exact deployed SHA;
+- validate production actual state;
+- observe normal Morning Editorial and Daily Analytics;
+- observe real Story cadence using eligible real content;
+- observe breaking routing only if a natural qualifying event occurs,
+  otherwise record the live breaking criterion as `NOT_EXERCISED`;
+- preserve two-stage human approval and the no-blind-publish rule;
+- record rollback/change evidence;
+- perform the scheduler-native `failureAlert` activation recorded in
+  `docs/deployment/37-preflight-notification-requirements.md` where the
+  reviewed preflight permits it.
+
+No uncontrolled production changes should occur before that explicit
+gate except genuine emergency recovery of a concrete production failure
+under existing hotfix rules. No synthetic production cycles. Git merge
+does not change production/live behavior: Story cadence, Story drafting,
+breaking routing/dispatch, and the breaking Feed/Carousel main pipeline
+remain inactive; no scheduler-native `failureAlert` activation or domain
+notifier live wiring has occurred.
 
 ## Model/cost policy
 - Haiku: Radar, analytics, heartbeat, approval/publisher/utility and lightweight Story reasoning where useful
