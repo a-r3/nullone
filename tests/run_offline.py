@@ -16,6 +16,9 @@ COMMANDS = [
     [sys.executable, "tests/test_cadence_state_adapter.py"],
     [sys.executable, "tests/test_story_pipeline.py"],
     [sys.executable, "tests/test_story_supersession.py"],
+    [sys.executable, "tests/test_breaking_router.py"],
+    [sys.executable, "tests/test_main_draft_pipeline.py"],
+    [sys.executable, "tests/test_breaking_dispatch.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
     [sys.executable, "tests/test_behavioral_regressions.py"],
     [sys.executable, "tests/test_morning_editorial.py"],
@@ -24,6 +27,21 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_breaking_identity.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_breaking_router.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_main_draft_pipeline.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_breaking_dispatch.py",
         "self-test",
     ],
     [
