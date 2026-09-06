@@ -210,6 +210,21 @@ Adapter tests prove mapping and transport behavior separately. At minimum:
 - Defining or invoking an application workflow grants no publication,
   approval, scheduling or callback capability.
 
+## Relationship to future capability architecture (#13)
+
+#65 is the current M0 minimum: only the Domain/Core, NullOne Application
+Runtime, and the adapters/ports #59/#61/#62/#63 actually need today. #13 is a
+separate, later M3 contract that may generalize model/runtime capability
+taxonomy, connector versioning, scopes/permissions, idempotency evidence, and
+provider reconciliation across future connectors.
+
+#13 extends/generalizes the accepted #65 runtime/adapter boundary; it does not
+redefine, contradict, or block it. Any change to #65's boundary that #13 later
+requires needs an explicit reviewed migration/ADR, and provider-specific
+semantics must not leak back into NullOne Application Runtime or Domain/Core.
+#13 is not a dependency of #65 or of #59/#61/#62/#63, and no universal
+provider/plugin abstraction is introduced in #65 merely to anticipate it.
+
 ## M0 dependency application
 
 - #65 owns review of this architecture contract.
@@ -221,5 +236,9 @@ Adapter tests prove mapping and transport behavior separately. At minimum:
 - #62 implements `StoryWorkflow`, `DraftProvider`, and shared
   `ReviewDelivery` after #65 + #60.
 - #63 implements `BreakingWorkflow` after #65 + #62 and indirectly #60.
-- #37 repeats its read-only preflight only after these dependencies are
-  accepted through normal review.
+- #66 removes the reachable legacy direct-Zernio-call instructions in
+  `agents/approval/AGENTS.md`/`agents/publisher/AGENTS.md` (the narrow #6
+  subset that remains reachable after this integration); it blocks #37 and is
+  independent of #59/#60/#61/#62/#63.
+- #37 repeats its read-only preflight only after #65, #59, #61, #62, #63, and
+  #66 are accepted through normal review.
