@@ -55,7 +55,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational issues #27, #28, #29 and #30 are CLOSED; #31–#37 remain open
+- operational issues #27, #28, #29, #30, #31 and #34 are CLOSED; #32, #33, #35, #36 and #37 remain open
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -68,11 +68,11 @@ Relevant issues:
 - #28 Morning Editorial network failure behavior — CLOSED; PR #42 squash-merged as `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`
 - #29 Daily Analytics Zernio access/runtime bootstrap — CLOSED; PR #44 squash-merged as `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; production NOT deployed
 - #30 Telegram failure alerts — CLOSED/COMPLETED; PR #47 squash-merged as `31ac4cca9e4255d5ba665ea42989ab9237eb05c2` (was `feature/n30-telegram-failure-alerts`); this is repo-level only — scheduler-native OpenClaw `failureAlert` is NOT activated in production, the domain notifier is NOT wired into any live scheduled job, and no real Telegram/live scheduled validation has occurred; see "Verified #30 completion" below
-- #31 cadence contract decision — OPEN; may proceed in parallel with #34
-- #32 cadence controller — OPEN; depends on #31
+- #31 cadence contract decision — CLOSED/COMPLETED; PR #49 squash-merged as `a9334e27576c04f37535e05e8b6bd08e45606ffa`; decision/contract document only, no controller implementation (see "Verified #31 completion" below)
+- #32 cadence controller — OPEN; next engineering wave, may proceed in parallel with #35
 - #33 Story draft pipeline — OPEN; depends on the cadence contract/controller (#31/#32)
-- #34 breaking policy decision — OPEN; may proceed in parallel with #31
-- #35 breaking identity/dedup — OPEN; depends on #34
+- #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
+- #35 breaking identity/dedup — OPEN; next engineering wave, may proceed in parallel with #32
 - #36 breaking draft routing — OPEN; depends on the required cadence/Story and breaking policy/dedup foundations (#31–#33, #34/#35)
 - #37 controlled production activation/validation — OPEN; remains the final controlled deployment/preflight/live-validation boundary under its existing, unchanged contract
 
@@ -315,6 +315,76 @@ alert routing and state safety` follow-up commit):
 - real Telegram send / live scheduled validation: **NOT performed**
 - issue #30: **CLOSED/COMPLETED**; merged via PR #47 as `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`
 
+### Verified #31 completion — 2026-09-06
+
+Issue #31 `Define deterministic cadence and per-format load contract` is
+complete in the development repository. PR #49 ("Define deterministic
+cadence contract (#31)", branch `docs/n31-cadence-contract`)
+squash-merged to `main` as `a9334e27576c04f37535e05e8b6bd08e45606ffa`.
+Issue #31 auto-closed CLOSED/COMPLETED via the PR's `Closes #31` keyword.
+This is a decision/contract document only — no cadence controller,
+load-tracking implementation, or production change.
+
+Contract: `docs/contracts/cadence-contract-v1.md`. Core accepted policy:
+deterministic cadence/load contract under the `Asia/Baku` IANA timezone;
+Feed/Carousel load and Story load are tracked as independent counters;
+pending/approved/consequential/`UNKNOWN` state creates backpressure and
+is never treated as empty load; `quality > quota`; `PREPARE_* != PUBLISH`;
+human approval and second publication confirmation are unchanged; missed
+cadence opportunities coalesce and are never replayed; the downtime
+marker is observability-only and never masks a more specific present-time
+reason — no-gap + downtime marker gives `COALESCED_AFTER_DOWNTIME`,
+no-gap + no marker gives `TARGETS_MET`; current deterministic
+recommendation precedence remains main before Story; 13 machine-readable
+examples are included. #32 will implement this contract.
+
+### Verified #34 completion — 2026-09-06
+
+Issue #34 `Define breaking severity, deduplication and immediate-draft
+policy` is complete in the development repository. PR #50 ("Define
+breaking draft routing policy (#34)", branch
+`docs/n34-breaking-routing-policy`) squash-merged to `main` as
+`33bd7c9114ecaeda675f1565a80268541c95dd68`. Issue #34 auto-closed
+CLOSED/COMPLETED via the PR's `Closes #34` keyword. This is a
+decision/contract document only — no identity/dedup engine, routing
+implementation, or production change.
+
+Contract: `docs/contracts/breaking-routing-policy-v1.md`. Core accepted
+policy: severity classes `NORMAL`/`MATERIAL_BREAKING`/
+`EXCEPTIONAL_BREAKING`; breaking overrides timing only, never publication
+authorization; verification, quality, dedup, safe load, human approval
+and publication safety remain mandatory; `MATERIAL_BREAKING` may request
+an immediate Story; `EXCEPTIONAL_BREAKING` may request Story plus an
+optional justified Feed/Carousel candidate, with exceptional main not
+mandatory; known duplicate/consequential/`UNKNOWN` state suppresses
+automatic regeneration; deterministic identity/state authority precedes
+optional AI assistance; a follow-up requires verified material delta plus
+distinct audience value; no routing output authorizes publication. #35
+will implement identity/dedup; #36 will later implement draft routing.
+
+## Parallel engineering safety
+
+#31 and #34 were developed as two concurrent sessions against the same
+primary checkout (`~/nullone-repo-staging`) rather than separate
+worktrees; one session's `git checkout` changed the other's active branch
+mid-task at least once. No work was lost — uncommitted changes survive a
+branch switch and untracked files are not branch-scoped — but this is a
+process risk, not a pattern to repeat deliberately.
+
+For the #32/#35 next engineering wave (and any future parallel feature
+work in this repo):
+- use a separate `git worktree` directory per concurrent session, not the
+  shared primary checkout;
+- one branch per worktree;
+- do not switch the shared primary checkout's branch out from under
+  another active session;
+- keep the primary checkout on a clean `main` unless it is deliberately
+  being used for sync/merge verification.
+
+This is development/change-control guidance only, not production
+architecture; worktree paths are session-local scratch and should not be
+recorded as permanent infrastructure identifiers.
+
 ## Reliability proof
 Baseline: 2026-09-04 03:47 Asia/Baku
 Nominal end: 2026-09-06 03:47 Asia/Baku
@@ -334,7 +404,7 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 
 Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. This bundle is not the complete set of everything #37 requires; remaining required M0 engineering continues per the existing roadmap, including the #31–#36 Story/breaking dependency chain below. #37 remains the final, explicit controlled production deployment/preflight/live-validation boundary once the required reviewed M0 changes (including this bundle) are ready; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order: #31 (cadence contract decision) and #34 (breaking policy decision) are the next main engineering items and may proceed in parallel; #32 (cadence controller, depends on #31) and #35 (breaking identity/dedup, depends on #34) may then proceed in parallel after their respective decisions; #33 (Story draft pipeline) depends on the cadence contract/controller; #36 (breaking draft routing) depends on the required cadence/Story and breaking policy/dedup foundations; #37 remains the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27/#28/#29/#30 bundle (plus applicable #31–#36 work) and observes genuine scheduled behavior before controlled production activation is considered complete. #31–#36 are not optional under the current #37 contract, and #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order (updated 2026-09-06 after #31/#34 merged): #31 (cadence contract decision) and #34 (breaking policy decision) are accepted and merged — see "Verified #31 completion" and "Verified #34 completion" above; #32 (cadence controller) and #35 (breaking identity/dedup) are now the next engineering wave and may proceed in parallel, using separate `git worktree` checkouts per session (see "Parallel engineering safety"); #33 (Story draft pipeline) depends on the cadence contract/controller; #36 (breaking draft routing) depends on the required cadence/Story and breaking policy/dedup foundations; #37 remains the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27/#28/#29/#30 bundle (plus applicable #31–#36 work) and observes genuine scheduled behavior before controlled production activation is considered complete. #32–#36 are not optional under the current #37 contract, and #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -404,15 +474,15 @@ Direction:
 No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
-#4, #5, #27, #28, #29 and #30 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; #30 via PR #47, squash merge commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`). No production deployment has been performed for #27, #28, #29, or #30.
+#4, #5, #27, #28, #29, #30, #31 and #34 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; #30 via PR #47, squash merge commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`; #31 via PR #49, squash merge commit `a9334e27576c04f37535e05e8b6bd08e45606ffa`; #34 via PR #50, squash merge commit `33bd7c9114ecaeda675f1565a80268541c95dd68`). No production deployment has been performed for #27, #28, #29, #30, #31, or #34; merged Git code is not production deployment/activation for any of them.
 
 Current order:
 1. the #3 read-only reliability proof evaluation is complete at repo/report level with a final verdict of FAIL — see `docs/reliability/2026-09-proof-verdict.md`; #3 itself is now CLOSED/COMPLETED (PR #46 merged as `875eeb715cac3c933b29694fec3c07fba094a39e`) — this closure records the verdict, it does not itself authorize production deployment or #37
 2. #30 concise Telegram failure alerts consuming truthful domain health is complete and merged (see "Verified #30 completion" above); production activation remains pending #37
-3. #31 (cadence contract decision) and #34 (breaking policy decision) are the next main engineering items and may proceed in parallel; #32 (depends on #31) and #35 (depends on #34) may then proceed in parallel after their respective decisions; #33 (Story draft pipeline) depends on the cadence contract/controller; #36 (breaking draft routing) depends on the required cadence/Story and breaking policy/dedup foundations
+3. #31 (cadence contract) and #34 (breaking policy) are accepted and merged (see "Verified #31 completion" / "Verified #34 completion" above); #32 (cadence controller) and #35 (breaking identity/dedup) are now the next engineering wave and may proceed in parallel, using separate `git worktree` checkouts per session (see "Parallel engineering safety"); #33 (Story draft pipeline) depends on the cadence contract/controller; #36 (breaking draft routing) depends on the required cadence/Story and breaking policy/dedup foundations
 4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete; #37 also performs the scheduler-native `failureAlert` activation recorded in `docs/deployment/37-preflight-notification-requirements.md`; #37's acceptance criteria are unchanged
 
-The #3 evaluation is complete at report level and #3 is now closed (PR #46 merged); GitHub development continues per this order. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles.
+The #3 evaluation is complete at report level and #3 is now closed (PR #46 merged); GitHub development continues per this order. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles. #31/#34 being merged and #32/#35 becoming the next wave does not itself change any production/live behavior — no real Story cadence behavior, breaking routing, scheduler-native `failureAlert` activation, or domain notifier live wiring has been activated.
 
 ## Model/cost policy
 - Haiku: Radar, analytics, heartbeat, approval/publisher/utility and lightweight Story reasoning where useful
