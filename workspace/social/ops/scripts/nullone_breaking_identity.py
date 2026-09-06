@@ -900,16 +900,120 @@ def _classify_ledger_status(status: str) -> tuple[str | None, str | None, bool]:
     return None, None, False
 
 
+def _queue_block_kind(
+    status: str, *, has_manifest: bool
+) -> tuple[str | None, str | None, bool]:
+    """Return (consequential_kind, excluded_kind, unresolved) for one linked
+    queue block's status, extending `_classify_ledger_status` with the two
+    queue-only statuses (SCHEDULED, and DRAFTED without a manifest)."""
+    consequential_kind, excluded_kind, unresolved = _classify_ledger_status(status)
+
+    if consequential_kind is None and excluded_kind is None:
+        if status == "SCHEDULED":
+            consequential_kind = "SCHEDULED"
+        elif status == "DRAFTED" and not has_manifest:
+            excluded_kind = "DRAFTED_NO_MANIFEST"
+
+    return consequential_kind, excluded_kind, unresolved
+
+
+def _queue_matches(
+    candidate: CandidateInput,
+    identity: IdentityComputation,
+    state: RepositoryState,
+    manifest: Mapping[str, Any] | None,
+) -> tuple[MatchResult, ...]:
+    """Collect queue-candidate.md blocks deterministically linked to this
+    candidate.
+
+    Linkage requires an exact persisted reference already supported by the
+    real queue format - the candidate's own candidate_id/manifest_id, its
+    review-post-id/live-post-id, or (if present) an explicit event/
+    development identity match. A shared topic/title alone is never
+    sufficient linkage (accepted #34/#35 semantics: topic/title groups
+    related developments, it is never proof of event equivalence) - so it
+    is never used as a linkage key here. Every linked block is collected,
+    never truncated after the first, for audit.
+    """
+    manifest_id = manifest.get("manifest_id") if manifest else None
+    review_post_id = ((manifest or {}).get("review") or {}).get("zernio_draft_id")
+    live_post_id = ((manifest or {}).get("publication") or {}).get("live_zernio_post_id")
+
+    matches: list[MatchResult] = []
+
+    for idx, block in enumerate(state.queue_blocks):
+        fields = block.fields
+        linked = (
+            (
+                fields.get("candidate_id") is not None
+                and fields.get("candidate_id") == candidate.candidate_id
+            )
+            or (
+                manifest_id is not None
+                and fields.get("manifest_id") is not None
+                and fields.get("manifest_id") == manifest_id
+            )
+            or (
+                review_post_id is not None
+                and fields.get("review_post_id") is not None
+                and fields.get("review_post_id") == review_post_id
+            )
+            or (
+                live_post_id is not None
+                and fields.get("live_zernio_post_id") is not None
+                and fields.get("live_zernio_post_id") == live_post_id
+            )
+            or (
+                identity.event_id is not None
+                and fields.get("event_id") is not None
+                and fields.get("event_id") == identity.event_id
+            )
+            or (
+                identity.development_id is not None
+                and fields.get("development_id") is not None
+                and fields.get("development_id") == identity.development_id
+            )
+        )
+
+        if not linked:
+            continue
+
+        status = (fields.get("status") or "").upper()
+        consequential_kind, excluded_kind, unresolved = _queue_block_kind(
+            status, has_manifest=manifest is not None
+        )
+
+        matches.append(
+            MatchResult(
+                source="queue",
+                ref=f"queue:{idx}:{status or 'UNKNOWN'}",
+                development_id=None,
+                identity_basis="EXACT_IDENTIFIER",
+                same_source=True,
+                claim_unchanged=True,
+                consequential_kind=consequential_kind,
+                reserved_kind=None,
+                excluded_kind=excluded_kind,
+                unresolved=unresolved,
+            )
+        )
+
+    return tuple(matches)
+
+
 def _resurface_match(
-    candidate: CandidateInput, state: RepositoryState
+    candidate: CandidateInput, identity: IdentityComputation, state: RepositoryState
 ) -> tuple[MatchResult | None, tuple[str, ...]]:
     """Resolve exact resurfacing of the same candidate_id/topic slot.
 
-    Merges manifest, publish-ledger and queue signals for this exact
-    candidate/topic with precedence manifest > publish ledger > queue (a
-    stale READY queue row never overrides an unsafe manifest/ledger fact),
-    while every individual matched row/manifest/block is still recorded as
-    its own audit ref.
+    Merges manifest, publish-ledger and deterministically-linked queue
+    signals for this exact candidate with precedence manifest > publish
+    ledger > queue (a stale READY queue row never overrides an unsafe
+    manifest/ledger fact), while every individual matched row/manifest/
+    block is still recorded as its own audit ref. Queue linkage is never
+    established from a shared topic/title alone - only from an exact
+    persisted reference (candidate_id, manifest_id, review/live post id, or
+    explicit event/development id); see `_queue_matches`.
     """
     refs: list[str] = []
     found = False
@@ -922,8 +1026,8 @@ def _resurface_match(
 
     if manifest is not None:
         found = True
-        manifest_id = manifest.get("manifest_id") or candidate.candidate_id
-        refs.append(f"manifest:{manifest_id}")
+        manifest_ref_id = manifest.get("manifest_id") or candidate.candidate_id
+        refs.append(f"manifest:{manifest_ref_id}")
         consequential_kind, reserved_kind, unresolved = _manifest_kind(manifest)
 
     for idx, row in enumerate(state.publish_ledger_rows):
@@ -941,25 +1045,18 @@ def _resurface_match(
                 consequential_kind = result
                 unresolved = True
 
-    if candidate.topic_title:
-        for idx, block in enumerate(state.queue_blocks):
-            if block.topic != candidate.topic_title:
-                continue
+    queue_matches = _queue_matches(candidate, identity, state, manifest)
 
-            found = True
-            status = (block.fields.get("status") or "").upper()
-            refs.append(f"queue:{idx}:{status or 'UNKNOWN'}")
+    for queue_match in queue_matches:
+        found = True
+        refs.append(queue_match.ref)
 
-            if status in _EXCLUDED_QUEUE_STATUSES and excluded_kind is None:
-                excluded_kind = status
-            elif status == "DRAFTED" and manifest is None and excluded_kind is None:
-                excluded_kind = "DRAFTED_NO_MANIFEST"
-            elif status == "SCHEDULED" and consequential_kind is None:
-                consequential_kind = "SCHEDULED"
-            elif status == "PUBLISHED" and consequential_kind is None:
-                consequential_kind = "PUBLISHED"
-
-            break
+    if queue_matches and consequential_kind is None and excluded_kind is None:
+        queue_winner = _tier_winner(queue_matches)
+        if queue_winner is not None:
+            consequential_kind = queue_winner.consequential_kind
+            excluded_kind = queue_winner.excluded_kind
+            unresolved = queue_winner.unresolved
 
     if not found:
         return None, ()
@@ -1353,6 +1450,13 @@ def evaluate(candidate: CandidateInput, state: RepositoryState) -> BreakingIdent
          deterministic structured occurrence metadata - a bare canonical
          source URL (no exact id, no structured fields) can never alone
          prove a distinct event, only fail ambiguous.
+      6. An explicit caller-asserted follow-up delta (`candidate.delta`) is
+         a claim of relation to a parent development, never proof of a
+         distinct event: absent a deterministic parent match (step 2/3), it
+         must fail closed to `AMBIGUOUS_IDENTITY`, never `DISTINCT_EVENT`.
+         This only applies when a delta is actually asserted; a separately,
+         positively evidenced new occurrence with no asserted delta may
+         still be `DISTINCT_EVENT` under step 4/5.
     """
     identity = compute_identity(candidate)
 
@@ -1370,7 +1474,7 @@ def evaluate(candidate: CandidateInput, state: RepositoryState) -> BreakingIdent
             precedence_rule="IDENTITY_UNRESOLVED",
         )
 
-    resurface, resurface_refs = _resurface_match(candidate, state)
+    resurface, resurface_refs = _resurface_match(candidate, identity, state)
     topic_ledger_matches = _topic_ledger_matches(candidate, identity, state)
     prior_matches = _prior_development_matches(identity, state)
 
@@ -1436,6 +1540,31 @@ def evaluate(candidate: CandidateInput, state: RepositoryState) -> BreakingIdent
             ),
             matched_refs=tuple(matched_refs_all),
             precedence_rule="INSUFFICIENT_STRUCTURED_EVIDENCE",
+        )
+
+    if candidate.delta is not None:
+        # A caller-provided delta is a claim that this development is a
+        # material follow-up of some parent; it is never itself proof of a
+        # distinct event. Absent a deterministic parent development/event
+        # match (`governing` above), the claimed relation cannot be
+        # verified, so this must fail closed rather than silently mint
+        # DISTINCT_EVENT. This does not apply when `delta` is None: a
+        # separately, positively evidenced new occurrence may still be
+        # DISTINCT_EVENT under the existing positive-evidence rule above.
+        return _ambiguous(
+            candidate,
+            identity,
+            state,
+            reason_code="IDENTITY_UNRESOLVED",
+            reason_text=(
+                "Candidate asserts a material follow-up delta "
+                f"({candidate.delta.delta_kind}) but no deterministic parent "
+                "development/event match could be established; a claimed "
+                "follow-up relationship without proven parent linkage is "
+                "ambiguous, never a distinct event."
+            ),
+            matched_refs=tuple(matched_refs_all),
+            precedence_rule="EXPLICIT_FOLLOW_UP_WITHOUT_PARENT",
         )
 
     return _distinct(candidate, identity, state)

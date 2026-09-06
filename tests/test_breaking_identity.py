@@ -130,11 +130,21 @@ def write_topic_ledger_row(workspace: Path, **fields) -> None:
     path.write_text(existing + json.dumps(fields) + "\n", encoding="utf-8")
 
 
-def write_queue_block(workspace: Path, topic: str, status: str) -> None:
+def write_queue_block(workspace: Path, topic: str, status: str, **linkage_fields) -> None:
+    """Write one `candidate-queue.md` block.
+
+    `linkage_fields` (e.g. `candidate_id=`, `manifest_id=`, `review_post_id=`,
+    `live_zernio_post_id=`, `event_id=`, `development_id=`) are the only
+    fields the module treats as deterministic persisted linkage - topic/
+    title alone is never sufficient (Correction 1).
+    """
     path = workspace / "social" / "state" / "candidate-queue.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    block = f"- **topic:** {topic}\n- **status:** {status}\n---\n"
+    lines = [f"- **topic:** {topic}", f"- **status:** {status}"]
+    for key, value in linkage_fields.items():
+        lines.append(f"- **{key}:** {value}")
+    block = "\n".join(lines) + "\n---\n"
     path.write_text(existing + block, encoding="utf-8")
 
 
@@ -426,6 +436,7 @@ class MaterialFollowUpTests(unittest.TestCase):
                 {"region": "Global", "supported_claim": "claim"},
                 Path(td),
             )
+            self.assertEqual(result.dedup["decision"], "MATERIAL_FOLLOW_UP")
             self.assertEqual(result.dedup["follow_up_reason"], "AFFECTED_REGION_CHANGED")
 
     def test_material_correction(self):
@@ -446,6 +457,7 @@ class MaterialFollowUpTests(unittest.TestCase):
                 {"version": "2.0", "supported_claim": "claim"},
                 Path(td),
             )
+            self.assertEqual(result.dedup["decision"], "MATERIAL_FOLLOW_UP")
             self.assertEqual(result.dedup["follow_up_reason"], "PRODUCT_VERSION_CHANGED")
 
     def test_user_consequence_changed(self):
@@ -497,6 +509,185 @@ class MaterialFollowUpTests(unittest.TestCase):
             ))
             result = bi.evaluate(new_headline_candidate, state)
             self.assertEqual(result.dedup["decision"], "SAME_EVENT")
+
+
+class AmbiguousFollowUpWithoutParentTests(unittest.TestCase):
+    """An explicit `candidate.delta` asserts a claimed material follow-up
+    relationship; absent a deterministic parent development/event match it
+    must fail closed to AMBIGUOUS_IDENTITY, never silently DISTINCT_EVENT
+    (Correction 2)."""
+
+    def _evidence(self, **claim_fields):
+        # No `product` field by default: a shared canonical source URL
+        # (CANONICAL_SOURCE basis) is what keeps the parent/follow-up
+        # identity linked here, mirroring MaterialFollowUpTests/
+        # ReusedOfficialUrlTests - this class is about the parent-linkage
+        # gate itself, not re-testing identity-basis precedence.
+        return (
+            bi.EvidenceItem(
+                ref="e1",
+                supported_claim=claim_fields.pop("supported_claim", "claim"),
+                source_url="https://example.invalid/releases/correction-2",
+                **claim_fields,
+            ),
+        )
+
+    def test_product_version_changed_with_proven_parent_is_material_follow_up(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            parent = make_candidate(
+                "candidate-parent",
+                evidence=self._evidence(version="1.0"),
+            )
+            identity = bi.compute_identity(parent)
+            prior = {
+                "ref": "prior:parent",
+                "event_id": identity.event_id,
+                "development_id": identity.development_id,
+                "identity_basis": identity.identity_basis,
+                "consequential_kind": "PUBLISHED",
+            }
+            state = bi.load_repository_state(workspace, prior_developments=[prior])
+
+            followup = make_candidate(
+                "candidate-followup",
+                evidence=self._evidence(version="2.0"),
+                delta=bi.FollowUpDelta(
+                    delta_kind="PRODUCT_VERSION_CHANGED",
+                    parent_claim="1.0",
+                    new_claim="2.0",
+                    evidence_ref="e1",
+                ),
+            )
+            result = bi.evaluate(followup, state)
+            self.assertEqual(result.dedup["decision"], "MATERIAL_FOLLOW_UP")
+            self.assertEqual(result.dedup["follow_up_reason"], "PRODUCT_VERSION_CHANGED")
+
+    def test_product_version_changed_without_parent_match_is_ambiguous_not_distinct(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            state = bi.load_repository_state(workspace, prior_developments=[])
+
+            followup = make_candidate(
+                "candidate-followup",
+                evidence=self._evidence(product="widget", version="2.0"),
+                delta=bi.FollowUpDelta(
+                    delta_kind="PRODUCT_VERSION_CHANGED",
+                    parent_claim="1.0",
+                    new_claim="2.0",
+                    evidence_ref="e1",
+                ),
+            )
+            result = bi.evaluate(followup, state)
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertNotEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertEqual(result.reason_code, "IDENTITY_UNRESOLVED")
+            self.assertTrue(result.reconciliation_required)
+
+    def test_affected_region_changed_with_proven_parent_is_material_follow_up(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            parent = make_candidate(
+                "candidate-parent",
+                evidence=self._evidence(region="US-only"),
+            )
+            identity = bi.compute_identity(parent)
+            prior = {
+                "ref": "prior:parent",
+                "event_id": identity.event_id,
+                "development_id": identity.development_id,
+                "identity_basis": identity.identity_basis,
+                "consequential_kind": "PUBLISHED",
+            }
+            state = bi.load_repository_state(workspace, prior_developments=[prior])
+
+            followup = make_candidate(
+                "candidate-followup",
+                evidence=self._evidence(region="Global"),
+                delta=bi.FollowUpDelta(
+                    delta_kind="AFFECTED_REGION_CHANGED",
+                    parent_claim="US-only",
+                    new_claim="Global",
+                    evidence_ref="e1",
+                ),
+            )
+            result = bi.evaluate(followup, state)
+            self.assertEqual(result.dedup["decision"], "MATERIAL_FOLLOW_UP")
+            self.assertEqual(result.dedup["follow_up_reason"], "AFFECTED_REGION_CHANGED")
+
+    def test_affected_region_changed_without_parent_match_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            state = bi.load_repository_state(workspace, prior_developments=[])
+
+            followup = make_candidate(
+                "candidate-followup",
+                evidence=self._evidence(product="widget", region="Global"),
+                delta=bi.FollowUpDelta(
+                    delta_kind="AFFECTED_REGION_CHANGED",
+                    parent_claim="US-only",
+                    new_claim="Global",
+                    evidence_ref="e1",
+                ),
+            )
+            result = bi.evaluate(followup, state)
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertEqual(result.reason_code, "IDENTITY_UNRESOLVED")
+            self.assertTrue(result.reconciliation_required)
+
+    def test_same_new_version_delta_none_positively_evidenced_may_remain_distinct(self):
+        # This is the important negative case for Correction 2: when no
+        # delta is asserted at all, a separately, positively evidenced new
+        # product/version is still allowed to be DISTINCT_EVENT under the
+        # existing positive-evidence rule - the fail-closed behavior above
+        # applies only when the caller explicitly asserts a follow-up delta.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            first = make_candidate(
+                "candidate-a", evidence=self._evidence(product="widget", version="1.0")
+            )
+            identity_a = bi.compute_identity(first)
+            prior = {
+                "ref": "prior:a",
+                "event_id": identity_a.event_id,
+                "development_id": identity_a.development_id,
+                "identity_basis": identity_a.identity_basis,
+            }
+            state = bi.load_repository_state(workspace, prior_developments=[prior])
+
+            second = make_candidate(
+                "candidate-b",
+                evidence=self._evidence(product="widget", version="2.0"),
+                delta=None,
+            )
+            result = bi.evaluate(second, state)
+            self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertFalse(result.reconciliation_required)
+
+    def test_explicit_delta_with_missing_required_state_is_ambiguous_not_distinct(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            # No required stores initialized at all - state_gate_failed.
+            state = bi.load_repository_state(workspace)
+            self.assertTrue(state.state_gate_failed)
+
+            followup = make_candidate(
+                "candidate-followup",
+                evidence=self._evidence(product="widget", version="2.0"),
+                delta=bi.FollowUpDelta(
+                    delta_kind="PRODUCT_VERSION_CHANGED",
+                    parent_claim="1.0",
+                    new_claim="2.0",
+                    evidence_ref="e1",
+                ),
+            )
+            result = bi.evaluate(followup, state)
+            self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+            self.assertNotEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertTrue(result.reconciliation_required)
 
 
 class CrossSourceNoAnnouncementIdTests(unittest.TestCase):
@@ -736,9 +927,14 @@ class ConsequentialSuppressionTests(unittest.TestCase):
 
 class ExcludedHistoricalCandidateTests(unittest.TestCase):
     def _evaluate_with_queue(self, status):
+        # Linked via candidate_id (deterministic persisted linkage), not via
+        # topic/title alone - Correction 1 requires an exact persisted
+        # reference before a queue row can establish a match.
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td)
-            write_queue_block(workspace, "Shared topic title", status)
+            write_queue_block(
+                workspace, "Shared topic title", status, candidate_id="candidate-1"
+            )
             state = bi.load_repository_state(workspace)
             candidate = make_candidate("candidate-1", topic_title="Shared topic title")
             return bi.evaluate(candidate, state)
@@ -759,6 +955,89 @@ class ExcludedHistoricalCandidateTests(unittest.TestCase):
         result = self._evaluate_with_queue("SCHEDULED")
         self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
         self.assertFalse(result.reconciliation_required)
+
+
+class QueueIdentityLinkageTests(unittest.TestCase):
+    """Queue history is inspected via deterministic linkage only, never via
+    a shared topic/title alone (Correction 1)."""
+
+    def test_topic_title_only_queue_match_is_not_identity_match(self):
+        # Same topic/title as an excluded queue row, but no deterministic
+        # linkage (no candidate_id/manifest_id/post-id/event/development
+        # reference) - the row must never be treated as a match, so this
+        # reaches DISTINCT_EVENT on the candidate's own sufficient evidence.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            init_empty_required_stores(workspace)
+            write_queue_block(workspace, "Shared topic title", "REJECTED")
+            state = bi.load_repository_state(workspace, prior_developments=[])
+            candidate = make_candidate(
+                "candidate-unlinked",
+                topic_title="Shared topic title",
+                evidence=(
+                    bi.EvidenceItem(ref="e1", supported_claim="claim", product="widget"),
+                ),
+            )
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.dedup["decision"], "DISTINCT_EVENT")
+            self.assertEqual(result.dedup["matched_refs"], [])
+
+    def test_topic_title_plus_persisted_linkage_may_match(self):
+        # Same topic/title AND an exact persisted candidate_id reference -
+        # now a legitimate deterministic match per precedence.
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_queue_block(
+                workspace,
+                "Shared topic title",
+                "REJECTED",
+                candidate_id="candidate-linked",
+            )
+            state = bi.load_repository_state(workspace)
+            candidate = make_candidate(
+                "candidate-linked", topic_title="Shared topic title"
+            )
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.reason_code, "CANDIDATE_EXCLUDED")
+            self.assertIn("queue:0:REJECTED", result.dedup["matched_refs"])
+
+    def test_two_linked_queue_records_both_refs_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_manifest(workspace, "candidate-two")
+            write_queue_block(
+                workspace, "First topic", "READY", candidate_id="candidate-two"
+            )
+            write_queue_block(
+                workspace,
+                "Second topic",
+                "READY",
+                manifest_id="manifest-candidate-two",
+            )
+            state = bi.load_repository_state(workspace)
+            candidate = make_candidate("candidate-two")
+            result = bi.evaluate(candidate, state)
+            refs = result.dedup["matched_refs"]
+            queue_refs = [r for r in refs if r.startswith("queue:")]
+            self.assertEqual(len(queue_refs), 2)
+
+    def test_one_linked_unsafe_queue_record_and_one_stale_ready_wins_unsafe(self):
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            write_queue_block(
+                workspace, "First topic", "SCHEDULED", candidate_id="candidate-mix"
+            )
+            write_queue_block(
+                workspace, "Second topic", "READY", candidate_id="candidate-mix"
+            )
+            state = bi.load_repository_state(workspace)
+            candidate = make_candidate("candidate-mix")
+            result = bi.evaluate(candidate, state)
+            self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+            self.assertFalse(result.reconciliation_required)
+            refs = result.dedup["matched_refs"]
+            self.assertIn("queue:0:SCHEDULED", refs)
+            self.assertIn("queue:1:READY", refs)
 
 
 class TopicLedgerLinkageTests(unittest.TestCase):
@@ -827,9 +1106,12 @@ class AllMatchingHistoryTests(unittest.TestCase):
             # Publish ledger independently proves PUBLISHED - higher
             # authority than the benign manifest state and any lower tier.
             write_publish_ledger_row(workspace, "candidate-x", "PUBLISHED")
-            # Queue shows a stale READY row for the same slot - must not
-            # downgrade the ledger's PUBLISHED fact.
-            write_queue_block(workspace, "Some queue title", "READY")
+            # Queue shows a stale READY row for the same slot, linked via
+            # candidate_id (not topic/title alone) - must not downgrade the
+            # ledger's PUBLISHED fact.
+            write_queue_block(
+                workspace, "Some queue title", "READY", candidate_id="candidate-x"
+            )
             # Topic ledger, linked via manifest_id, shows a lower-precedence
             # excluded status - must not override PUBLISHED either.
             write_topic_ledger_row(
@@ -1096,11 +1378,18 @@ class PrecedenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             workspace = Path(td)
             write_manifest(workspace, "candidate-1", publication={"state": "PUBLISHED"})
-            write_queue_block(workspace, "Some topic", "READY")
+            # Linked via candidate_id so it is still collected as matched
+            # history, but must not downgrade the manifest's PUBLISHED fact.
+            write_queue_block(
+                workspace, "Some topic", "READY", candidate_id="candidate-1"
+            )
             state = bi.load_repository_state(workspace)
             candidate = make_candidate("candidate-1", topic_title="Some topic")
             result = bi.evaluate(candidate, state)
             self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+            self.assertTrue(
+                any(r.startswith("queue:") for r in result.dedup["matched_refs"])
+            )
 
     def test_absent_lower_precedence_source_does_not_block_positive_manifest_match(self):
         with tempfile.TemporaryDirectory() as td:
