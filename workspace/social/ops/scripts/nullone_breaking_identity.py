@@ -617,14 +617,27 @@ def _read_jsonl_store(path: Path) -> tuple[tuple[dict, ...], str]:
     return tuple(rows), status
 
 
-def _read_manifest_store(manifest_dir: Path) -> tuple[dict[str, dict], str]:
+def _read_manifest_store(manifest_dir: Path) -> tuple[dict[str, tuple[dict, ...]], str]:
     """Read production manifests keyed by candidate_id, with a read-state.
 
     A missing directory is MISSING (not proven empty). An existing
     directory containing zero manifests is a proven INITIALIZED_EMPTY. Any
-    manifest that fails to parse, lacks a candidate_id, or contradicts an
-    already-seen manifest for the same candidate_id is MALFORMED - fail
-    closed rather than silently pick one.
+    manifest that fails to parse, is not an object, or lacks a
+    candidate_id is MALFORMED - fail closed rather than silently skip it.
+
+    #36 hardening (Blocker C): an intentional two-target draft set (one
+    Story manifest and one Feed/Carousel manifest) legitimately shares one
+    candidate_id across two DIFFERENT manifest records - that is a normal,
+    accepted #34/#36 outcome, not corruption. Every distinct manifest
+    linked to a candidate_id is retained here as a tuple (never collapsed
+    to "the" manifest, never discarded, never silently narrowed to the
+    newest) - see `_manifest_matches`/`_resurface_match` for how the
+    governing interpretation among siblings is then selected. A
+    byte-identical duplicate (the exact same manifest content appearing
+    twice) is deduplicated rather than appended again. Two DIFFERENT
+    manifests sharing the same `manifest_id` is still genuine identity
+    corruption (manifest_id is a supposedly-unique per-format/version
+    reference) and still fails closed to MALFORMED.
     """
     if not manifest_dir.exists():
         return {}, STATE_MISSING
@@ -638,7 +651,7 @@ def _read_manifest_store(manifest_dir: Path) -> tuple[dict[str, dict], str]:
         return {}, STATE_UNREADABLE
 
     paths = [manifest_dir / name for name in names if name.endswith(".json")]
-    out: dict[str, dict] = {}
+    out: dict[str, list[dict]] = {}
 
     for path in paths:
         try:
@@ -654,13 +667,24 @@ def _read_manifest_store(manifest_dir: Path) -> tuple[dict[str, dict], str]:
         if not isinstance(candidate_id, str) or not candidate_id.strip():
             return {}, STATE_MALFORMED
 
-        if candidate_id in out and out[candidate_id] != data:
+        siblings = out.setdefault(candidate_id, [])
+
+        if data in siblings:
+            continue  # exact duplicate content -- not a new sibling.
+
+        manifest_id = data.get("manifest_id")
+        if manifest_id is not None and any(s.get("manifest_id") == manifest_id for s in siblings):
+            # Two different manifest records claiming the same manifest_id
+            # is an identity collision, not an intentional multi-target
+            # sibling (siblings always have distinct manifest_id -- see
+            # `_manifest_id_for_version`) -- genuine corruption.
             return {}, STATE_MALFORMED
 
-        out[candidate_id] = data
+        siblings.append(data)
 
-    status = STATE_PRESENT_WITH_DATA if out else STATE_INITIALIZED_EMPTY
-    return out, status
+    frozen = {candidate_id: tuple(manifests) for candidate_id, manifests in out.items()}
+    status = STATE_PRESENT_WITH_DATA if frozen else STATE_INITIALIZED_EMPTY
+    return frozen, status
 
 
 def _read_queue_store(path: Path) -> tuple[tuple[QueueBlock, ...], str]:
@@ -679,7 +703,11 @@ def _read_queue_store(path: Path) -> tuple[tuple[QueueBlock, ...], str]:
 
 @dataclass(frozen=True)
 class RepositoryState:
-    manifests_by_candidate_id: Mapping[str, dict]
+    # #36 hardening (Blocker C): candidate_id -> tuple of ALL manifests
+    # linked to it (never a single "the" manifest) -- an intentional
+    # two-target draft set (Story + Feed/Carousel) legitimately produces
+    # more than one manifest per candidate_id. See `_read_manifest_store`.
+    manifests_by_candidate_id: Mapping[str, tuple[dict, ...]]
     manifests_status: str
     publish_ledger_rows: tuple[dict, ...]
     publish_ledger_status: str
@@ -917,11 +945,34 @@ def _queue_block_kind(
     return consequential_kind, excluded_kind, unresolved
 
 
+def _manifest_link_ids(
+    manifests: tuple[Mapping[str, Any], ...]
+) -> tuple[set[str], set[str], set[str]]:
+    """Return (manifest_ids, review_post_ids, live_post_ids) across ALL
+    manifests linked to one candidate_id -- used for deterministic
+    persisted-reference linkage to queue/topic-ledger rows. An intentional
+    multi-manifest candidate contributes every sibling's ids, never just
+    one manifest's.
+    """
+    manifest_ids = {m.get("manifest_id") for m in manifests if m.get("manifest_id")}
+    review_post_ids = {
+        rid
+        for m in manifests
+        if (rid := (m.get("review") or {}).get("zernio_draft_id"))
+    }
+    live_post_ids = {
+        lid
+        for m in manifests
+        if (lid := (m.get("publication") or {}).get("live_zernio_post_id"))
+    }
+    return manifest_ids, review_post_ids, live_post_ids
+
+
 def _queue_matches(
     candidate: CandidateInput,
     identity: IdentityComputation,
     state: RepositoryState,
-    manifest: Mapping[str, Any] | None,
+    manifests: tuple[Mapping[str, Any], ...],
 ) -> tuple[MatchResult, ...]:
     """Collect queue-candidate.md blocks deterministically linked to this
     candidate.
@@ -933,11 +984,12 @@ def _queue_matches(
     sufficient linkage (accepted #34/#35 semantics: topic/title groups
     related developments, it is never proof of event equivalence) - so it
     is never used as a linkage key here. Every linked block is collected,
-    never truncated after the first, for audit.
+    never truncated after the first, for audit. `manifests` is every
+    manifest linked to this candidate_id (Blocker C: possibly more than
+    one for an intentional multi-target draft set) - linkage matches
+    against any of their ids.
     """
-    manifest_id = manifest.get("manifest_id") if manifest else None
-    review_post_id = ((manifest or {}).get("review") or {}).get("zernio_draft_id")
-    live_post_id = ((manifest or {}).get("publication") or {}).get("live_zernio_post_id")
+    manifest_ids, review_post_ids, live_post_ids = _manifest_link_ids(manifests)
 
     matches: list[MatchResult] = []
 
@@ -949,19 +1001,16 @@ def _queue_matches(
                 and fields.get("candidate_id") == candidate.candidate_id
             )
             or (
-                manifest_id is not None
-                and fields.get("manifest_id") is not None
-                and fields.get("manifest_id") == manifest_id
+                fields.get("manifest_id") is not None
+                and fields.get("manifest_id") in manifest_ids
             )
             or (
-                review_post_id is not None
-                and fields.get("review_post_id") is not None
-                and fields.get("review_post_id") == review_post_id
+                fields.get("review_post_id") is not None
+                and fields.get("review_post_id") in review_post_ids
             )
             or (
-                live_post_id is not None
-                and fields.get("live_zernio_post_id") is not None
-                and fields.get("live_zernio_post_id") == live_post_id
+                fields.get("live_zernio_post_id") is not None
+                and fields.get("live_zernio_post_id") in live_post_ids
             )
             or (
                 identity.event_id is not None
@@ -980,7 +1029,7 @@ def _queue_matches(
 
         status = (fields.get("status") or "").upper()
         consequential_kind, excluded_kind, unresolved = _queue_block_kind(
-            status, has_manifest=manifest is not None
+            status, has_manifest=bool(manifests)
         )
 
         matches.append(
@@ -1001,6 +1050,75 @@ def _queue_matches(
     return tuple(matches)
 
 
+def _manifest_matches(
+    candidate: CandidateInput, manifests: tuple[Mapping[str, Any], ...]
+) -> tuple[MatchResult, ...]:
+    """One MatchResult per manifest linked to this candidate_id.
+
+    #36 hardening (Blocker C): an intentional two-target draft set (one
+    Story manifest and one Feed/Carousel manifest sharing the same
+    candidate_id) is a normal, accepted multi-manifest case - every
+    manifest is retained and evaluated as its own match, never collapsed
+    to "the" manifest for this candidate_id. The governing interpretation
+    among siblings is selected by `_manifest_tier_winner` (NOT the generic
+    `_tier_winner`/`_severity_rank` used for possibly-superseding records
+    from one source): a clean sibling never downgrades an unsafe one.
+    """
+    matches: list[MatchResult] = []
+    for manifest in manifests:
+        consequential_kind, reserved_kind, unresolved = _manifest_kind(manifest)
+        manifest_ref_id = manifest.get("manifest_id") or candidate.candidate_id
+        matches.append(
+            MatchResult(
+                source="manifest",
+                ref=f"manifest:{manifest_ref_id}",
+                development_id=None,
+                identity_basis="EXACT_IDENTIFIER",
+                same_source=True,
+                claim_unchanged=True,
+                consequential_kind=consequential_kind,
+                reserved_kind=reserved_kind,
+                excluded_kind=None,
+                unresolved=unresolved,
+            )
+        )
+    return tuple(matches)
+
+
+def _manifest_severity_rank(match: MatchResult) -> int:
+    """Lower is more severe/authoritative among manifest SIBLINGS for one
+    candidate_id (Blocker C).
+
+    Deliberately NOT `_severity_rank`: that ranking is designed to find the
+    strongest *resolved* signal among what may be superseding records from
+    a single source (e.g. later prior-development/queue entries correcting
+    an earlier ambiguous one), so it ranks a resolved state as MORE
+    authoritative than an unresolved one of the same kind. Manifest
+    siblings are the opposite case - a Story manifest and a Feed/Carousel
+    manifest are two INDEPENDENT facts about two different targets, never
+    a correction of each other, so an unresolved/unsafe signal on one
+    target must never be silently outranked by a clean signal on the
+    other (see #36 hardening section 6's REVIEW_UNKNOWN + DRAFT_CREATED
+    example: the unresolved Story state must remain governing even though
+    the Main manifest's DRAFT_CREATED is itself resolved/definite).
+    """
+    if match.consequential_kind is not None and match.unresolved:
+        return 0
+    if match.reserved_kind is not None and match.unresolved:
+        return 1
+    if match.consequential_kind is not None:
+        return 2
+    if match.reserved_kind is not None:
+        return 3
+    return 4
+
+
+def _manifest_tier_winner(matches: tuple[MatchResult, ...]) -> MatchResult | None:
+    if not matches:
+        return None
+    return min(matches, key=_manifest_severity_rank)
+
+
 def _resurface_match(
     candidate: CandidateInput, identity: IdentityComputation, state: RepositoryState
 ) -> tuple[MatchResult | None, tuple[str, ...]]:
@@ -1013,7 +1131,13 @@ def _resurface_match(
     block is still recorded as its own audit ref. Queue linkage is never
     established from a shared topic/title alone - only from an exact
     persisted reference (candidate_id, manifest_id, review/live post id, or
-    explicit event/development id); see `_queue_matches`.
+    explicit event/development id); see `_queue_matches`. `manifests` may
+    legitimately contain more than one record for this candidate_id
+    (Blocker C: an intentional Story+Feed/Carousel draft set) - every
+    manifest is evaluated and retained as its own ref; the governing
+    interpretation is the most severe/authoritative sibling
+    (`_manifest_matches` + `_manifest_tier_winner`), never a clean sibling
+    silently downgrading an unsafe one.
     """
     refs: list[str] = []
     found = False
@@ -1022,13 +1146,19 @@ def _resurface_match(
     excluded_kind: str | None = None
     unresolved = False
 
-    manifest = state.manifests_by_candidate_id.get(candidate.candidate_id)
+    manifests = state.manifests_by_candidate_id.get(candidate.candidate_id, ())
+    manifest_matches = _manifest_matches(candidate, manifests)
 
-    if manifest is not None:
+    for manifest_match in manifest_matches:
         found = True
-        manifest_ref_id = manifest.get("manifest_id") or candidate.candidate_id
-        refs.append(f"manifest:{manifest_ref_id}")
-        consequential_kind, reserved_kind, unresolved = _manifest_kind(manifest)
+        refs.append(manifest_match.ref)
+
+    if manifest_matches:
+        manifest_winner = _manifest_tier_winner(manifest_matches)
+        if manifest_winner is not None:
+            consequential_kind = manifest_winner.consequential_kind
+            reserved_kind = manifest_winner.reserved_kind
+            unresolved = manifest_winner.unresolved
 
     for idx, row in enumerate(state.publish_ledger_rows):
         if row.get("candidate_id") != candidate.candidate_id:
@@ -1045,7 +1175,7 @@ def _resurface_match(
                 consequential_kind = result
                 unresolved = True
 
-    queue_matches = _queue_matches(candidate, identity, state, manifest)
+    queue_matches = _queue_matches(candidate, identity, state, manifests)
 
     for queue_match in queue_matches:
         found = True
@@ -1085,21 +1215,21 @@ def _topic_ledger_matches(
     manifest_id/review-post-id/live-post-id, or (if present) an explicit
     event/development identity match. A shared `topic_cluster` or topic
     title alone is never sufficient to call two developments identical, so
-    it is never used as a linkage key here.
+    it is never used as a linkage key here. `manifests` may legitimately
+    contain more than one record for this candidate_id (Blocker C) -
+    linkage matches against any of their ids.
     """
-    manifest = state.manifests_by_candidate_id.get(candidate.candidate_id)
-    manifest_id = manifest.get("manifest_id") if manifest else None
-    review_post_id = ((manifest or {}).get("review") or {}).get("zernio_draft_id")
-    live_post_id = ((manifest or {}).get("publication") or {}).get("live_zernio_post_id")
+    manifests = state.manifests_by_candidate_id.get(candidate.candidate_id, ())
+    manifest_ids, review_post_ids, live_post_ids = _manifest_link_ids(manifests)
 
     matches: list[MatchResult] = []
 
     for idx, row in enumerate(state.topic_ledger_rows):
         linked = (
             (row.get("candidate_id") is not None and row.get("candidate_id") == candidate.candidate_id)
-            or (manifest_id is not None and row.get("manifest_id") == manifest_id)
-            or (live_post_id is not None and row.get("live_zernio_post_id") == live_post_id)
-            or (review_post_id is not None and row.get("review_post_id") == review_post_id)
+            or (row.get("manifest_id") is not None and row.get("manifest_id") in manifest_ids)
+            or (row.get("live_zernio_post_id") is not None and row.get("live_zernio_post_id") in live_post_ids)
+            or (row.get("review_post_id") is not None and row.get("review_post_id") in review_post_ids)
             or (identity.event_id is not None and row.get("event_id") == identity.event_id)
             or (
                 identity.development_id is not None
