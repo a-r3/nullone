@@ -471,5 +471,82 @@ class DeterminismTests(unittest.TestCase):
         self.assertEqual(set(result.to_dict()), expected_fields)
 
 
+class MainFormatReasonDurabilityTests(unittest.TestCase):
+    """#36 hardening: main_format_reason must survive to_dict()/persistence
+    without adding a 15th field to the strict nullone.breaking-routing.v1
+    schema (test_breaking_routing_contract.py enforces the exact field set).
+    """
+
+    def test_feed_reason_present_on_result_and_folded_into_reason_text(self):
+        result = router.evaluate_routing(
+            make_input(
+                severity="EXCEPTIONAL_BREAKING",
+                severity_reason_text="exceptional value",
+                main_justification="standalone value",
+                main_format=main_findings(
+                    feed_score=40, single_visual_value=True, available_source_media=True
+                ),
+            )
+        )
+        self.assertEqual(result.draft_targets, ("STORY", "FEED"))
+        self.assertIsNotNone(result.main_format_reason)
+        self.assertIn("Feed", result.main_format_reason)
+        # Durable across to_dict()/persistence: folded into reason_text.
+        self.assertIn(result.main_format_reason, result.reason_text)
+        self.assertIn("FEED", result.reason_text)
+        # main_draft_justification (audience value) stays a distinct concept
+        # from main_format_reason (structural FEED-vs-CAROUSEL fit).
+        self.assertEqual(result.main_draft_justification, "standalone value")
+        self.assertNotEqual(result.main_draft_justification, result.main_format_reason)
+
+    def test_carousel_reason_present_on_result_and_folded_into_reason_text(self):
+        result = router.evaluate_routing(
+            make_input(
+                severity="EXCEPTIONAL_BREAKING",
+                severity_reason_text="exceptional value",
+                main_justification="standalone value",
+                main_format=main_findings(
+                    carousel_score=45,
+                    meaningful_multi_slide_value=True,
+                    comparison_value=True,
+                ),
+            )
+        )
+        self.assertEqual(result.draft_targets, ("STORY", "CAROUSEL"))
+        self.assertIsNotNone(result.main_format_reason)
+        self.assertIn("Carousel", result.main_format_reason)
+        self.assertIn(result.main_format_reason, result.reason_text)
+        self.assertIn("CAROUSEL", result.reason_text)
+
+    def test_story_only_result_has_no_main_format_reason(self):
+        result = router.evaluate_routing(
+            make_input(severity="EXCEPTIONAL_BREAKING", severity_reason_text="exceptional value")
+        )
+        self.assertEqual(result.routing_decision, "IMMEDIATE_STORY_DRAFT")
+        self.assertIsNone(result.main_format_reason)
+
+    def test_to_dict_still_has_exactly_the_accepted_schema_fields(self):
+        result = router.evaluate_routing(
+            make_input(
+                severity="EXCEPTIONAL_BREAKING",
+                severity_reason_text="exceptional value",
+                main_justification="standalone value",
+                main_format=main_findings(
+                    carousel_score=45,
+                    meaningful_multi_slide_value=True,
+                    comparison_value=True,
+                ),
+            )
+        )
+        expected_fields = {
+            "schema", "candidate_id", "assessment_ref", "state_snapshot_ref", "severity",
+            "event", "verification", "dedup", "routing_decision", "reason_code",
+            "reason_text", "draft_targets", "main_draft_justification",
+            "reconciliation_required",
+        }
+        self.assertEqual(set(result.to_dict()), expected_fields)
+        self.assertNotIn("main_format_reason", result.to_dict())
+
+
 if __name__ == "__main__":
     unittest.main()

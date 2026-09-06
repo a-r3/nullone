@@ -75,7 +75,10 @@ MAIN_PIPELINE_OUTCOMES = frozenset(
         "DRAFT_CREATED",
         "PREVIEW_DELIVERY_FAILED",
         "CANDIDATE_NOT_ELIGIBLE",
+        "VERIFIER_FAILED",
+        "VERIFICATION_BLOCKED",
         "MAIN_SPEC_BLOCKED",
+        "MAIN_SPEC_CONFLICT",
         "RENDER_FAILED",
         "MANIFEST_BLOCKED",
         "REVIEW_DRAFT_ALREADY_CONSUMED",
@@ -91,6 +94,20 @@ class MainPipelineError(RuntimeError):
 
 class MainCandidateNotEligible(MainPipelineError):
     pass
+
+
+class MainSpecBlocked(MainPipelineError):
+    """A persisted/finalized main spec is missing, malformed or inconsistent."""
+
+
+class MainSpecConflict(MainPipelineError):
+    """Incoming same-request content conflicts with the persisted finalized spec.
+
+    A retry is not a revision: the persisted spec (candidate admission PASS
+    -> exact spec -> separate final verifier PASS -> immutable persistence)
+    is authoritative for `main_request_id`. Changed wording under the same
+    request never silently mints a new version.
+    """
 
 
 class MainRenderFailed(MainPipelineError):
@@ -111,6 +128,7 @@ class MainPipelineResult:
     main_version_id: str | None = None
     review_post_id: str | None = None
     manifest_path: str | None = None
+    main_spec_path: str | None = None
     preview_payload: dict[str, Any] | None = None
     preview_delivery: dict[str, Any] | None = None
     context: dict[str, Any] = field(default_factory=dict)
@@ -205,14 +223,26 @@ def compute_main_request_id(candidate: dict[str, Any]) -> str:
     return f"main-request-{_canonical_hash(lineage)[:32]}"
 
 
-def compute_main_version_id(candidate: dict[str, Any], request_id: str) -> str:
+_FINAL_MAIN_FIELDS = ("format", "caption_text", "feed", "carousel")
+
+
+def compute_main_version_id(candidate: dict[str, Any], spec: dict[str, Any]) -> str:
+    """Deterministic fingerprint of the exact finalized main content.
+
+    Depends only on candidate identity/lineage, the request identity, and
+    the *persisted spec's* finalized content fields -- never the raw,
+    possibly-still-mutable caller-supplied candidate fields directly.
+    Retry stability comes from reusing the persisted finalized spec (see
+    `_load_or_persist_main_spec`) rather than recomputing from whatever
+    content a retry happens to supply.
+    """
+
     payload = {
-        "main_request_id": request_id,
+        "main_request_id": spec.get("main_request_id") or compute_main_request_id(candidate),
         "candidate_id": candidate["candidate_id"],
-        "format": candidate["format"],
-        "caption_text": candidate["caption_text"],
-        "feed": candidate.get("feed"),
-        "carousel": candidate.get("carousel"),
+        "candidate_version": candidate.get("candidate_version"),
+        "request_lineage": candidate.get("request_lineage"),
+        "spec": {field_name: spec.get(field_name) for field_name in _FINAL_MAIN_FIELDS},
     }
     return _canonical_hash(payload)
 
@@ -242,6 +272,254 @@ def _main_request_lock(request_id: str):
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
+# Final main verification -- separate from candidate admission (#36
+# hardening, accepted #34 rule: candidate verification PASS is only the
+# admission gate; the exact finalized Feed/Carousel wording must
+# independently pass exact verification before render/manifest/draft).
+# Mirrors the #33 Story final-verifier boundary
+# (`nullone_story_pipeline.StoryVerifier`) but matches the issue's own
+# suggested shape: an object exposing `.verify(main_spec, evidence_refs)`.
+# No real production verifier ships here (mirroring #33); a numeric-scope
+# checker is one legitimate, deterministic, narrow example, and offline
+# tests also exercise an unconditional fake.
+# ---------------------------------------------------------------------------
+
+
+class MainFinalVerifier(Protocol):
+    def verify(self, main_spec: dict[str, Any], evidence_refs: list[str]) -> dict[str, Any]: ...
+
+
+class _CallableMainVerifier:
+    """Wraps a plain `(main_spec, evidence_refs) -> dict` function as a
+    `MainFinalVerifier`, preserving a stable `__name__` for audit
+    (`main_final_verification.verifier`)."""
+
+    def __init__(self, fn, name: str | None = None) -> None:
+        self._fn = fn
+        self.__name__ = name or getattr(fn, "__name__", "main_verifier")
+
+    def verify(self, main_spec: dict[str, Any], evidence_refs: list[str]) -> dict[str, Any]:
+        return self._fn(main_spec, evidence_refs)
+
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?%?")
+
+
+def _numeric_scope_main_verifier_fn(main_spec: dict[str, Any], evidence_refs: list[str]) -> dict[str, Any]:
+    """Deterministic, narrow verifier: every number in the exact finalized
+    Feed/Carousel content must be verbatim-supported by the candidate's
+    evidence text. Intentionally narrow (numbers only) -- a concrete
+    example of the injectable final-verifier interface, not a substitute
+    for real fact verification.
+    """
+
+    evidence_blob = " ".join(str(ref) for ref in evidence_refs)
+
+    spec_text_parts = [str(main_spec.get("caption_text") or "")]
+    feed = main_spec.get("feed") or {}
+    if isinstance(feed, dict):
+        spec_text_parts.extend(str(feed.get(k) or "") for k in ("headline", "stat", "kicker"))
+    carousel = main_spec.get("carousel") or {}
+    if isinstance(carousel, dict):
+        for slide in carousel.get("slides") or []:
+            if isinstance(slide, dict):
+                spec_text_parts.append(json.dumps(slide, ensure_ascii=False))
+
+    spec_text = " ".join(spec_text_parts)
+    unsupported = sorted(
+        {token for token in _NUMBER_RE.findall(spec_text) if token not in evidence_blob}
+    )
+
+    if unsupported:
+        return {
+            "status": "BLOCKED",
+            "reason": f"Unsupported numeric claim(s) not found in evidence: {unsupported}",
+        }
+    return {"status": "PASS", "reason": "All numeric claims are evidence-supported."}
+
+
+numeric_scope_main_verifier: MainFinalVerifier = _CallableMainVerifier(
+    _numeric_scope_main_verifier_fn, name="numeric_scope_main_verifier"
+)
+
+
+def make_fake_main_verifier(status: str, reason: str = "fake verifier") -> MainFinalVerifier:
+    """Test helper: an unconditional fake final verifier returning a fixed result."""
+
+    def _verify(main_spec: dict[str, Any], evidence_refs: list[str]) -> dict[str, Any]:
+        return {"status": status, "reason": reason}
+
+    return _CallableMainVerifier(_verify, name=f"fake_main_verifier_{status.lower()}")
+
+
+# ---------------------------------------------------------------------------
+# Immutable finalized main spec (nullone.main-draft-spec.v1) -- persisted at
+# social/drafts/production/main/specs/<main_request_id>.json BEFORE render/
+# manifest/review work. Candidate admission PASS is only the entry gate;
+# writer/editor/candidate state can never self-certify the exact finalized
+# wording -- only this separately-verified, persisted spec is authoritative
+# for `main_request_id`. A retry is not a revision: the same
+# `main_request_id` reuses the exact persisted content/version; incoming
+# same-request content that conflicts fails closed to MAIN_SPEC_CONFLICT
+# rather than silently minting a new version or drifting wording.
+# ---------------------------------------------------------------------------
+
+
+def _main_spec_path(main_request_id: str) -> Path:
+    return resolve_workspace_path(f"social/drafts/production/main/specs/{main_request_id}.json")
+
+
+def _build_raw_main_spec(candidate: dict[str, Any], main_request_id: str) -> dict[str, Any]:
+    return {
+        "main_request_id": main_request_id,
+        "candidate_id": candidate["candidate_id"],
+        "candidate_version": candidate.get("candidate_version"),
+        "request_lineage": candidate.get("request_lineage"),
+        "format": candidate["format"],
+        "caption_text": candidate["caption_text"],
+        "feed": candidate.get("feed"),
+        "carousel": candidate.get("carousel"),
+        "evidence_refs": list(candidate["evidence_refs"]),
+    }
+
+
+def _spec_content_matches_candidate(spec: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    return (
+        spec.get("caption_text") == candidate.get("caption_text")
+        and spec.get("feed") == candidate.get("feed")
+        and spec.get("carousel") == candidate.get("carousel")
+    )
+
+
+def _validate_finalized_main_spec(
+    spec: Any,
+    candidate: dict[str, Any],
+    main_request_id: str,
+) -> dict[str, Any]:
+    if not isinstance(spec, dict):
+        raise MainSpecBlocked("Persisted main spec must be an object")
+    if spec.get("schema") != SCHEMA or spec.get("contract_version") != CONTRACT_VERSION:
+        raise MainSpecBlocked("Persisted main spec schema/version mismatch")
+    if spec.get("main_request_id") != main_request_id:
+        raise MainSpecBlocked("Persisted main request identity mismatch")
+    if spec.get("candidate_id") != candidate["candidate_id"]:
+        raise MainSpecBlocked("Persisted main candidate identity mismatch")
+    if spec.get("candidate_version") != candidate.get("candidate_version"):
+        raise MainSpecBlocked("Persisted main candidate version mismatch")
+    if spec.get("request_lineage") != candidate.get("request_lineage"):
+        raise MainSpecBlocked("Persisted main request lineage mismatch")
+    if spec.get("format") != candidate["format"]:
+        raise MainSpecBlocked("Persisted main format mismatch")
+    if spec.get("evidence_refs") != list(candidate["evidence_refs"]):
+        raise MainSpecBlocked("Persisted main evidence references do not match candidate")
+
+    verification = spec.get("final_verification")
+    if not isinstance(verification, dict) or verification.get("status") != "PASS":
+        raise MainSpecBlocked("Persisted main final verification is not PASS")
+    if not isinstance(verification.get("reason"), str):
+        raise MainSpecBlocked("Persisted main verification reason is invalid")
+    if not isinstance(verification.get("verifier"), str) or not verification["verifier"]:
+        raise MainSpecBlocked("Persisted main verifier identity is invalid")
+    if not isinstance(verification.get("checked_at"), str) or not verification["checked_at"]:
+        raise MainSpecBlocked("Persisted main verification timestamp is invalid")
+
+    expected_version = compute_main_version_id(candidate, spec)
+    if spec.get("main_version_id") != expected_version:
+        raise MainSpecBlocked("Persisted main spec content/version identity mismatch")
+    return spec
+
+
+def _load_or_persist_main_spec(
+    candidate: dict[str, Any],
+    main_request_id: str,
+    *,
+    final_verifier: MainFinalVerifier,
+) -> tuple[dict[str, Any] | None, "MainPipelineResult | None"]:
+    """Reuse a valid persisted spec before verifying, or finalize+persist exactly once.
+
+    Retry invariant: if a valid finalized spec already exists for this
+    exact `main_request_id`, it is loaded and reused BEFORE the incoming
+    candidate's content is trusted. If the incoming candidate's caption/
+    feed/carousel content differs from the persisted spec (retry drift),
+    this fails closed to MAIN_SPEC_CONFLICT rather than silently accepting
+    the changed wording or minting a new version.
+    """
+
+    spec_path = _main_spec_path(main_request_id)
+
+    if spec_path.exists():
+        try:
+            raw = json.loads(spec_path.read_text(encoding="utf-8"))
+            spec = _validate_finalized_main_spec(raw, candidate, main_request_id)
+        except (OSError, json.JSONDecodeError, MainSpecBlocked) as e:
+            return None, _result(
+                "MAIN_SPEC_BLOCKED",
+                f"Persisted main spec is invalid: {e}",
+                main_request_id=main_request_id,
+                main_spec_path=workspace_relative(spec_path),
+            )
+        if not _spec_content_matches_candidate(spec, candidate):
+            return None, _result(
+                "MAIN_SPEC_CONFLICT",
+                "Incoming content for this main_request_id conflicts with the "
+                "persisted finalized spec; a retry is not a revision.",
+                main_request_id=main_request_id,
+                main_version_id=spec["main_version_id"],
+                main_spec_path=workspace_relative(spec_path),
+            )
+        return spec, None
+
+    raw_spec = _build_raw_main_spec(candidate, main_request_id)
+    try:
+        verify_result = final_verifier.verify(dict(raw_spec), list(candidate["evidence_refs"]))
+    except Exception as e:
+        return None, _result(
+            "VERIFIER_FAILED",
+            "Main final verifier failed.",
+            main_request_id=main_request_id,
+            context={"error_type": type(e).__name__},
+        )
+    if not isinstance(verify_result, dict) or verify_result.get("status") not in {"PASS", "BLOCKED"}:
+        return None, _result(
+            "VERIFIER_FAILED",
+            "Main final verifier returned an invalid result.",
+            main_request_id=main_request_id,
+        )
+    if verify_result["status"] != "PASS":
+        return None, _result(
+            "VERIFICATION_BLOCKED",
+            str(verify_result.get("reason") or "Final verification blocked"),
+            main_request_id=main_request_id,
+        )
+
+    spec = dict(raw_spec)
+    spec["schema"] = SCHEMA
+    spec["contract_version"] = CONTRACT_VERSION
+    spec["final_verification"] = {
+        "status": "PASS",
+        "reason": str(verify_result.get("reason") or ""),
+        "verifier": getattr(final_verifier, "__name__", type(final_verifier).__name__),
+        "checked_at": now_iso(),
+    }
+    spec["main_version_id"] = compute_main_version_id(candidate, spec)
+
+    try:
+        _validate_finalized_main_spec(spec, candidate, main_request_id)
+        if spec_path.exists():
+            raise MainSpecBlocked("Main spec appeared during locked creation")
+        atomic_write_json(spec_path, spec)
+    except (BridgeError, OSError, MainSpecBlocked) as e:
+        return None, _result(
+            "MAIN_SPEC_BLOCKED",
+            f"Finalized main spec could not be persisted: {e}",
+            main_request_id=main_request_id,
+            main_version_id=spec["main_version_id"],
+            main_spec_path=workspace_relative(spec_path),
+        )
+    return spec, None
 
 
 # ---------------------------------------------------------------------------
@@ -367,11 +645,23 @@ def render_main_asset(candidate: dict[str, Any], manifest_id: str) -> list[dict[
 
 def build_main_manifest(
     candidate: dict[str, Any],
+    spec: dict[str, Any],
     media: list[dict[str, Any]],
     manifest_id: str,
     main_request_id: str,
     main_version_id: str,
+    spec_path: Path,
 ) -> dict[str, Any]:
+    """Build and persist a new immutable nullone.production.v1 main manifest.
+
+    Deterministically binds to the persisted, separately-verified main
+    spec (`main_spec.file`/`sha256`), never to raw caller-supplied
+    candidate content -- `verification: PASS` is written here only because
+    `spec["final_verification"]` already independently proved PASS for
+    this exact finalized content (see `_load_or_persist_main_spec`);
+    writer/editor/candidate admission state can never self-certify it.
+    """
+
     manifest_path = resolve_workspace_path(f"social/ops/manifests/{manifest_id}.json")
     if manifest_path.exists():
         raise MainManifestBlocked(f"Manifest already exists: {manifest_path}")
@@ -380,7 +670,7 @@ def build_main_manifest(
         f"social/drafts/production/main/{manifest_id}-caption.txt"
     )
     caption_path.parent.mkdir(parents=True, exist_ok=True)
-    caption_text = candidate["caption_text"]
+    caption_text = spec["caption_text"]
     if not caption_text.endswith("\n"):
         caption_text += "\n"
     caption_path.write_text(caption_text, encoding="utf-8")
@@ -394,7 +684,7 @@ def build_main_manifest(
         "topic": candidate["topic"],
         "topic_cluster": candidate["topic_cluster"],
         "content_type": candidate["content_type"],
-        "format": candidate["format"],
+        "format": spec["format"],
         "verification": "PASS",
         "account_id": CANONICAL_ACCOUNT_ID,
         "caption": {
@@ -428,6 +718,11 @@ def build_main_manifest(
         },
         "main_request_id": main_request_id,
         "main_version_id": main_version_id,
+        "main_spec": {
+            "file": workspace_relative(spec_path),
+            "sha256": sha256_bytes(spec_path.read_bytes()),
+        },
+        "main_final_verification": spec["final_verification"],
     }
 
     try:
@@ -472,6 +767,7 @@ class TelegramPreviewSender(Protocol):
 
 def build_main_preview_payload(
     candidate: dict[str, Any],
+    spec: dict[str, Any],
     manifest: dict[str, Any],
     review_post_id: str,
 ) -> dict[str, Any]:
@@ -496,7 +792,10 @@ def build_main_preview_payload(
             }
             for item in manifest["media"]
         ],
-        "caption_excerpt": candidate["caption_text"][:120],
+        # Sourced from the persisted, separately-verified spec -- never the
+        # raw caller-supplied candidate, which is authoritative only up to
+        # admission and may legitimately differ on a conflicting retry.
+        "caption_excerpt": spec["caption_text"][:120],
         "text": (
             f"📰 Yeni NullOne {fmt.title()} draft\n\n"
             f"Mövzu: {candidate['topic']}\n"
@@ -539,10 +838,20 @@ def build_main_preview_payload(
 def run_main_pipeline(
     candidate: dict[str, Any],
     *,
+    final_verifier: MainFinalVerifier,
     draft_connector: DraftConnector,
     telegram_sender: TelegramPreviewSender | None = None,
 ) -> MainPipelineResult:
     """Produce at most one FEED/CAROUSEL review draft for one candidate.
+
+    Candidate admission (`validate_candidate`, requiring
+    `verification: PASS`) is only the entry gate -- it never self-certifies
+    the exact finalized Feed caption/headline/stat/kicker or every factual
+    Carousel slide. `final_verifier` independently proves PASS for the
+    exact finalized content before it is persisted as the immutable
+    `nullone.main-draft-spec.v1` and rendered; a `VERIFIER_FAILED`/
+    `VERIFICATION_BLOCKED` outcome never renders, never writes a manifest,
+    and never creates a review draft (see `_load_or_persist_main_spec`).
 
     Never publishes, deletes, defers to a future send time, or bypasses
     human approval. Ends at a Zernio review draft plus a Telegram preview
@@ -555,11 +864,18 @@ def run_main_pipeline(
         return _result("CANDIDATE_NOT_ELIGIBLE", str(e))
 
     main_request_id = compute_main_request_id(candidate)
-    main_version_id = compute_main_version_id(candidate, main_request_id)
-    manifest_id = _manifest_id_for_version(candidate["candidate_id"], candidate["format"], main_version_id)
-    manifest_path = resolve_workspace_path(f"social/ops/manifests/{manifest_id}.json")
+    spec_path = _main_spec_path(main_request_id)
 
     with _main_request_lock(main_request_id):
+        spec, blocked = _load_or_persist_main_spec(candidate, main_request_id, final_verifier=final_verifier)
+        if blocked is not None:
+            return blocked
+        assert spec is not None
+
+        main_version_id = spec["main_version_id"]
+        manifest_id = _manifest_id_for_version(candidate["candidate_id"], spec["format"], main_version_id)
+        manifest_path = resolve_workspace_path(f"social/ops/manifests/{manifest_id}.json")
+
         if manifest_path.is_file():
             try:
                 _, manifest = load_manifest(manifest_path)
@@ -570,31 +886,36 @@ def run_main_pipeline(
                     manifest_id=manifest_id,
                     main_request_id=main_request_id,
                     main_version_id=main_version_id,
+                    main_spec_path=workspace_relative(spec_path),
                 )
             if (
                 manifest.get("main_request_id") != main_request_id
                 or manifest.get("main_version_id") != main_version_id
+                or (manifest.get("main_spec") or {}).get("file") != workspace_relative(spec_path)
+                or (manifest.get("main_spec") or {}).get("sha256") != sha256_bytes(spec_path.read_bytes())
             ):
                 return _result(
                     "MANIFEST_BLOCKED",
-                    "Existing manifest does not match the main request/version.",
+                    "Existing manifest does not match the main request/version/spec.",
                     manifest_id=manifest_id,
                     main_request_id=main_request_id,
                     main_version_id=main_version_id,
+                    main_spec_path=workspace_relative(spec_path),
                 )
         else:
             try:
-                media = render_main_asset(candidate, manifest_id)
+                media = render_main_asset(spec, manifest_id)
             except MainRenderFailed as e:
                 return _result(
                     "RENDER_FAILED",
                     str(e),
                     main_request_id=main_request_id,
                     main_version_id=main_version_id,
+                    main_spec_path=workspace_relative(spec_path),
                 )
             try:
                 manifest = build_main_manifest(
-                    candidate, media, manifest_id, main_request_id, main_version_id
+                    candidate, spec, media, manifest_id, main_request_id, main_version_id, spec_path
                 )
             except (MainManifestBlocked, OSError) as e:
                 return _result(
@@ -603,12 +924,14 @@ def run_main_pipeline(
                     main_request_id=main_request_id,
                     main_version_id=main_version_id,
                     manifest_id=manifest_id,
+                    main_spec_path=workspace_relative(spec_path),
                 )
 
         common = {
             "manifest_id": manifest_id,
             "main_request_id": main_request_id,
             "main_version_id": main_version_id,
+            "main_spec_path": workspace_relative(spec_path),
             "manifest_path": workspace_relative(manifest_path),
         }
 
@@ -643,7 +966,7 @@ def run_main_pipeline(
         attempts, state, draft_id = _review_state(manifest)
 
         if state == "DRAFT_CREATED" and draft_id:
-            preview_payload = build_main_preview_payload(candidate, manifest, draft_id)
+            preview_payload = build_main_preview_payload(candidate, spec, manifest, draft_id)
             preview_delivery = None
             outcome = "DRAFT_CREATED"
             reason = "Main review draft created."
@@ -704,6 +1027,7 @@ def run_main_pipeline(
 
 
 def self_test() -> int:
+    import shutil
     import tempfile
     import nullone_bridge_common as bridge_common
 
@@ -716,6 +1040,14 @@ def self_test() -> int:
             from PIL import Image
 
             Image.new("RGB", (1600, 900), (10, 20, 30)).save(source, "PNG")
+
+            real_workspace_root = Path(__file__).resolve().parents[3]
+            tools_dir = Path(td) / "social/tools"
+            tools_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(
+                real_workspace_root / "social/tools/render_texbrif_v2.py",
+                tools_dir / "render_texbrif_v2.py",
+            )
 
             candidate = {
                 "candidate_id": "self-test-candidate",
@@ -761,6 +1093,45 @@ def self_test() -> int:
                 raise AssertionError("one-slide Carousel was not rejected")
             except MainCandidateNotEligible:
                 pass
+
+            class _FakeConnector:
+                def create_review_draft(self, manifest_path: Path) -> None:
+                    _, m = load_manifest(manifest_path)
+                    m["review"]["create_attempts"] = 1
+                    m["review"]["state"] = "DRAFT_CREATED"
+                    m["review"]["zernio_draft_id"] = "self-test-draft-1"
+                    m["review"]["created_at"] = now_iso()
+                    atomic_write_json(manifest_path, m)
+
+            # Admission PASS + final verifier BLOCKED -> no render/manifest/draft.
+            blocked = run_main_pipeline(
+                candidate,
+                final_verifier=make_fake_main_verifier("BLOCKED", "self-test block"),
+                draft_connector=_FakeConnector(),
+            )
+            assert blocked.outcome == "VERIFICATION_BLOCKED", blocked.outcome
+            assert not _main_spec_path(compute_main_request_id(candidate)).exists()
+
+            # Final verifier PASS -> spec persisted, manifest written, draft created.
+            ok = run_main_pipeline(
+                candidate,
+                final_verifier=make_fake_main_verifier("PASS"),
+                draft_connector=_FakeConnector(),
+            )
+            assert ok.outcome == "DRAFT_CREATED", ok.outcome
+            assert _main_spec_path(ok.main_request_id).exists()
+
+            # Retry with drifted content for the SAME request_id -> fails
+            # closed to MAIN_SPEC_CONFLICT; never silently mints a new
+            # version from the changed wording.
+            drifted = dict(candidate)
+            drifted["caption_text"] = "Changed caption after the fact."
+            conflict = run_main_pipeline(
+                drifted,
+                final_verifier=make_fake_main_verifier("PASS"),
+                draft_connector=_FakeConnector(),
+            )
+            assert conflict.outcome == "MAIN_SPEC_CONFLICT", conflict.outcome
         finally:
             bridge_common.WORKSPACE = original_workspace
 

@@ -9,6 +9,7 @@ Telegram delivery always use injected fakes.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -140,10 +141,11 @@ class MainPipelineTestCase(unittest.TestCase):
         candidate.update(overrides)
         return candidate
 
-    def run_pipeline(self, candidate, connector=None, sender=None):
+    def run_pipeline(self, candidate, connector=None, sender=None, final_verifier=None):
         connector = connector or FakeDraftConnector("success")
+        final_verifier = final_verifier or pipeline.make_fake_main_verifier("PASS")
         return pipeline.run_main_pipeline(
-            candidate, draft_connector=connector, telegram_sender=sender
+            candidate, final_verifier=final_verifier, draft_connector=connector, telegram_sender=sender
         )
 
 
@@ -343,6 +345,177 @@ class DeterministicIdentityTests(MainPipelineTestCase):
         self.assertNotIn("nullone-publisher-run", source)
         self.assertNotIn("publish_now", source)
         self.assertNotIn("import nullone_publish", source)
+
+
+class FinalVerificationTests(MainPipelineTestCase):
+    """#36 hardening sections 2/17: candidate admission PASS is only the
+    entry gate -- the exact finalized wording must independently pass a
+    separate final verifier before any render/manifest/review draft.
+    """
+
+    def test_admission_pass_final_verifier_blocked_no_render_no_draft(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+        connector = FakeDraftConnector("success")
+        result = self.run_pipeline(
+            candidate, connector=connector, final_verifier=pipeline.make_fake_main_verifier("BLOCKED")
+        )
+        self.assertEqual(result.outcome, "VERIFICATION_BLOCKED")
+        self.assertIsNone(result.manifest_id)
+        self.assertEqual(connector.calls, 0)
+        manifests_dir = self.tmp_path / "social/ops/manifests"
+        self.assertFalse(manifests_dir.exists() and any(manifests_dir.iterdir()))
+
+    def test_verifier_exception_is_controlled_failure(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+
+        class ExplodingVerifier:
+            def verify(self, main_spec, evidence_refs):
+                raise RuntimeError("verifier blew up")
+
+        result = self.run_pipeline(candidate, final_verifier=ExplodingVerifier())
+        self.assertEqual(result.outcome, "VERIFIER_FAILED")
+        self.assertIsNone(result.manifest_id)
+
+    def test_verifier_invalid_result_is_verifier_failed(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+
+        class MalformedVerifier:
+            def verify(self, main_spec, evidence_refs):
+                return {"nonsense": True}
+
+        result = self.run_pipeline(candidate, final_verifier=MalformedVerifier())
+        self.assertEqual(result.outcome, "VERIFIER_FAILED")
+
+    def test_manifest_verification_pass_impossible_without_final_verifier_pass(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+        result = self.run_pipeline(candidate, final_verifier=pipeline.make_fake_main_verifier("PASS", "ok"))
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        _, manifest = load_manifest(bridge_common.resolve_workspace_path(result.manifest_path))
+        self.assertEqual(manifest["verification"], "PASS")
+        self.assertEqual(manifest["main_final_verification"]["status"], "PASS")
+        self.assertTrue(manifest["main_final_verification"]["verifier"])
+        self.assertEqual(manifest["main_final_verification"]["reason"], "ok")
+
+    def test_exact_feed_final_wording_verified(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate(
+            evidence_refs=["Official announcement mentions 6 ay migration window."],
+        )
+        candidate["feed"]["stat"] = "6 ay"
+        result = self.run_pipeline(candidate, final_verifier=pipeline.numeric_scope_main_verifier)
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+
+    def test_unsupported_feed_numeric_claim_blocked_by_verifier(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate(evidence_refs=["No numbers mentioned here."])
+        candidate["feed"]["stat"] = "99%"
+        result = self.run_pipeline(candidate, final_verifier=pipeline.numeric_scope_main_verifier)
+        self.assertEqual(result.outcome, "VERIFICATION_BLOCKED")
+
+    def test_every_carousel_slide_bound_to_verified_spec(self):
+        self.install_real_renderers()
+        candidate = self.carousel_candidate()
+        result = self.run_pipeline(candidate)
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        _, manifest = load_manifest(bridge_common.resolve_workspace_path(result.manifest_path))
+        spec_path = bridge_common.resolve_workspace_path(manifest["main_spec"]["file"])
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(spec["carousel"]["slides"], candidate["carousel"]["slides"])
+        self.assertEqual(manifest["main_spec"]["sha256"], bridge_common.sha256_bytes(spec_path.read_bytes()))
+
+
+class MainSpecPersistenceTests(MainPipelineTestCase):
+    """#36 hardening sections 3/15: the immutable main spec is persisted
+    before render, and a same-request retry with drifted content never
+    mints a second version.
+    """
+
+    def test_spec_persisted_before_render_at_expected_path(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+        result = self.run_pipeline(candidate)
+        self.assertEqual(result.outcome, "DRAFT_CREATED")
+        expected_path = self.tmp_path / "social/drafts/production/main/specs" / f"{result.main_request_id}.json"
+        self.assertTrue(expected_path.is_file())
+        spec = json.loads(expected_path.read_text(encoding="utf-8"))
+        self.assertEqual(spec["schema"], "nullone.main-draft-spec.v1")
+        self.assertEqual(spec["final_verification"]["status"], "PASS")
+        self.assertEqual(spec["main_version_id"], result.main_version_id)
+
+    def test_retry_reuses_same_spec_and_version(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+        connector = FakeDraftConnector("success")
+        first = self.run_pipeline(candidate, connector=connector)
+        self.assertEqual(first.outcome, "DRAFT_CREATED")
+
+        second = self.run_pipeline(candidate, connector=connector)
+        self.assertEqual(second.outcome, "REVIEW_DRAFT_ALREADY_CONSUMED")
+        self.assertEqual(second.main_version_id, first.main_version_id)
+        self.assertEqual(second.main_request_id, first.main_request_id)
+
+    def test_changed_same_request_copy_cannot_mint_new_version(self):
+        self.install_real_renderers()
+        candidate_a = self.feed_candidate(caption_text="Original caption. @nullone.az")
+        connector = FakeDraftConnector("success")
+        first = self.run_pipeline(candidate_a, connector=connector)
+        self.assertEqual(first.outcome, "DRAFT_CREATED")
+
+        candidate_b = self.feed_candidate(caption_text="Drifted caption after interruption. @nullone.az")
+        second = self.run_pipeline(candidate_b, connector=connector)
+        self.assertEqual(second.outcome, "MAIN_SPEC_CONFLICT")
+        # No second manifest/review-create attempt happened for the drift.
+        self.assertEqual(connector.calls, 1)
+
+        manifests_dir = self.tmp_path / "social/ops/manifests"
+        self.assertEqual(len(list(manifests_dir.glob("*.json"))), 1)
+
+    def test_persisted_spec_hash_is_immutable_across_idempotent_retries(self):
+        self.install_real_renderers()
+        candidate = self.feed_candidate()
+        connector = FakeDraftConnector("success")
+        first = self.run_pipeline(candidate, connector=connector)
+        spec_path = self.tmp_path / "social/drafts/production/main/specs" / f"{first.main_request_id}.json"
+        before = spec_path.read_bytes()
+
+        self.run_pipeline(candidate, connector=connector)
+        after = spec_path.read_bytes()
+        self.assertEqual(before, after)
+
+
+class DirectPipelineIdempotenceTests(MainPipelineTestCase):
+    """#36 hardening section 15: analogous to #33 -- same logical
+    main_request_id never generates a second manifest/draft merely because
+    the caller supplies slightly changed wording after an interrupted run.
+    """
+
+    def test_first_call_persists_spec_a_second_call_conflicts_no_second_draft(self):
+        self.install_real_renderers()
+        spec_a_candidate = self.carousel_candidate()
+        connector = FakeDraftConnector("success")
+
+        first = self.run_pipeline(spec_a_candidate, connector=connector)
+        self.assertEqual(first.outcome, "DRAFT_CREATED")
+
+        spec_b_candidate = self.carousel_candidate()
+        spec_b_candidate["carousel"]["slides"][0]["headline"] = "Different headline after interruption"
+
+        second = self.run_pipeline(spec_b_candidate, connector=connector)
+        self.assertEqual(second.outcome, "MAIN_SPEC_CONFLICT")
+
+        # Spec A remains authoritative: reloading it still reflects the
+        # original content, not the drifted retry.
+        spec_path = self.tmp_path / "social/drafts/production/main/specs" / f"{first.main_request_id}.json"
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            spec["carousel"]["slides"][0]["headline"],
+            spec_a_candidate["carousel"]["slides"][0]["headline"],
+        )
+        self.assertEqual(connector.calls, 1)
 
 
 if __name__ == "__main__":

@@ -547,13 +547,28 @@ def evaluate_routing(ri: RoutingInput) -> RoutingResult:
 
     if main_choice is not None:
         main_format, format_reason = main_choice
+        # format_reason is durable audit context for *why FEED vs CAROUSEL*
+        # fits structurally -- distinct from main_draft_justification (why
+        # standalone main has audience value at all). RoutingResult.to_dict()
+        # deliberately never grows a 15th field (nullone.breaking-routing.v1
+        # is a strict, accepted schema -- see test_breaking_routing_contract
+        # .py), so the explanation is folded into the existing reason_text
+        # field to survive persistence; the raw format_reason also remains
+        # available on this RoutingResult object (main_format_reason) for a
+        # caller that wants to persist it separately as draft-set audit
+        # metadata outside the routing schema (see nullone_breaking_dispatch
+        # .reserve_draft_set's main_format_reason parameter).
+        combined_reason_text = (
+            f"{ri.severity_reason_text or 'Exceptional breaking main value.'} "
+            f"Main format selection ({main_format}): {format_reason}"
+        )
         return RoutingResult(
             **base,
             severity="EXCEPTIONAL_BREAKING",
             dedup=dedup_dict,
             routing_decision="IMMEDIATE_STORY_AND_MAIN_DRAFT",
             reason_code="EXCEPTIONAL_MAIN_VALUE",
-            reason_text=ri.severity_reason_text or "Exceptional breaking main value.",
+            reason_text=combined_reason_text,
             draft_targets=("STORY", main_format),
             main_draft_justification=ri.main_justification,
             reconciliation_required=False,
