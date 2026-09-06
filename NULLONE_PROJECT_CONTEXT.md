@@ -197,7 +197,23 @@ Validation:
 ## Reliability proof
 Baseline: 2026-09-04 03:47 Asia/Baku
 Nominal end: 2026-09-06 03:47 Asia/Baku
-The nominal proof window has now closed. The proof verdict is pending the separate read-only evidence evaluation required by issue #3; this context does not assign a PASS/FAIL/INCOMPLETE verdict. Issue #3 remains OPEN, and that evaluation is now the immediate separate operational task. No synthetic production cycle or state mutation is part of closing this window.
+The nominal proof window is closed. The read-only issue #3 evidence evaluation is now complete at repo/report level: see `docs/reliability/2026-09-proof-verdict.md` on `feature/n3-reliability-proof-verdict` for the full audit. Issue #3 itself remains OPEN pending human review; completing this report does NOT close #3 and does NOT itself authorize production deployment or #37.
+
+### Final proof verdict — 2026-09-06
+**FAIL.** Criterion counts: PASS 4, FAIL 4, NOT_EXERCISED 7 (of 15 canonical `PUB-`/`RUN-` IDs).
+
+Publication-safety invariants held under real in-window ambiguity: `PUB-UNKNOWN-001` (ambiguous Astra publish correctly stayed `UNKNOWN`, never auto-retried; a read-only post-window Zernio reconciliation shows the provider object is currently `draft`, not `published`, which strengthens the non-publication interpretation but does not resolve the durable `UNKNOWN` state), `PUB-IDEMP-001`, `PUB-AUTH-001`, `PUB-READBACK-001` all PASS on direct in-window evidence. `PUB-UNKNOWN-001`'s PASS rests on "ambiguous result → `UNKNOWN` + no auto-retry" being upheld, not on proving provider-side historical non-publication.
+
+Workflow-reliability invariants FAILED on direct, repeated production evidence, not merely missing coverage:
+- `RUN-OUTCOME-001` / `RUN-ARTIFACT-001`: Daily Analytics reported scheduler `succeeded` on BOTH in-window occurrences (2026-09-05 03:20 and 2026-09-06 03:20 Baku) while producing no analytics artifact either time.
+- `RUN-REASON-001`: the 2026-09-06 occurrence's own self-generated remediation text told the operator to configure the legacy `ZERNIO_API_KEY` — directly contradicting `workspace/social/ZERNIO.md`, which states that path is deprecated and that an MCP auth failure should STOP/BLOCKED. This is a new, distinct finding beyond the previously known bundle-mcp bootstrap direction; do not act on that automation-generated text.
+- Morning Editorial's entire 2026-09-05 occurrence was lost (4 scheduler-level attempts, all `ENOTFOUND`/timeout, terminal 09:17) with no later in-window occurrence to recover naturally (next occurrence 2026-09-06 08:30 falls after window close) — confirmed via `openclaw automations runs`, not merely inferred.
+- Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
+- `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
+
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) are the **proof-derived blocking operational bundle** this verdict identified — #27/#28/#29 are merged in Git but not deployed, and #30 remains the next main engineering implementation item. This bundle is not the complete set of everything #37 requires; remaining required M0 engineering continues per the existing roadmap, including applicable #31–#36 Story/breaking work. #37 remains the final, explicit controlled production deployment/preflight/live-validation boundary once the required reviewed M0 changes (including this bundle) are ready; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+
+Immediate next engineering order: #30 is the next main engineering implementation item; #31/#34 decision work and later Story/breaking implementation may proceed in parallel per existing roadmap; #37 is the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27/#28/#29/#30 bundle and observes genuine scheduled behavior before controlled production activation is considered complete. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -219,7 +235,7 @@ Durable run evidence:
 A later read-only probe resolved `api.anthropic.com` and completed HTTPS/TLS successfully. Therefore the incident is confirmed as a transient provider/runtime reachability failure pattern; a permanent DNS/configuration fault is NOT confirmed.
 
 ### Confirmed scheduler/domain-status defect
-Daily Analytics on Sep 4 and Sep 5 reported scheduler/runtime:
+Daily Analytics on Sep 5 and Sep 6 (the two in-window scheduled occurrences) reported scheduler/runtime:
 - `status=ok`
 - `completionStatus=succeeded`
 
@@ -270,13 +286,12 @@ No retry has been performed. Do not auto-retry.
 #4, #5, #27, #28 and #29 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`). No production deployment has been performed for #27, #28, or #29.
 
 Current order:
-1. the nominal proof window has closed; #3 proof/evidence evaluation is now the immediate separate operational task — do not mutate or synthetically contaminate proof state, and do not assign a verdict outside that evaluation
+1. the #3 read-only reliability proof evaluation is complete at repo/report level with a final verdict of FAIL — see `docs/reliability/2026-09-proof-verdict.md`; #3 itself stays OPEN pending human review and does not auto-close
 2. #30 concise Telegram failure alerts consuming truthful domain health is the next main engineering implementation item
-3. #31/#34 decision work may proceed in parallel as planned
-4. later Story/breaking implementation
-5. #37 remains the separate controlled production activation/validation gate
+3. #31/#34 decision work may proceed in parallel as planned, then relevant Story/breaking implementation
+4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete
 
-GitHub development may continue while proof evaluation is pending, but production deployment, synthetic production cycles and healthy-path production patching remain forbidden unless recovering a concrete production failure.
+The #3 evaluation is complete at report level and pending human review, not pending further investigation. GitHub development may continue. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles.
 
 ## Model/cost policy
 - Haiku: Radar, analytics, heartbeat, approval/publisher/utility and lightweight Story reasoning where useful
