@@ -30,6 +30,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import nullone_bridge_common as bridge_common  # noqa: E402
 import nullone_story_pipeline as pipeline  # noqa: E402
+import nullone_story_supersession as supersession  # noqa: E402
 from nullone_bridge_common import BridgeError, atomic_write_json, load_manifest, now_iso  # noqa: E402
 
 
@@ -1082,6 +1083,16 @@ class RevisionTests(StoryPipelineTestCase):
         self.assertEqual(
             revised_spec["revision_of"]["parent_review_post_id"], original.review_post_id
         )
+        marker_path = supersession.supersession_path(original.manifest_id)
+        marker = json.loads(marker_path.read_text())
+        self.assertEqual(marker["schema"], "nullone.story-supersession.v1")
+        self.assertEqual(marker["parent_manifest_id"], original.manifest_id)
+        self.assertEqual(marker["parent_review_post_id"], original.review_post_id)
+        self.assertEqual(marker["candidate_id"], candidate["candidate_id"])
+        self.assertEqual(
+            marker["superseded_by_story_request_id"], revised.story_request_id
+        )
+        self.assertEqual(marker["reason"], "OPERATOR_REVISION")
 
     def test_missing_revision_parent_is_typed_and_never_calls_writer(self):
         self.install_real_renderer()
@@ -1164,6 +1175,89 @@ class RevisionTests(StoryPipelineTestCase):
         revision = self._revision(candidate, original, operator_instruction="   ")
         result = self.run_pipeline(candidate=revision)
         self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
+
+    def test_writer_failure_leaves_parent_durably_superseded(self):
+        candidate, original, original_manifest_path = self._create_parent()
+        original_bytes = original_manifest_path.read_bytes()
+        revision = self._revision(candidate, original)
+
+        def failed_writer(_context):
+            raise RuntimeError("writer unavailable")
+
+        first = self.run_pipeline(candidate=revision, writer=failed_writer)
+        self.assertEqual(first.outcome, "WRITER_FAILED")
+        marker_path = supersession.supersession_path(original.manifest_id)
+        marker_bytes = marker_path.read_bytes()
+        self.assertEqual(original_manifest_path.read_bytes(), original_bytes)
+
+        second = self.run_pipeline(candidate=revision, writer=failed_writer)
+        self.assertEqual(second.outcome, "WRITER_FAILED")
+        self.assertEqual(marker_path.read_bytes(), marker_bytes)
+        self.assertEqual(original_manifest_path.read_bytes(), original_bytes)
+
+    def test_verification_block_leaves_parent_durably_superseded(self):
+        candidate, original, _path = self._create_parent()
+        revision = self._revision(candidate, original)
+        result = self.run_pipeline(
+            candidate=revision,
+            verifier=BLOCKED_VERIFIER,
+        )
+        self.assertEqual(result.outcome, "VERIFICATION_BLOCKED")
+        marker = json.loads(
+            supersession.supersession_path(original.manifest_id).read_text()
+        )
+        self.assertEqual(
+            marker["superseded_by_story_request_id"], result.story_request_id
+        )
+
+    def test_conflicting_second_revision_does_not_overwrite_marker(self):
+        candidate, original, _path = self._create_parent()
+        first_revision = self._revision(candidate, original)
+        first = self.run_pipeline(
+            candidate=first_revision,
+            writer=lambda _context: (_ for _ in ()).throw(RuntimeError("stop")),
+        )
+        self.assertEqual(first.outcome, "WRITER_FAILED")
+        marker_path = supersession.supersession_path(original.manifest_id)
+        marker_before = marker_path.read_bytes()
+
+        second_revision = self._revision(
+            candidate,
+            original,
+            operator_instruction="Tamamilə fərqli düzəliş et.",
+        )
+        writer_calls = 0
+
+        def writer(_context):
+            nonlocal writer_calls
+            writer_calls += 1
+            return dict(DEFAULT_SPEC)
+
+        second = self.run_pipeline(candidate=second_revision, writer=writer)
+        self.assertEqual(second.outcome, "REVISION_SUPERSESSION_CONFLICT")
+        self.assertEqual(writer_calls, 0)
+        self.assertEqual(marker_path.read_bytes(), marker_before)
+
+    def test_final_authorized_parent_cannot_be_revised(self):
+        candidate, original, path = self._create_parent()
+        manifest = json.loads(path.read_text())
+        manifest["approval"].update(
+            {
+                "first_stage": True,
+                "first_stage_at": now_iso(),
+                "final_publish": True,
+                "final_publish_at": now_iso(),
+                "source": "texbrif-approval",
+                "operator": "Rauf",
+                "human_confirmation": "two_step",
+            }
+        )
+        atomic_write_json(path, manifest)
+
+        result = self.run_pipeline(candidate=self._revision(candidate, original))
+        self.assertEqual(result.outcome, "REVISION_PARENT_INVALID")
+        self.assertIn("final-authorized", result.reason_text)
+        self.assertFalse(supersession.supersession_path(original.manifest_id).exists())
 
 
 # ---------------------------------------------------------------------------

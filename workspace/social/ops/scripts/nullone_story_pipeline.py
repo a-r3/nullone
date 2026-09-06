@@ -63,6 +63,11 @@ from nullone_bridge_common import (
     workspace_relative,
 )
 from nullone_bridge_common import SCHEMA as PRODUCTION_MANIFEST_SCHEMA
+from nullone_story_supersession import (
+    StorySupersessionError,
+    mark_story_superseded,
+    review_post_lock,
+)
 
 try:
     from nullone_claude import run_structured
@@ -115,6 +120,7 @@ STORY_PIPELINE_OUTCOMES = frozenset(
         "PREVIEW_DELIVERY_FAILED",
         "CANDIDATE_NOT_ELIGIBLE",
         "REVISION_PARENT_INVALID",
+        "REVISION_SUPERSESSION_CONFLICT",
         "WRITER_FAILED",
         "WRITER_OUTPUT_INVALID",
         "VERIFIER_FAILED",
@@ -1139,14 +1145,16 @@ def build_story_preview_payload(
 _MANIFEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
-def _validate_revision_parent(candidate: dict[str, Any]) -> None:
+def _revision_lineage(
+    candidate: dict[str, Any],
+) -> tuple[str, str, str] | None:
     revision = candidate.get("revision_of")
     if revision is None:
         if candidate.get("operator_revision_instruction") is not None:
             raise StoryRevisionParentInvalid(
                 "operator revision instruction requires proven revision lineage"
             )
-        return
+        return None
     if not isinstance(revision, dict):
         raise StoryRevisionParentInvalid("revision_of must be an object")
 
@@ -1164,6 +1172,17 @@ def _validate_revision_parent(candidate: dict[str, Any]) -> None:
         raise StoryRevisionParentInvalid("parent manifest ID is invalid")
     if not isinstance(parent_review_post_id, str) or not parent_review_post_id.strip():
         raise StoryRevisionParentInvalid("parent review post ID is required")
+    return parent_manifest_id, parent_review_post_id, instruction
+
+
+def _validate_revision_parent(
+    candidate: dict[str, Any],
+    lineage: tuple[str, str, str] | None = None,
+) -> dict[str, Any] | None:
+    lineage = lineage if lineage is not None else _revision_lineage(candidate)
+    if lineage is None:
+        return None
+    parent_manifest_id, parent_review_post_id, _instruction = lineage
 
     parent_path = resolve_workspace_path(
         f"social/ops/manifests/{parent_manifest_id}.json"
@@ -1190,6 +1209,18 @@ def _validate_revision_parent(candidate: dict[str, Any]) -> None:
             "revision parent does not prove the exact existing review draft"
         )
 
+    approval = parent.get("approval") or {}
+    if (
+        approval.get("final_publish") is not False
+        or approval.get("final_publish_at")
+        or approval.get("source")
+        or approval.get("operator")
+        or approval.get("human_confirmation")
+    ):
+        raise StoryRevisionParentInvalid(
+            "final-authorized parent cannot use review-draft revision"
+        )
+
     publication = parent.get("publication") or {}
     if (
         publication.get("attempts") != 0
@@ -1201,6 +1232,7 @@ def _validate_revision_parent(candidate: dict[str, Any]) -> None:
         raise StoryRevisionParentInvalid(
             "published, attempted or consequential parent cannot use review-draft revision"
         )
+    return parent
 
 
 def run_story_pipeline(
@@ -1226,11 +1258,32 @@ def run_story_pipeline(
         return _result("CANDIDATE_NOT_ELIGIBLE", str(e))
 
     try:
-        _validate_revision_parent(candidate)
+        revision_lineage = _revision_lineage(candidate)
     except StoryRevisionParentInvalid as e:
         return _result("REVISION_PARENT_INVALID", str(e))
 
     story_request_id = compute_story_request_id(candidate)
+    if revision_lineage is not None:
+        parent_manifest_id, parent_review_post_id, instruction = revision_lineage
+        try:
+            with review_post_lock(parent_review_post_id):
+                _validate_revision_parent(candidate, revision_lineage)
+                mark_story_superseded(
+                    parent_manifest_id=parent_manifest_id,
+                    parent_review_post_id=parent_review_post_id,
+                    candidate_id=candidate["candidate_id"],
+                    superseded_by_story_request_id=story_request_id,
+                    operator_instruction=instruction,
+                )
+        except StoryRevisionParentInvalid as e:
+            return _result("REVISION_PARENT_INVALID", str(e))
+        except (StorySupersessionError, OSError) as e:
+            return _result(
+                "REVISION_SUPERSESSION_CONFLICT",
+                str(e),
+                story_request_id=story_request_id,
+            )
+
     spec_path = _story_spec_path(story_request_id)
 
     with _story_request_lock(story_request_id):

@@ -16,6 +16,10 @@ from nullone_bridge_common import (
     validate_manifest,
     workspace_relative,
 )
+from nullone_story_supersession import (
+    require_story_not_superseded,
+    review_post_lock,
+)
 
 
 HERE = Path(__file__).resolve().parent
@@ -101,8 +105,7 @@ def revoke_final_if_no_publish_attempt(
     )
 
 
-def execute(review_post_id: str) -> int:
-
+def _validate_review_post_id(review_post_id: str) -> None:
     if (
         len(review_post_id) != 24
         or any(
@@ -114,6 +117,14 @@ def execute(review_post_id: str) -> int:
             "Invalid Zernio review post ID format"
         )
 
+
+def execute(review_post_id: str) -> int:
+    _validate_review_post_id(review_post_id)
+    with review_post_lock(review_post_id):
+        return _execute_locked(review_post_id)
+
+
+def _execute_locked(review_post_id: str) -> int:
     manifest_path, m = (
         find_manifest_by_review_post_id(
             review_post_id
@@ -126,6 +137,15 @@ def execute(review_post_id: str) -> int:
     ):
         raise BridgeError(
             "Review post ID mismatch"
+        )
+
+    # Story revisions and publication callbacks serialize on the same
+    # review-post lock. This check occurs before authorization mutation or
+    # provider execution. Feed/Carousel publication is unchanged.
+    if m.get("format") == "STORY":
+        require_story_not_superseded(
+            m.get("manifest_id"),
+            review_post_id,
         )
 
     apply_final_authorization(
