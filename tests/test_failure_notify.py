@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from nullone_run_outcome import assess_run  # noqa: E402
 from nullone_failure_notify import (  # noqa: E402
+    NOTIFICATION_DEFERRED_POLICY,
     NotifierError,
     TransportAmbiguousError,
     TransportFailedError,
@@ -48,11 +49,12 @@ def _blocked_result(
     reason_code: str = "ZERNIO_ANALYTICS_UNAVAILABLE",
     reason_text: str = "Zernio analytics connector could not be started.",
     domain_outcome: str = "BLOCKED",
+    scheduler_status: str = "succeeded",
 ) -> dict:
     return assess_run(
         workflow_id=workflow_id,
         occurrence_id=occurrence_id,
-        scheduler_status="succeeded",
+        scheduler_status=scheduler_status,
         domain_outcome=domain_outcome,
         reason_code=reason_code,
         reason_text=reason_text,
@@ -247,9 +249,19 @@ class RenderingTests(unittest.TestCase):
         formatted = format_occurrence_time("2026-09-06T03:20:00+04:00")
         self.assertEqual(formatted, "2026-09-06 03:20 Baku")
 
-    def test_non_timestamp_occurrence_id_falls_back_verbatim(self):
-        formatted = format_occurrence_time("occurrence-42")
-        self.assertEqual(formatted, "occurrence-42")
+    def test_opaque_occurrence_id_never_rendered_verbatim(self):
+        opaque = "internal-session-deadbeef-42"
+        formatted = format_occurrence_time(opaque)
+        self.assertNotEqual(formatted, opaque)
+        self.assertNotIn(opaque, formatted)
+        self.assertEqual(formatted, "unavailable")
+
+    def test_opaque_occurrence_id_does_not_reach_alert_text(self):
+        opaque = "internal-session-deadbeef-42"
+        result = _blocked_result(occurrence_id=opaque)
+        message = render_alert_text(result)
+        self.assertNotIn(opaque, message)
+        self.assertIn("Time: unavailable", message)
 
 
 class NotifyIfRequiredTests(unittest.TestCase):
@@ -495,6 +507,218 @@ class NotifyIfRequiredTests(unittest.TestCase):
                     transport=NeverCallTransport(),
                     output_root=Path(td),
                 )
+
+
+class SchedulerOwnershipRoutingTests(unittest.TestCase):
+    """A true scheduler-level execution failure (scheduler_status
+    error/failed) belongs to OpenClaw's own scheduler-native
+    failureAlert, not this custom domain notifier — see
+    docs/deployment/37-preflight-notification-requirements.md. This
+    is a routing rule only: domain_outcome remains the sole source of
+    business-health truth, so these tests also prove the routing is
+    genuinely conditional on scheduler_status, not a blanket
+    suppression of FAILED."""
+
+    def test_scheduler_error_status_defers_to_native_alert(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                reason_code="EDITORIAL_PROVIDER_ERROR",
+                reason_text="Editorial provider call failed.",
+                workflow_id="morning-editorial",
+                scheduler_status="error",
+            )
+
+            outcome = notify_if_required(
+                result, transport=NeverCallTransport(), output_root=root
+            )
+
+            self.assertEqual(outcome["status"], "NOT_REQUIRED")
+            self.assertEqual(outcome.get("policy"), NOTIFICATION_DEFERRED_POLICY)
+            self.assertFalse(list(root.rglob("*")))
+
+    def test_scheduler_failed_status_defers_to_native_alert(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                reason_code="EDITORIAL_PROVIDER_ERROR",
+                reason_text="Editorial provider call failed.",
+                workflow_id="morning-editorial",
+                scheduler_status="failed",
+            )
+
+            outcome = notify_if_required(
+                result, transport=NeverCallTransport(), output_root=root
+            )
+
+            self.assertEqual(outcome["status"], "NOT_REQUIRED")
+            self.assertEqual(outcome.get("policy"), NOTIFICATION_DEFERRED_POLICY)
+            self.assertFalse(list(root.rglob("*")))
+
+    def test_scheduler_status_check_is_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for status in ("ERROR", "Error", "FAILED", "Failed"):
+                result = _blocked_result(
+                    domain_outcome="FAILED",
+                    scheduler_status=status,
+                )
+                outcome = notify_if_required(
+                    result, transport=NeverCallTransport(), output_root=root
+                )
+                self.assertEqual(outcome["status"], "NOT_REQUIRED")
+                self.assertEqual(
+                    outcome.get("policy"), NOTIFICATION_DEFERRED_POLICY
+                )
+
+    def test_scheduler_succeeded_with_failed_domain_still_sends(self):
+        # Contrast case: the routing rule is conditional on
+        # scheduler_status, not a blanket suppression of FAILED — the
+        # confirmed Daily Analytics shape (scheduler ok/succeeded,
+        # domain FAILED) must still be alerted exactly once.
+        with tempfile.TemporaryDirectory() as td:
+            transport = RecordingTransport()
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                reason_code="ANALYTICS_RESPONSE_INVALID",
+                reason_text="Zernio analytics response was malformed.",
+                scheduler_status="succeeded",
+            )
+
+            outcome = notify_if_required(
+                result, transport=transport, output_root=Path(td)
+            )
+
+            self.assertEqual(outcome["status"], "SENT")
+            self.assertEqual(len(transport.messages), 1)
+
+    def test_scheduler_succeeded_blocked_still_sends_exactly_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            transport = RecordingTransport()
+            result = _blocked_result(
+                domain_outcome="BLOCKED", scheduler_status="succeeded"
+            )
+
+            first = notify_if_required(
+                result, transport=transport, output_root=Path(td)
+            )
+            second = notify_if_required(
+                result, transport=transport, output_root=Path(td)
+            )
+
+            self.assertEqual(first["status"], "SENT")
+            self.assertEqual(second["status"], "ALREADY_SENT")
+            self.assertEqual(len(transport.messages), 1)
+
+    def test_native_deferral_creates_no_notification_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                scheduler_status="error",
+            )
+
+            notify_if_required(
+                result, transport=NeverCallTransport(), output_root=root
+            )
+
+            self.assertFalse(list(root.rglob("*")))
+
+    def test_deferral_does_not_block_a_later_genuine_failure(self):
+        # Deferring for one failure identity must not create state that
+        # could accidentally suppress a later, different failure that
+        # genuinely needs this module's attention.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            transport = RecordingTransport()
+
+            deferred = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                scheduler_status="error",
+                occurrence_id="2026-09-05T08:30:00+04:00",
+            )
+            notify_if_required(
+                deferred, transport=transport, output_root=root
+            )
+            self.assertEqual(len(transport.messages), 0)
+
+            genuine = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                scheduler_status="succeeded",
+                occurrence_id="2026-09-06T08:30:00+04:00",
+                reason_code="EDITORIAL_ARTIFACT_MISSING",
+                reason_text="Required editorial board artifact is missing.",
+            )
+            outcome = notify_if_required(
+                genuine, transport=transport, output_root=root
+            )
+
+            self.assertEqual(outcome["status"], "SENT")
+            self.assertEqual(len(transport.messages), 1)
+
+
+class PathContainmentTests(unittest.TestCase):
+    def test_traversal_workflow_id_is_rejected_before_transport(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(workflow_id="../../outside")
+
+            with self.assertRaises(NotifierError):
+                notify_if_required(
+                    result, transport=NeverCallTransport(), output_root=root
+                )
+
+            # Nothing must exist outside (or even inside) the configured
+            # temp notification root as a result of the rejected call.
+            self.assertFalse(list(root.rglob("*")))
+            escaped = root.parent / "outside"
+            self.assertFalse(escaped.exists())
+
+    def test_absolute_path_workflow_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(workflow_id="/etc/passwd-style-id")
+
+            with self.assertRaises(NotifierError):
+                notify_if_required(
+                    result, transport=NeverCallTransport(), output_root=root
+                )
+
+            self.assertFalse(list(root.rglob("*")))
+
+    def test_dotdot_embedded_workflow_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(workflow_id="daily-analytics/../../etc")
+
+            with self.assertRaises(NotifierError):
+                notify_if_required(
+                    result, transport=NeverCallTransport(), output_root=root
+                )
+
+    def test_normal_workflow_ids_still_work(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            transport = RecordingTransport()
+
+            for workflow_id in ("morning-editorial", "daily-analytics"):
+                result = _blocked_result(
+                    workflow_id=workflow_id,
+                    reason_code="EXAMPLE_DEPENDENCY_UNAVAILABLE",
+                )
+                outcome = notify_if_required(
+                    result, transport=transport, output_root=root
+                )
+                self.assertEqual(outcome["status"], "SENT")
+
+            self.assertEqual(len(transport.messages), 2)
+            self.assertTrue((root / "morning-editorial").is_dir())
+            self.assertTrue((root / "daily-analytics").is_dir())
 
 
 class RunnerCliTests(unittest.TestCase):

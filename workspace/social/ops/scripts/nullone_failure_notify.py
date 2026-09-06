@@ -3,10 +3,16 @@
 
 Consumes an already-validated explicit run-outcome record (issue #27's
 `nullone_run_outcome` contract) and decides whether the operator needs a
-concise Telegram alert. Scheduler status alone is never consulted here:
-only the structured `domain_outcome` / `reason_code` fields drive the
-decision, so a scheduler-`succeeded` receipt can never mask a business
-`BLOCKED`/`FAILED`/actionable `UNKNOWN` result.
+concise Telegram alert. The structured `domain_outcome` / `reason_code`
+fields remain the sole source of business-health truth, so a
+scheduler-`succeeded` receipt can never mask a business
+`BLOCKED`/`FAILED`/actionable `UNKNOWN` result. `scheduler_status` is
+consulted only for a narrower, separate purpose: routing notification
+*ownership*. A true scheduler-level execution failure (`error`/`failed`)
+belongs to OpenClaw's own scheduler-native `failureAlert` (see
+docs/deployment/37-preflight-notification-requirements.md), so this
+module stays quiet for that case rather than issuing a second, duplicate
+alert for the same incident once that native alert is activated at #37.
 
 Capability-negative by construction: this module has no import, symbol,
 or code path capable of creating, approving, scheduling, retrying, or
@@ -45,6 +51,17 @@ WORKFLOW_DISPLAY_NAMES: dict[str, str] = {
 # reason code. Extend this set deliberately when one is identified —
 # never treat an UNKNOWN as quiet just because it looks inconvenient.
 NON_ACTIONABLE_UNKNOWN_REASON_CODES: frozenset[str] = frozenset()
+
+# scheduler_status values (case-insensitive) that mean OpenClaw itself
+# already recorded this occurrence as a scheduler-level execution
+# failure. That surface belongs to OpenClaw's own scheduler-native
+# `failureAlert`, not this module — see the ownership-routing note on
+# `_is_scheduler_native_execution_failure`. This is a routing rule only,
+# never a substitute for `domain_outcome` as the source of business
+# health truth.
+SCHEDULER_NATIVE_FAILURE_STATUSES: frozenset[str] = frozenset({"error", "failed"})
+
+NOTIFICATION_DEFERRED_POLICY = "SCHEDULER_NATIVE_FAILURE_ALERT"
 
 MAX_REASON_TEXT_LEN = 200
 
@@ -169,6 +186,25 @@ def is_actionable(
     return False
 
 
+def _is_scheduler_native_execution_failure(result: dict[str, Any]) -> bool:
+    """Ownership-routing check, not a health check.
+
+    True when `scheduler_status` itself (case-insensitively) reports a
+    scheduler-level execution failure — the surface OpenClaw's own
+    `failureAlert` is meant to own once activated at #37. This never
+    changes whether the result is *actionable*: `is_actionable()` still
+    decides that from `domain_outcome` alone. It only decides whether
+    this module — as opposed to the native scheduler alert — is the one
+    that should speak, so one real incident cannot produce two alerts.
+    """
+
+    scheduler_status = result.get("scheduler_status", "")
+    return (
+        isinstance(scheduler_status, str)
+        and scheduler_status.strip().lower() in SCHEDULER_NATIVE_FAILURE_STATUSES
+    )
+
+
 def sanitize_reason_text(text: str | None) -> str | None:
     """Deterministic, allowlist-adjacent redaction for outbound text.
 
@@ -197,17 +233,21 @@ def sanitize_reason_text(text: str | None) -> str | None:
 def format_occurrence_time(occurrence_id: str) -> str:
     """Best-effort human-readable time for the alert.
 
-    occurrence_id is an opaque identifier by contract, not guaranteed to
-    be a timestamp. When it parses as one with the Baku (+04:00) offset
-    used by both current scheduled workflows, render it concisely;
-    otherwise fall back to the raw identifier so the alert never
-    fabricates a time it cannot support.
+    occurrence_id is an opaque identifier by #27's contract, not
+    guaranteed to be a timestamp, and a future value could carry
+    internal/private context. When it parses as a full ISO 8601
+    datetime — which by construction can only ever contain date/time/
+    offset digits, nothing else — render it concisely (labeling the
+    Baku +04:00 offset used by both current scheduled workflows).
+    Otherwise, never emit the raw identifier: return a neutral
+    placeholder. Traceability is still available through the
+    deterministic `run_id` already included in the alert.
     """
 
     try:
         parsed = datetime.fromisoformat(occurrence_id)
     except ValueError:
-        return occurrence_id
+        return "unavailable"
 
     if parsed.utcoffset() is not None and parsed.strftime("%z") == "+0400":
         return parsed.strftime("%Y-%m-%d %H:%M") + " Baku"
@@ -254,7 +294,34 @@ def _safe_identity_slug(failure_identity: str) -> str:
 
 
 def _notification_dir(workflow_id: str, output_root: Path) -> Path:
-    return output_root.resolve() / workflow_id
+    """Resolve the per-workflow notification directory, independently
+    verifying it cannot escape `output_root`.
+
+    #27's `workflow_id` contract only guarantees a non-empty single-line
+    string within a length bound — it does not guarantee path safety.
+    This notifier does not weaken that general contract; it independently
+    enforces its own filesystem boundary instead, since a path-escaping
+    workflow_id here has consequences (writing/reading outside the
+    configured notification root) that #27 itself was never responsible
+    for preventing.
+    """
+
+    if Path(workflow_id).is_absolute():
+        raise NotifierError(
+            f"workflow_id must not be an absolute path: {workflow_id!r}"
+        )
+
+    root = output_root.resolve()
+    candidate = (root / workflow_id).resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise NotifierError(
+            f"workflow_id would escape the notification root: {workflow_id!r}"
+        ) from exc
+
+    return candidate
 
 
 def _notification_lock_path(
@@ -318,6 +385,15 @@ def notify_if_required(
     against a prior failure, so recovery stays quiet by construction,
     not by a policy flag that could be flipped by mistake.
 
+    A true scheduler-level execution failure (`scheduler_status` of
+    `error`/`failed`, case-insensitive) is also left quiet here, deferring
+    to OpenClaw's own scheduler-native `failureAlert` for that surface —
+    see `_is_scheduler_native_execution_failure`. This is ownership
+    routing only, never a domain-health judgment: no notification state
+    is created for this case, so it can never block a later automatic
+    alert if a different, later failure identity for the same workflow
+    genuinely needs this module's attention.
+
     The passed-in `result` is read-only from this function's
     perspective: it is never mutated, and its own record on disk (if
     any) is never opened, rewritten, or reconciled.
@@ -330,6 +406,12 @@ def notify_if_required(
         non_actionable_unknown_reason_codes=non_actionable_unknown_reason_codes,
     ):
         return {"status": "NOT_REQUIRED"}
+
+    if _is_scheduler_native_execution_failure(result):
+        return {
+            "status": "NOT_REQUIRED",
+            "policy": NOTIFICATION_DEFERRED_POLICY,
+        }
 
     workflow_id = result["workflow_id"]
     failure_identity = _failure_identity(result)

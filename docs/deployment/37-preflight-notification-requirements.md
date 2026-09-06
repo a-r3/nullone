@@ -78,12 +78,47 @@ of that same controlled change:
    same class of query already used to *detect* the current gap must be
    reused to *confirm* the fix, rather than trusting the change was
    applied.
-5. Explicitly confirm this does **not** duplicate the domain/business
-   alert path: a scheduler-execution failure (this requirement) and a
-   scheduler-success/domain-failure (`nullone_failure_notify.py`) are
-   two different, non-overlapping conditions, and an operator should not
-   receive two alerts for what was actually one underlying incident
-   where both happen to be true.
+5. Confirm this does **not** duplicate the domain/business alert path.
+   This is not merely a documentation claim: `nullone_failure_notify.py`
+   itself enforces the routing (see "Enforced ownership routing" below),
+   so activating this requirement at #37 cannot cause a double alert for
+   one incident — the domain notifier already, unconditionally, defers
+   to this native alert whenever `scheduler_status` indicates a
+   scheduler-level execution failure. #37 only needs to confirm the
+   native alert actually fires for that same case; it does not need to
+   (and should not) modify `nullone_failure_notify.py` to avoid overlap.
+
+## Enforced ownership routing
+
+The overlap between these two surfaces is not just described here — it
+is enforced in code, in `workspace/social/ops/scripts/nullone_failure_notify.py`:
+
+- `SCHEDULER_NATIVE_FAILURE_STATUSES = frozenset({"error", "failed"})`
+  names the `scheduler_status` values (case-insensitive) that mean
+  OpenClaw's own scheduler already recorded this occurrence as an
+  execution failure.
+- `_is_scheduler_native_execution_failure(result)` checks a result's
+  `scheduler_status` against that set. This is an ownership/routing
+  check only — it never substitutes for `domain_outcome` as the source
+  of business-health truth, and `is_actionable()` (which decides
+  actionability from `domain_outcome` alone) is unaffected by it.
+- `notify_if_required()` calls this check immediately after determining
+  actionability. When it is true, the function returns
+  `{"status": "NOT_REQUIRED", "policy": "SCHEDULER_NATIVE_FAILURE_ALERT"}`
+  and creates **no notification state at all** — no lock file, no
+  record, no outbound call — deferring entirely to the native alert
+  this document requires #37 to activate.
+
+Concretely, today's confirmed Morning Editorial execution-failure shape
+(`nullone_editorial_runtime.py`'s retry-exhausted path: `scheduler_status="error"`,
+`domain_outcome="FAILED"`) is quiet in the domain notifier for exactly
+this reason. `tests/test_failure_notify.py` covers this with:
+`scheduler_status="error"` + `FAILED`, and `scheduler_status="failed"` +
+`FAILED`, both asserting zero sends and no notification-state file
+created; and, as a contrast case, `scheduler_status="succeeded"` +
+`FAILED` (the Daily Analytics shape) still sends exactly once, proving
+the routing is genuinely conditional on `scheduler_status` and not a
+blanket suppression of `FAILED`.
 
 ## What #30 already delivers without this
 
