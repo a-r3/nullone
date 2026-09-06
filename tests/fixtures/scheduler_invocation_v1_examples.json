@@ -1,0 +1,283 @@
+{
+  "schema": "nullone.scheduler-invocation-examples.v1",
+  "contract_version": "1.0.0",
+  "contract_doc": "docs/contracts/scheduler-invocation-v1.md",
+  "note": "Documentation fixtures for issue #65's scheduler invocation contract. These are hand-authored worked examples with occurrence_id values precomputed from the canonical serialization rule defined in the contract doc. tests/test_scheduler_invocation_contract_fixture.py recomputes and validates occurrence_id independently; it does not implement or invoke any scheduler adapter.",
+  "valid_cases": [
+    {
+      "name": "morning_openclaw",
+      "description": "Current OpenClaw scheduler adapter mapping for MorningWorkflow.",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    },
+    {
+      "name": "daily_analytics_openclaw",
+      "description": "Current OpenClaw scheduler adapter mapping for AnalyticsWorkflow.",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "daily-analytics",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-analytics-0001",
+        "scheduled_for": "2026-09-08T05:00:00Z",
+        "triggered_at": "2026-09-08T05:00:01Z",
+        "occurrence_id": "occ_4b8faca8f2593487e980039b"
+      }
+    },
+    {
+      "name": "story_openclaw",
+      "description": "Current OpenClaw scheduler adapter mapping for StoryWorkflow.",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "story",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-story-0001",
+        "scheduled_for": "2026-09-08T10:30:00Z",
+        "triggered_at": "2026-09-08T10:30:05Z",
+        "occurrence_id": "occ_3b62eda8c8a4e53b7aa332d3"
+      }
+    },
+    {
+      "name": "breaking_openclaw",
+      "description": "Current OpenClaw scheduler adapter mapping for BreakingWorkflow.",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "breaking",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-breaking-0001",
+        "scheduled_for": "2026-09-08T14:12:00Z",
+        "triggered_at": "2026-09-08T14:12:03Z",
+        "occurrence_id": "occ_2b578c509c42d2e255fa1bdc"
+      }
+    },
+    {
+      "name": "morning_systemd_alternate",
+      "description": "Hypothetical alternate scheduler (systemd timer) mapping the same MorningWorkflow occurrence shape into an identical contract, proving the contract does not depend on OpenClaw. Not an implemented adapter.",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "systemd-timer",
+        "external_occurrence_id": "systemd-timer-run-2026-09-08T0430",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:01Z",
+        "occurrence_id": "occ_8d312f344d3ced803ee0c7ec"
+      }
+    }
+  ],
+  "replay_examples": [
+    {
+      "name": "morning_openclaw_retry_same_occurrence",
+      "description": "Same logical scheduler occurrence retried/re-observed later: identical workflow_id, source, external_occurrence_id, and scheduled_for as morning_openclaw, but a different triggered_at. Must yield the SAME occurrence_id as morning_openclaw.",
+      "same_occurrence_as": "morning_openclaw",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T09:15:00Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    }
+  ],
+  "distinct_occurrence_examples": [
+    {
+      "name": "distinct_workflow_id",
+      "description": "Baseline morning_openclaw with only workflow_id changed. Must produce a DIFFERENT occurrence_id than morning_openclaw.",
+      "differs_from": "morning_openclaw",
+      "changed_field": "workflow_id",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "daily-analytics",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_9ce77caaab7e7eadb72340fd"
+      }
+    },
+    {
+      "name": "distinct_source",
+      "description": "Baseline morning_openclaw with only source changed. Must produce a DIFFERENT occurrence_id than morning_openclaw.",
+      "differs_from": "morning_openclaw",
+      "changed_field": "source",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "systemd-timer",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_cfe1cc88aef3de00dccc6979"
+      }
+    },
+    {
+      "name": "distinct_external_occurrence_id",
+      "description": "Baseline morning_openclaw with only external_occurrence_id changed. Must produce a DIFFERENT occurrence_id than morning_openclaw.",
+      "differs_from": "morning_openclaw",
+      "changed_field": "external_occurrence_id",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0002",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_ef13bcbd11a31bf68647e82e"
+      }
+    },
+    {
+      "name": "distinct_scheduled_for",
+      "description": "Baseline morning_openclaw with only scheduled_for changed. Must produce a DIFFERENT occurrence_id than morning_openclaw.",
+      "differs_from": "morning_openclaw",
+      "changed_field": "scheduled_for",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:35:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_2064d2d876d31bbb663cefac"
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "missing_external_occurrence_id",
+      "description": "external_occurrence_id must never be backfilled with current time; a missing value is invalid input, not an empty-but-valid occurrence.",
+      "reason": "missing_required_field",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    },
+    {
+      "name": "empty_external_occurrence_id",
+      "description": "An empty/whitespace-only external_occurrence_id is invalid; it must never be treated as an opaque valid identity.",
+      "reason": "empty_required_field",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "   ",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    },
+    {
+      "name": "unknown_workflow_id",
+      "description": "workflow_id must be one of the four current accepted values; an adapter's own job name is never substituted.",
+      "reason": "unknown_workflow_id",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "openclaw-job-42",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    },
+    {
+      "name": "non_canonical_scheduled_for_offset",
+      "description": "scheduled_for must be canonical UTC RFC 3339 (Z suffix); a numeric UTC offset is rejected even though it denotes the same instant.",
+      "reason": "non_canonical_timestamp",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T08:30:00+04:00",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    },
+    {
+      "name": "non_canonical_triggered_at_fraction",
+      "description": "triggered_at must be canonical UTC RFC 3339 with no fractional seconds.",
+      "reason": "non_canonical_timestamp",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02.500Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538"
+      }
+    },
+    {
+      "name": "malformed_occurrence_id_shape",
+      "description": "occurrence_id must match occ_ followed by exactly 24 lowercase hex characters; this value is the wrong length.",
+      "reason": "malformed_occurrence_id",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_deadbeef"
+      }
+    },
+    {
+      "name": "occurrence_id_mismatch",
+      "description": "occurrence_id does not match the recomputed value for the stable fields; this is invalid input, not a new occurrence.",
+      "reason": "occurrence_id_mismatch",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_000000000000000000000000"
+      }
+    },
+    {
+      "name": "unknown_extra_field",
+      "description": "An unrecognized additional field is rejected; the field set is exact, not extensible.",
+      "reason": "unknown_field",
+      "payload": {
+        "schema": "nullone.scheduler-invocation.v1",
+        "contract_version": "1.0.0",
+        "workflow_id": "morning-editorial",
+        "source": "openclaw",
+        "external_occurrence_id": "openclaw-occ-morning-0001",
+        "scheduled_for": "2026-09-08T04:30:00Z",
+        "triggered_at": "2026-09-08T04:30:02Z",
+        "occurrence_id": "occ_f91cb754b51f00645f425538",
+        "openclaw_job_id": "job-42"
+      }
+    }
+  ]
+}

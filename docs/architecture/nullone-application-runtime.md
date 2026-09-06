@@ -76,6 +76,12 @@ Telegram adapter may internally invoke `openclaw message send`; neither
 
 ## Scheduler invocation contract
 
+The exact, fixture-validated version of this section is
+`docs/contracts/scheduler-invocation-v1.md`, including the unambiguous
+canonical-serialization rule for `occurrence_id` and worked adapter
+examples. This section summarizes the same decision; the contract
+document is authoritative on exact serialization/derivation detail.
+
 Schema: `nullone.scheduler-invocation.v1`
 
 Contract version: `1.0.0`
