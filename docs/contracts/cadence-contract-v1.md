@@ -38,7 +38,8 @@ to shorten, skip, or imply that boundary.
 - No AI deciding authorization.
 - No fixed rule that `today_count == 2` (or any other count) means stop.
 - No production code, scheduler, or OpenClaw automation/cron change.
-- No Story production pipeline (#33) or breaking-policy dedup (#34/#35).
+- No Story production pipeline (#33), changes to the accepted breaking policy
+  (#34), or breaking identity/dedup/routing implementation (#35/#36).
 
 ## Relationship to existing repository material
 
@@ -204,9 +205,10 @@ mechanism: a restart after any amount of downtime produces exactly one
 evaluation of current state, never a queue of N replayed historical
 recommendations, because no such queue is ever constructed. The caller
 may optionally pass `signal.downtime_marker` purely for observability
-(see "Downtime / catch-up" below); it never changes the counters or the
-gap arithmetic, only the `reason_code` surfaced when the answer is
-already `NO_ACTION` for other reasons.
+(see "Downtime / catch-up" below); it never changes counters, gap
+arithmetic, eligibility, or a more specific present-time reason. Only
+when neither format has a gap does it replace `TARGETS_MET` with
+`COALESCED_AFTER_DOWNTIME`.
 
 ## Quality overrides quota
 
@@ -279,15 +281,26 @@ of current state on restart — never three historical draft requests.
 {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 14400}
 ```
 
-When present and the deterministic evaluation of current state
-independently resolves to `NO_ACTION` (e.g. targets already met, or no
-quality candidate), the output's `reason_code` becomes
-`COALESCED_AFTER_DOWNTIME` instead of the generic reason, to make the
-audit trail explicit: *this was a post-downtime evaluation and it
-deliberately did not replay any missed historical opportunity.* If
-current state instead resolves to a genuine `PREPARE_*`, the reason
-stays `STORY_GAP` / `MAIN_GAP` (the more specific, actionable reason),
-and `context.downtime_marker` simply echoes the input for logging.
+The deterministic evaluation order below is authoritative. The marker
+must not mask a more specific present-time reason:
+
+- A gap held by pending work preserves `PENDING_MAIN_EXISTS` /
+  `PENDING_STORY_EXISTS`.
+- A gap with no quality candidate preserves `NO_QUALITY_CANDIDATE`.
+- A gap held by recent activity preserves `RECENT_AUDIENCE_ACTIVITY`.
+- A gap held by quiet hours preserves `QUIET_HOURS`.
+- A genuinely eligible gap preserves `MAIN_GAP` / `STORY_GAP`.
+- No gap in either format, with a marker: `NO_ACTION` /
+  `COALESCED_AFTER_DOWNTIME`.
+- No gap in either format, without a marker: `NO_ACTION` / `TARGETS_MET`.
+
+These rules preserve the existing single-recommendation, main-before-Story
+evaluation order; the marker changes neither eligibility nor blocker precedence.
+In particular, downtime plus a gap with no quality candidate remains
+`NO_ACTION` / `NO_QUALITY_CANDIDATE`, never `COALESCED_AFTER_DOWNTIME`.
+`context.downtime_marker` may echo the input for auditability independently
+of the selected reason. A coalescing audit flag is not a reason override
+and does not change counters, gap arithmetic, or eligibility.
 
 ## Targets
 
@@ -457,7 +470,7 @@ guidance against ambiguous multi-boolean output.
 | `PENDING_MAIN_EXISTS` | `NO_ACTION` | Main gap is already being addressed by pending/approved/in-flight work. |
 | `PENDING_STORY_EXISTS` | `NO_ACTION` | Story gap is already being addressed by pending/approved/in-flight work. |
 | `RECENT_AUDIENCE_ACTIVITY` | `NO_ACTION` | Anti-burst spacing not yet elapsed since the last publication of that format. |
-| `COALESCED_AFTER_DOWNTIME` | `NO_ACTION` | Post-downtime evaluation; current state independently does not justify action, and no historical slot was replayed. |
+| `COALESCED_AFTER_DOWNTIME` | `NO_ACTION` | Neither format has a gap and a downtime marker is present; replaces only `TARGETS_MET`, with no historical slot replay. |
 | `QUIET_HOURS` | `NO_ACTION` | Current daypart is `QUIET` and quiet-hours suppression is enabled. |
 | `TARGETS_MET` | `NO_ACTION` | Neither counter has a gap. |
 
@@ -480,6 +493,7 @@ Machine-readable fixtures for these scenarios live in
 | 10 | Downtime then restart, current state already met | `NO_ACTION` | `COALESCED_AFTER_DOWNTIME` |
 | 11 | Multiple missed opportunities, restart shows real gap | `PREPARE_MAIN_CANDIDATE` | `MAIN_GAP` |
 | 12 | Asia/Baku midnight/day-boundary rollover | `NO_ACTION` | `QUIET_HOURS` |
+| 13 | Downtime restart, real main gap, no quality candidate | `NO_ACTION` | `NO_QUALITY_CANDIDATE` |
 
 Row 9 resolves to `PENDING_MAIN_EXISTS` rather than manufacturing a
 duplicate: an `UNKNOWN` publication state for one candidate already
@@ -491,7 +505,10 @@ Row 11 shows that coalescing does not mean "always NO_ACTION after
 downtime" — it means "evaluate current state once." If that current
 state genuinely shows a gap with an available candidate, the
 recommendation is the normal gap-based one; only the `reason_code`
-choice (row 10) changes when downtime is the reason nothing else fired.
+choice in row 10 changes because neither format has a gap and the
+ordinary result would be `TARGETS_MET`. Row 13 retains the more specific
+`NO_QUALITY_CANDIDATE` reason, with the downtime marker echoed separately
+in context. Missed opportunities are not replayed in any of these cases.
 
 ## Human approval
 
@@ -519,20 +536,29 @@ This contract intentionally leaves to #32:
   worker;
 - any scheduler or OpenClaw automation change.
 
-This contract intentionally leaves to #33/#34/#35/#36:
-- the Story draft production pipeline itself;
-- breaking-news identity/dedup policy (a separate decision, #34, running
-  in parallel with this one);
-- breaking draft routing.
+The separate #34 decision contract is accepted and merged in
+`33bd7c9114ecaeda675f1565a80268541c95dd68`; see
+`docs/contracts/breaking-routing-policy-v1.md`. #31 remains independent
+cadence policy and does not implement or modify #34/#35/#36.
+
+This contract intentionally leaves to #33/#35/#36:
+- the Story draft production pipeline itself (#33);
+- breaking-news event identity/dedup implementation (#35);
+- breaking draft routing (#36).
+
+After #31 merges, a separate canonical-context sync PR will record both
+accepted decisions before #32/#35 implementation. This task does not
+modify `NULLONE_PROJECT_CONTEXT.md`.
 
 ## Validation
 
-- `tests/fixtures/cadence_contract_v1_examples.json` — the 12 worked
+- `tests/fixtures/cadence_contract_v1_examples.json` — the 13 worked
   examples above, machine-readable.
 - `tests/test_cadence_contract_fixture.py` — validates fixture shape and
   hygiene only (schema fields present, `recommendation` and
   `reason_code` are drawn from the sets documented above, no duplicate
-  scenario names, no production identifiers/credentials). It does not
+  scenario names, no production identifiers/credentials), plus the fixed
+  downtime/no-quality regression expectation and its audit context. It does not
   execute a decision function, because no decision function exists yet
   in this repository — implementing one is #32's job, not this contract
   document's.
@@ -557,4 +583,4 @@ Issue #31 can close when:
 9. table-driven examples exist and are machine-readable;
 10. no production/runtime/controller code was added by this decision.
 
-Closing #31 does not close #32, #33, #34, #35, #36, or #37.
+Closing #31 does not close #32, #33, #35, #36, or #37; #34 is already merged.

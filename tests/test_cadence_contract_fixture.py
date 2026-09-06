@@ -4,9 +4,9 @@
 This deliberately does NOT execute a decision function against these
 fixtures: no such function exists in this repository, because
 implementing the cadence controller is issue #32, not #31. This test
-only checks that the documentation fixture is internally well-formed and
-free of production identifiers, so it cannot silently drift from the
-vocabulary defined in docs/contracts/cadence-contract-v1.md.
+checks that the documentation fixture is internally well-formed and
+free of production identifiers, and locks the authored downtime/no-quality
+regression expectation without implementing the controller.
 """
 from __future__ import annotations
 
@@ -156,8 +156,34 @@ def main() -> int:
         if daypart not in ALLOWED_DAYPARTS:
             fail(f"{name}: invalid daypart {daypart!r}")
 
-    if len(cases) < 12:
-        fail(f"expected at least 12 worked examples, found {len(cases)}")
+    if len(cases) < 13:
+        fail(f"expected at least 13 worked examples, found {len(cases)}")
+
+    # Fixed fixture relationship, not a cadence decision function: the new
+    # case differs from the existing no-quality case only by the audit marker.
+    by_name = {case["name"]: case for case in cases}
+    baseline = by_name["no_quality_candidate"]
+    regression = by_name["downtime_restart_gap_no_quality_candidate"]
+    regression_input = regression["input"]
+    marker = regression_input["signal"]["downtime_marker"]
+    if not marker or marker.get("restart_after_downtime") is not True:
+        fail("downtime/no-quality regression must retain its restart marker")
+    without_marker = {
+        **regression_input,
+        "signal": {**regression_input["signal"], "downtime_marker": None},
+    }
+    if without_marker != baseline["input"]:
+        fail("downtime/no-quality regression must differ only by downtime marker")
+    expected = regression["expected_output"]
+    if expected != {
+        **baseline["expected_output"],
+        "context": {"downtime_marker": marker},
+    }:
+        fail("downtime marker must preserve the no-quality result and audit context")
+    if (expected["recommendation"], expected["reason_code"]) != (
+        "NO_ACTION", "NO_QUALITY_CANDIDATE"
+    ):
+        fail("downtime/no-quality regression must not become COALESCED_AFTER_DOWNTIME")
 
     raw_fixture = FIXTURE.read_text(encoding="utf-8")
     for pattern in FORBIDDEN_LITERAL_PATTERNS:

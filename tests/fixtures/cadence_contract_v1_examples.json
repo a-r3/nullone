@@ -2,7 +2,7 @@
   "schema": "nullone.cadence-contract-examples.v1",
   "contract_version": "1.0.0",
   "contract_doc": "docs/contracts/cadence-contract-v1.md",
-  "note": "Documentation fixtures for issue #31. These are hand-authored worked examples of the deterministic contract defined in the contract doc. They are not executed against a decision function in this repository -- implementing that function is issue #32. tests/test_cadence_contract_fixture.py validates only the shape/hygiene of this file.",
+  "note": "Documentation fixtures for issue #31. These are hand-authored worked examples of the deterministic contract defined in the contract doc. They are not executed against a decision function in this repository -- implementing that function is issue #32. tests/test_cadence_contract_fixture.py validates shape/hygiene and the fixed downtime/no-quality regression expectation and audit context.",
   "default_config": {
     "main_target_min": 2,
     "main_target_max_breaking": 3,
@@ -258,6 +258,29 @@
         "reason_code": "QUIET_HOURS",
         "permitted_action": "NONE",
         "daypart": "QUIET"
+      }
+    },
+    {
+      "name": "downtime_restart_gap_no_quality_candidate",
+      "description": "Restart after downtime with a real main gap and no quality candidate; preserve NO_QUALITY_CANDIDATE rather than masking it with COALESCED_AFTER_DOWNTIME. The downtime marker remains observable in context.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T11:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T20:00:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T10:30:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": false, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 14400}}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "NO_QUALITY_CANDIDATE",
+        "permitted_action": "NONE",
+        "daypart": "MORNING",
+        "context": {
+          "downtime_marker": {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 14400}
+        }
       }
     }
   ]
