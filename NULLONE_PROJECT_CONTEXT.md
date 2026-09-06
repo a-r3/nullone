@@ -53,7 +53,7 @@ Local clone: `~/nullone-repo-staging`
 Verified planning:
 - M1/M2/M3 exist
 - M0 exists as milestone #4
-- canonical planning issues #3–#14 exist; #4 and #5 are now CLOSED, while #3 and the remaining applicable planning issues stay open
+- canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
 - operational issues #27, #28 and #29 are CLOSED; #30–#37 remain open
 - native dependencies created
@@ -61,13 +61,13 @@ Verified planning:
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
 
 Relevant issues:
-- #3 reliability proof/anomaly investigation — OPEN; proof verdict remains separate from repo engineering
+- #3 reliability proof/anomaly investigation — CLOSED/COMPLETED (PR #46 squash-merged as `875eeb715cac3c933b29694fec3c07fba094a39e`, verified via `gh issue view 3`/`gh pr view 46` on 2026-09-06); the recorded FAIL verdict and its criterion counts (PASS 4 / FAIL 4 / NOT_EXERCISED 7) are unchanged by this closure and still gate #37
 - #4 executable completion/publication contracts — CLOSED; PR #38 squash-merged as `417cf400157dea95e19d8eb0a860c7bcb974e6e7`
 - #5 offline behavioral regression tests — CLOSED; PR #39 squash-merged as `72e5c31e5bb3db922f30a2f8ea91c5b2d7ef8b41`
 - #27 explicit domain run outcomes/health — CLOSED; PR #40 squash-merged as `c70047a9e3123d19b46968715c3fc294a51d69d4`
 - #28 Morning Editorial network failure behavior — CLOSED; PR #42 squash-merged as `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`
 - #29 Daily Analytics Zernio access/runtime bootstrap — CLOSED; PR #44 squash-merged as `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; production NOT deployed; #30 is now the next main engineering issue
-- #30 Telegram failure alerts
+- #30 Telegram failure alerts — OPEN; repo-level implementation exists on branch `feature/n30-telegram-failure-alerts` (not merged, no PR opened yet); see "Repo-level #30 implementation" below
 - #31–#33 cadence/Story
 - #34–#36 breaking
 - #37 controlled production activation/validation
@@ -194,10 +194,120 @@ Validation:
 - 15 Morning Editorial tests PASS (final count), alongside the existing run-outcome tests, behavioral regression tests, acceptance-contract validation, and all script self-tests
 - no network or subprocess calls occur in the new tests; the real provider invocation path is never exercised
 
+### Repo-level #30 implementation — 2026-09-06 (branch, not merged)
+
+Issue #30 `Send concise Telegram alerts for meaningful workflow failures`
+has a repo-level implementation on branch
+`feature/n30-telegram-failure-alerts` (based cleanly on `main` at
+`875eeb7`, the #3 verdict-record merge). **Not merged. No PR opened.
+Issue #30 is not closed.** Do not upgrade this status until a PR
+actually merges.
+
+Architecture — two distinct failure surfaces, kept separate:
+- **Scheduler/execution failures** (e.g. the confirmed 2026-09-05
+  Morning Editorial `ENOTFOUND`/timeout occurrences): direction remains
+  to reuse OpenClaw's own scheduler-native `failureAlert` mechanism, not
+  build a second cron-error notifier. No Git-tracked declarative
+  OpenClaw automation/cron configuration exists in this repository to
+  implement that in, and its schema is confirmed reachable only via live
+  `openclaw cron get/set` against a running Gateway. Per #30's scope,
+  this was **not implemented or guessed at here**; the exact activation
+  requirement is recorded as an explicit #37 deployment-time requirement
+  in `docs/deployment/37-preflight-notification-requirements.md`.
+- **Domain/business failures** (e.g. the confirmed Sep 5-6 Daily
+  Analytics scheduler-`succeeded`/domain-`BLOCKED` symptom): implemented
+  as `workspace/social/ops/scripts/nullone_failure_notify.py`, a
+  standalone module that consumes an already-validated #27 run-outcome
+  record and decides whether an operator alert is required. The
+  structured `domain_outcome` remains the sole source of business-health
+  truth; `scheduler_status` is consulted only for a narrower, separate
+  purpose — routing notification *ownership* — so a true scheduler-level
+  execution failure (`scheduler_status` of `error`/`failed`) is left
+  quiet here and deferred to OpenClaw's own scheduler-native
+  `failureAlert` instead, preventing one incident from producing two
+  alerts once that native alert is activated at #37 (see "Enforced
+  ownership routing" in `docs/deployment/37-preflight-notification-requirements.md`).
+  `workspace/social/ops/scripts/nullone-failure-notify-run.py`
+  is its thin CLI wrapper (`notify --result-file <path>`, `self-test`),
+  following the same convention as the Morning Editorial/Daily Analytics
+  runners. Neither file is wired into any production runner or scheduled
+  job by this change — that wiring is deployment, deferred to #37, not
+  repo engineering.
+
+Key design points:
+- Actionability: alerts on `BLOCKED`, `FAILED`, and `UNKNOWN` (unless a
+  reason_code is explicitly listed as non-actionable — the list is
+  empty today because no such reason_code currently exists); stays
+  quiet on `SUCCEEDED`, including its `NO_DATA`/`NO_ACTION` variants.
+  Recovery is quiet by construction — there is no code path that
+  compares against a prior failure at all, not a policy flag that could
+  be flipped by mistake.
+- Stable failure identity: reuses #27's `health_decision()` output
+  verbatim — `run_id + ":" + reason_code` — rather than inventing a
+  weaker timestamp- or free-text-based identity.
+- Dedup/persistence: one JSON record per failure identity under
+  `social/ops/notifications/<workflow_id>/` (gitignored, matching the
+  existing `run-outcomes/`, `manifests/`, etc. pattern — `run-outcomes/`
+  was added to `.gitignore` in this same change, since it was missing
+  despite already being runtime-only state from #28/#29). The
+  notification attempt is durably reserved (`PENDING`) before the
+  outbound call, mirroring `nullone-publish-notify.py`'s
+  reserve-before-side-effect pattern; any existing record for an
+  identity, in any state, blocks a new automatic send — so a timeout
+  (ambiguous delivery) is never auto-resent, exactly like the existing
+  publication notifier's own timeout handling. Same-identity concurrency
+  is serialized with an exclusive `fcntl.flock` on a per-identity lock
+  file, the same primitive already used by the #28/#29 occurrence locks.
+- Message rendering is fully deterministic (no LLM in the loop) and
+  sanitizes reason text (bearer/API-key/OAuth-token/presigned-query-param
+  redaction, newline collapsing, length cap) before it ever reaches the
+  transport.
+- Capability-negative by construction: the module has no import or
+  symbol capable of publishing, drafting, scheduling, approving, or
+  retrying anything; a static source-scan test enforces the same
+  substring absence (`publish`, `zernio`) already used for the #28
+  retry module.
+- Telegram transport is injected (`Transport` protocol); the default
+  `OpenClawTelegramTransport` reuses the existing
+  `social/ops/private/telegram-owner-id` file and `openclaw message send`
+  CLI invocation already used by `nullone-publish-notify.py`. No new
+  transport/network code was introduced.
+- Notification-directory path containment: `#27`'s `workflow_id`
+  contract guarantees only a non-empty single-line string, not path
+  safety, so this notifier independently resolves and verifies its
+  per-workflow notification directory stays inside the configured
+  notification root, rejecting an absolute or traversal-style
+  `workflow_id` with `NotifierError` before any filesystem write.
+- `format_occurrence_time()` never emits an unparseable `occurrence_id`
+  verbatim into the Telegram message — it is opaque by #27's contract
+  and a future value could carry internal/private context — falling
+  back to a neutral `"unavailable"` placeholder instead; traceability
+  stays available via the deterministic `run_id`.
+
+Validation performed for this branch (as of the `fix: harden failure
+alert routing and state safety` follow-up commit):
+- `python3 tests/run_offline.py` → `OFFLINE_REGRESSION_SUITE=PASS`
+  (49 tests in `tests/test_failure_notify.py` — including scheduler-
+  ownership-routing, path-containment, and opaque-occurrence-ID
+  coverage added in the hardening follow-up — plus all existing suites
+  unchanged and still passing)
+- no network, Zernio, Telegram, or model call in any test; the default
+  `OpenClawTelegramTransport`/CLI path is exercised only with fake
+  transports and a tempdir-scoped notification root in tests
+- `git diff --check` clean; diff inspected for secrets/production
+  identifiers/signed URLs — none found (redaction tests use obviously
+  synthetic fixture values only)
+- publication code (`nullone-publish-bridge.py`, `nullone-publisher-run.py`,
+  `nullone-publish-notify.py`) and the Morning Editorial/Daily Analytics
+  runtime modules were **not modified** by this change
+- production deployment: **NOT performed**
+- real Telegram send / live scheduled validation: **NOT performed**
+- issue #30: **NOT closed**; no PR opened
+
 ## Reliability proof
 Baseline: 2026-09-04 03:47 Asia/Baku
 Nominal end: 2026-09-06 03:47 Asia/Baku
-The nominal proof window is closed. The read-only issue #3 evidence evaluation is now complete at repo/report level: see `docs/reliability/2026-09-proof-verdict.md` on `feature/n3-reliability-proof-verdict` for the full audit. Issue #3 itself remains OPEN pending human review; completing this report does NOT close #3 and does NOT itself authorize production deployment or #37.
+The nominal proof window is closed. The read-only issue #3 evidence evaluation is complete at repo/report level: see `docs/reliability/2026-09-proof-verdict.md` on `feature/n3-reliability-proof-verdict` for the full audit. Issue #3 itself is now **CLOSED/COMPLETED** (PR #46 squash-merged as `875eeb715cac3c933b29694fec3c07fba094a39e`; independently verified via `gh issue view 3` → `state: CLOSED, stateReason: COMPLETED` and `gh pr view 46` → `state: MERGED` on 2026-09-06). This closure records the verdict — it does NOT itself authorize production deployment or #37; the FAIL verdict and its criterion counts below are unchanged.
 
 ### Final proof verdict — 2026-09-06
 **FAIL.** Criterion counts: PASS 4, FAIL 4, NOT_EXERCISED 7 (of 15 canonical `PUB-`/`RUN-` IDs).
@@ -286,12 +396,12 @@ No retry has been performed. Do not auto-retry.
 #4, #5, #27, #28 and #29 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`). No production deployment has been performed for #27, #28, or #29.
 
 Current order:
-1. the #3 read-only reliability proof evaluation is complete at repo/report level with a final verdict of FAIL — see `docs/reliability/2026-09-proof-verdict.md`; #3 itself stays OPEN pending human review and does not auto-close
-2. #30 concise Telegram failure alerts consuming truthful domain health is the next main engineering implementation item
+1. the #3 read-only reliability proof evaluation is complete at repo/report level with a final verdict of FAIL — see `docs/reliability/2026-09-proof-verdict.md`; #3 itself is now CLOSED/COMPLETED (PR #46 merged as `875eeb715cac3c933b29694fec3c07fba094a39e`) — this closure records the verdict, it does not itself authorize production deployment or #37
+2. #30 concise Telegram failure alerts consuming truthful domain health is the next main engineering implementation item — a repo-level implementation exists on branch `feature/n30-telegram-failure-alerts` (see "Repo-level #30 implementation" above) but is not merged and #30 is not closed
 3. #31/#34 decision work may proceed in parallel as planned, then relevant Story/breaking implementation
-4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete
+4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete; #37 also performs the scheduler-native `failureAlert` activation recorded in `docs/deployment/37-preflight-notification-requirements.md`
 
-The #3 evaluation is complete at report level and pending human review, not pending further investigation. GitHub development may continue. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles.
+The #3 evaluation is complete at report level and #3 is now closed (PR #46 merged); GitHub development continues per this order. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles.
 
 ## Model/cost policy
 - Haiku: Radar, analytics, heartbeat, approval/publisher/utility and lightweight Story reasoning where useful
