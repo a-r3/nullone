@@ -1,0 +1,1975 @@
+{
+  "schema": "nullone.breaking-routing-cases.v1",
+  "policy_schema": "nullone.breaking-routing.v1",
+  "enforcement": "NOT_IMPLEMENTED",
+  "coverage_config": {
+    "ref": "fixture:coverage-config-v1",
+    "evaluated_at": "2026-09-06T00:00:00Z",
+    "window": "Synthetic configured recent-coverage window; cases state whether related coverage is inside it. This fixture establishes no new numeric policy."
+  },
+  "cases": [
+    {
+      "id": "B34-001",
+      "given": "Routine verified minor feature; waiting does not reduce usefulness.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-001:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-001:evidence",
+            "source_url": "https://example.invalid/releases/1",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Routine verified minor feature; waiting does not reduce usefulness.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Routine verified minor feature; waiting does not reduce usefulness.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-001:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Routine verified minor feature; waiting does not reduce usefulness.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-001",
+        "assessment_ref": "fixture:B34-001:assessment",
+        "state_snapshot_ref": "fixture:B34-001:state",
+        "severity": "NORMAL",
+        "event": {
+          "event_id": "event-b34-001",
+          "development_id": "development-b34-001",
+          "topic_id": "topic-b34-001",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/1"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-001:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "NORMAL_QUEUE",
+        "reason_code": "NORMAL_CADENCE",
+        "reason_text": "Routine verified minor feature; waiting does not reduce usefulness.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-002",
+      "given": "Official service change requires user action before the next cadence window.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-002:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-002:evidence",
+            "source_url": "https://example.invalid/releases/2",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Official service change requires user action before the next cadence window.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Official service change requires user action before the next cadence window.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-002:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Official service change requires user action before the next cadence window.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-002",
+        "assessment_ref": "fixture:B34-002:assessment",
+        "state_snapshot_ref": "fixture:B34-002:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-002",
+          "development_id": "development-b34-002",
+          "topic_id": "topic-b34-002",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/2"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-002:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "IMMEDIATE_STORY_DRAFT",
+        "reason_code": "MATERIAL_TIME_VALUE",
+        "reason_text": "Official service change requires user action before the next cadence window.",
+        "draft_targets": [
+          "STORY"
+        ],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-003",
+      "given": "Official major platform retirement needs immediate alert and standalone migration explanation.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-003:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-003:evidence",
+            "source_url": "https://example.invalid/releases/retirement-1",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Official major platform retirement needs immediate alert and standalone migration explanation.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Official major platform retirement needs immediate alert and standalone migration explanation.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": "Affected developers need the documented deadlines, supported alternatives and migration limits explained together.",
+        "state_snapshot_ref": "fixture:B34-003:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Official major platform retirement needs immediate alert and standalone migration explanation.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": true,
+        "main_eligible": true,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-003",
+        "assessment_ref": "fixture:B34-003:assessment",
+        "state_snapshot_ref": "fixture:B34-003:state",
+        "severity": "EXCEPTIONAL_BREAKING",
+        "event": {
+          "event_id": "event-platform-retirement",
+          "development_id": "development-retirement-announced",
+          "topic_id": "platform-lifecycle",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/retirement-1"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-003:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "IMMEDIATE_STORY_AND_MAIN_DRAFT",
+        "reason_code": "EXCEPTIONAL_MAIN_VALUE",
+        "reason_text": "Confirmed retirement needs an immediate alert and a standalone migration explanation.",
+        "draft_targets": [
+          "STORY",
+          "CAROUSEL"
+        ],
+        "main_draft_justification": "Affected developers need the documented deadlines, supported alternatives and migration limits explained together.",
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-004",
+      "given": "Urgent viral rumor rests on one unverified social post.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-004:assessment",
+        "verification_state": "UNVERIFIED",
+        "evidence": [],
+        "audience_value": "Urgent viral rumor rests on one unverified social post.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-004:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Urgent viral rumor rests on one unverified social post.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-004",
+        "assessment_ref": "fixture:B34-004:assessment",
+        "state_snapshot_ref": "fixture:B34-004:state",
+        "severity": null,
+        "event": {
+          "event_id": "event-b34-004",
+          "development_id": "development-b34-004",
+          "topic_id": "topic-b34-004",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/4"
+          ]
+        },
+        "verification": {
+          "state": "UNVERIFIED",
+          "evidence_refs": []
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "BLOCKED_UNVERIFIED",
+        "reason_code": "EVIDENCE_INSUFFICIENT",
+        "reason_text": "Urgent viral rumor rests on one unverified social post.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-005",
+      "given": "Same canonical source and unchanged scoped claims already considered.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-005:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-005:evidence",
+            "source_url": "https://example.invalid/releases/5",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Same canonical source and unchanged scoped claims already considered.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Same canonical source and unchanged scoped claims already considered.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-005:state",
+        "state_variants": [
+          "CONSIDERED_UNCHANGED_DEVELOPMENT"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Same canonical source and unchanged scoped claims already considered.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-005",
+        "assessment_ref": "fixture:B34-005:assessment",
+        "state_snapshot_ref": "fixture:B34-005:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-005",
+          "development_id": "development-b34-005",
+          "topic_id": "topic-b34-005",
+          "identity_basis": "CANONICAL_SOURCE",
+          "identity_refs": [
+            "https://example.invalid/releases/5"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-005:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-005:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXACT_EVENT_DUPLICATE",
+        "reason_text": "Same canonical source and unchanged scoped claims already considered.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-006",
+      "given": "Different article repeats the same announcement and claims.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-006:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-006:evidence",
+            "source_url": "https://example.invalid/releases/6",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Different article repeats the same announcement and claims.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Different article repeats the same announcement and claims.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-006:state",
+        "state_variants": [
+          "CONSIDERED_SAME_EVENT"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Different article repeats the same announcement and claims.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null,
+        "additional_source_url": "https://example.invalid/reporting/same-announcement"
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-006",
+        "assessment_ref": "fixture:B34-006:assessment",
+        "state_snapshot_ref": "fixture:B34-006:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-006",
+          "development_id": "development-b34-006",
+          "topic_id": "topic-b34-006",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/6"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-006:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "SAME_EVENT",
+          "matched_refs": [
+            "fixture:B34-006:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "SAME_EVENT_DIFFERENT_SOURCE",
+        "reason_text": "Different article repeats the same announcement and claims.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-007",
+      "given": "Equivalent published manifest overrides stale READY queue.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-007:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-007:evidence",
+            "source_url": "https://example.invalid/releases/7",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent published manifest overrides stale READY queue.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent published manifest overrides stale READY queue.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": "Users need the newly documented consequence and supported alternatives explained as a standalone main piece.",
+        "state_snapshot_ref": "fixture:B34-007:state",
+        "state_variants": [
+          "publication.state=PUBLISHED; queue.status=READY"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent published manifest overrides stale READY queue.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": true,
+        "main_eligible": true,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-007",
+        "assessment_ref": "fixture:B34-007:assessment",
+        "state_snapshot_ref": "fixture:B34-007:state",
+        "severity": "EXCEPTIONAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-007",
+          "development_id": "development-b34-007",
+          "topic_id": "topic-b34-007",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/7"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-007:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-007:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_CONSEQUENTIAL_STATE",
+        "reason_text": "Equivalent published manifest overrides stale READY queue.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-008",
+      "given": "Equivalent UNKNOWN publication with later draft readback; consumed attempt retained.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-008:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-008:evidence",
+            "source_url": "https://example.invalid/releases/8",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent UNKNOWN publication with later draft readback; consumed attempt retained.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent UNKNOWN publication with later draft readback; consumed attempt retained.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-008:state",
+        "state_variants": [
+          "publication.state=UNKNOWN; publication.attempts=1; later_readback=draft"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent UNKNOWN publication with later draft readback; consumed attempt retained.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-008",
+        "assessment_ref": "fixture:B34-008:assessment",
+        "state_snapshot_ref": "fixture:B34-008:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-008",
+          "development_id": "development-b34-008",
+          "topic_id": "topic-b34-008",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/8"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-008:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-008:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_CONSEQUENTIAL_STATE",
+        "reason_text": "Equivalent UNKNOWN publication with later draft readback; consumed attempt retained.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "id": "B34-009",
+      "given": "Official affected-user count changes from 100 to 10000 in the same measured population and period; more users need action now.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-009:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-009:evidence",
+            "source_url": "https://example.invalid/releases/9",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Official affected-user count changes from 100 to 10000 in the same measured population and period; more users need action now.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Official affected-user count changes from 100 to 10000 in the same measured population and period; more users need action now.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-009:state",
+        "state_variants": [
+          "parent.publication.state=PUBLISHED"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": true,
+        "incremental_value": "Official affected-user count changes from 100 to 10000 in the same measured population and period; more users need action now.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": {
+          "parent_claim": "Earlier official scoped development.",
+          "new_claim": "Official affected-user count changes from 100 to 10000 in the same measured population and period; more users need action now.",
+          "evidence_ref": "fixture:B34-009:evidence"
+        }
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-009",
+        "assessment_ref": "fixture:B34-009:assessment",
+        "state_snapshot_ref": "fixture:B34-009:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-009",
+          "development_id": "development-b34-009",
+          "topic_id": "topic-b34-009",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/9"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-009:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "MATERIAL_FOLLOW_UP",
+          "matched_refs": [
+            "fixture:B34-009:state"
+          ],
+          "parent_development_id": "development-parent-009",
+          "follow_up_reason": "OFFICIAL_NUMBER_CHANGED"
+        },
+        "routing_decision": "IMMEDIATE_STORY_DRAFT",
+        "reason_code": "MATERIAL_TIME_VALUE",
+        "reason_text": "Official affected-user count changes from 100 to 10000 in the same measured population and period; more users need action now.",
+        "draft_targets": [
+          "STORY"
+        ],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-010",
+      "given": "Same product topic, separately identified version release with useful but non-urgent improvements.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-010:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-010:evidence",
+            "source_url": "https://example.invalid/releases/10",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Same product topic, separately identified version release with useful but non-urgent improvements.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Same product topic, separately identified version release with useful but non-urgent improvements.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-010:state",
+        "state_variants": [
+          "related.publication.state=PUBLISHED"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": true,
+        "incremental_value": "Same product topic, separately identified version release with useful but non-urgent improvements.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-010",
+        "assessment_ref": "fixture:B34-010:assessment",
+        "state_snapshot_ref": "fixture:B34-010:state",
+        "severity": "NORMAL",
+        "event": {
+          "event_id": "event-b34-010",
+          "development_id": "development-b34-010",
+          "topic_id": "topic-b34-010",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/10"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-010:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [
+            "fixture:B34-010:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "NORMAL_QUEUE",
+        "reason_code": "NORMAL_CADENCE",
+        "reason_text": "Same product topic, separately identified version release with useful but non-urgent improvements.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-011",
+      "given": "Recent related coverage already explained the proposed angle; no incremental audience value.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-011:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-011:evidence",
+            "source_url": "https://example.invalid/releases/11",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Recent related coverage already explained the proposed angle; no incremental audience value.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Recent related coverage already explained the proposed angle; no incremental audience value.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-011:state",
+        "state_variants": [
+          "related.review.state=DRAFT_CREATED"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": true,
+        "incremental_value": null,
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-011",
+        "assessment_ref": "fixture:B34-011:assessment",
+        "state_snapshot_ref": "fixture:B34-011:state",
+        "severity": "NORMAL",
+        "event": {
+          "event_id": "event-b34-011",
+          "development_id": "development-b34-011",
+          "topic_id": "topic-b34-011",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/11"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-011:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [
+            "fixture:B34-011:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_RECENT_COVERAGE",
+        "reason_code": "NO_INCREMENTAL_AUDIENCE_VALUE",
+        "reason_text": "Recent related coverage already explained the proposed angle; no incremental audience value.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-012",
+      "given": "New official consequence after confirmed coverage requires urgent action and standalone supported-alternatives explanation.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-012:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-012:evidence",
+            "source_url": "https://example.invalid/releases/12",
+            "authority": "synthetic first-party release",
+            "supported_claim": "New official consequence after confirmed coverage requires urgent action and standalone supported-alternatives explanation.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "New official consequence after confirmed coverage requires urgent action and standalone supported-alternatives explanation.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": "Users need the newly documented consequence and supported alternatives explained as a standalone main piece.",
+        "state_snapshot_ref": "fixture:B34-012:state",
+        "state_variants": [
+          "parent.publication.state=PUBLISHED"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": true,
+        "incremental_value": "New official consequence after confirmed coverage requires urgent action and standalone supported-alternatives explanation.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": true,
+        "main_eligible": true,
+        "delta": {
+          "parent_claim": "Earlier official scoped development.",
+          "new_claim": "New official consequence after confirmed coverage requires urgent action and standalone supported-alternatives explanation.",
+          "evidence_ref": "fixture:B34-012:evidence"
+        }
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-012",
+        "assessment_ref": "fixture:B34-012:assessment",
+        "state_snapshot_ref": "fixture:B34-012:state",
+        "severity": "EXCEPTIONAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-012",
+          "development_id": "development-b34-012",
+          "topic_id": "topic-b34-012",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/12"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-012:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "MATERIAL_FOLLOW_UP",
+          "matched_refs": [
+            "fixture:B34-012:state"
+          ],
+          "parent_development_id": "development-parent-012",
+          "follow_up_reason": "USER_CONSEQUENCE_CHANGED"
+        },
+        "routing_decision": "IMMEDIATE_STORY_AND_MAIN_DRAFT",
+        "reason_code": "EXCEPTIONAL_MAIN_VALUE",
+        "reason_text": "New official consequence after confirmed coverage requires urgent action and standalone supported-alternatives explanation.",
+        "draft_targets": [
+          "STORY",
+          "FEED"
+        ],
+        "main_draft_justification": "Users need the newly documented consequence and supported alternatives explained as a standalone main piece.",
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-013",
+      "given": "Conflicting release identifiers leave development equivalence unresolved.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-013:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-013:evidence",
+            "source_url": "https://example.invalid/releases/13",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Conflicting release identifiers leave development equivalence unresolved.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Conflicting release identifiers leave development equivalence unresolved.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-013:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Conflicting release identifiers leave development equivalence unresolved.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-013",
+        "assessment_ref": "fixture:B34-013:assessment",
+        "state_snapshot_ref": "fixture:B34-013:state",
+        "severity": null,
+        "event": {
+          "event_id": null,
+          "development_id": null,
+          "topic_id": "topic-b34-013",
+          "identity_basis": "UNRESOLVED",
+          "identity_refs": []
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-013:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "AMBIGUOUS_IDENTITY",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "BLOCKED_AMBIGUOUS_IDENTITY",
+        "reason_code": "IDENTITY_UNRESOLVED",
+        "reason_text": "Conflicting release identifiers leave development equivalence unresolved.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "id": "B34-014",
+      "given": "Equivalent draft already has first-stage approval.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-014:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-014:evidence",
+            "source_url": "https://example.invalid/releases/14",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent draft already has first-stage approval.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent draft already has first-stage approval.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-014:state",
+        "state_variants": [
+          "approval.first_stage=true"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent draft already has first-stage approval.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-014",
+        "assessment_ref": "fixture:B34-014:assessment",
+        "state_snapshot_ref": "fixture:B34-014:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-014",
+          "development_id": "development-b34-014",
+          "topic_id": "topic-b34-014",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/14"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-014:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-014:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_CONSEQUENTIAL_STATE",
+        "reason_text": "Equivalent draft already has first-stage approval.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-015",
+      "given": "Equivalent scheduled state already recorded.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-015:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-015:evidence",
+            "source_url": "https://example.invalid/releases/15",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent scheduled state already recorded.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent scheduled state already recorded.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-015:state",
+        "state_variants": [
+          "scheduled"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent scheduled state already recorded.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-015",
+        "assessment_ref": "fixture:B34-015:assessment",
+        "state_snapshot_ref": "fixture:B34-015:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-015",
+          "development_id": "development-b34-015",
+          "topic_id": "topic-b34-015",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/15"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-015:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-015:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_CONSEQUENTIAL_STATE",
+        "reason_text": "Equivalent scheduled state already recorded.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-016",
+      "given": "Equivalent publication is in flight or accepted.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-016:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-016:evidence",
+            "source_url": "https://example.invalid/releases/16",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent publication is in flight or accepted.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent publication is in flight or accepted.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-016:state",
+        "state_variants": [
+          "publication.state=PUBLISH_IN_FLIGHT",
+          "publication.state=PUBLISHING",
+          "publication.state=PUBLISH_ACCEPTED"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent publication is in flight or accepted.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-016",
+        "assessment_ref": "fixture:B34-016:assessment",
+        "state_snapshot_ref": "fixture:B34-016:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-016",
+          "development_id": "development-b34-016",
+          "topic_id": "topic-b34-016",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/16"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-016:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-016:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_CONSEQUENTIAL_STATE",
+        "reason_text": "Equivalent publication is in flight or accepted.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-017",
+      "given": "Equivalent publication attempt was consumed; readback is failed, inconclusive or reports failure.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-017:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-017:evidence",
+            "source_url": "https://example.invalid/releases/17",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent publication attempt was consumed; readback is failed, inconclusive or reports failure.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent publication attempt was consumed; readback is failed, inconclusive or reports failure.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-017:state",
+        "state_variants": [
+          "publication.state=READBACK_FAILED; publication.attempts=1",
+          "publication.state=CHECK_REQUIRED; publication.attempts=1",
+          "publication.state=FAILED; publication.attempts=1"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent publication attempt was consumed; readback is failed, inconclusive or reports failure.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-017",
+        "assessment_ref": "fixture:B34-017:assessment",
+        "state_snapshot_ref": "fixture:B34-017:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-017",
+          "development_id": "development-b34-017",
+          "topic_id": "topic-b34-017",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/17"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-017:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-017:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_CONSEQUENTIAL_STATE",
+        "reason_text": "Equivalent publication attempt was consumed; readback is failed, inconclusive or reports failure.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "id": "B34-018",
+      "given": "Equivalent review creation may have happened; do not create replacement.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-018:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-018:evidence",
+            "source_url": "https://example.invalid/releases/18",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent review creation may have happened; do not create replacement.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent review creation may have happened; do not create replacement.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-018:state",
+        "state_variants": [
+          "review.state=REVIEW_UNKNOWN; review.create_attempts=1",
+          "review.state=CREATE_IN_FLIGHT; review.create_attempts=1",
+          "review.create_attempts=1; review.state=unexplained"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent review creation may have happened; do not create replacement.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-018",
+        "assessment_ref": "fixture:B34-018:assessment",
+        "state_snapshot_ref": "fixture:B34-018:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-018",
+          "development_id": "development-b34-018",
+          "topic_id": "topic-b34-018",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/18"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-018:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-018:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_DRAFT_REQUEST",
+        "reason_text": "Equivalent review creation may have happened; do not create replacement.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "id": "B34-019",
+      "given": "Equivalent draft or reservation exists despite unverified incoming report.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-019:assessment",
+        "verification_state": "UNVERIFIED",
+        "evidence": [],
+        "audience_value": "Equivalent draft or reservation exists despite unverified incoming report.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-019:state",
+        "state_variants": [
+          "review.state=DRAFT_CREATED",
+          "existing_draft_request=reserved"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent draft or reservation exists despite unverified incoming report.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-019",
+        "assessment_ref": "fixture:B34-019:assessment",
+        "state_snapshot_ref": "fixture:B34-019:state",
+        "severity": null,
+        "event": {
+          "event_id": "event-b34-019",
+          "development_id": "development-b34-019",
+          "topic_id": "topic-b34-019",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/19"
+          ]
+        },
+        "verification": {
+          "state": "UNVERIFIED",
+          "evidence_refs": []
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-019:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXISTING_DRAFT_REQUEST",
+        "reason_text": "Equivalent draft or reservation exists despite unverified incoming report.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-020",
+      "given": "Equivalent rejected or historical draft must not be resurrected even though excluded from active load.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-020:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-020:evidence",
+            "source_url": "https://example.invalid/releases/20",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Equivalent rejected or historical draft must not be resurrected even though excluded from active load.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Equivalent rejected or historical draft must not be resurrected even though excluded from active load.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-020:state",
+        "state_variants": [
+          "queue.status=REJECTED",
+          "queue.status=LEGACY_DRAFT",
+          "queue.status=SUPERSEDED_DRAFT",
+          "queue.status=DRAFTED; current_manifest=absent"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Equivalent rejected or historical draft must not be resurrected even though excluded from active load.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-020",
+        "assessment_ref": "fixture:B34-020:assessment",
+        "state_snapshot_ref": "fixture:B34-020:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-020",
+          "development_id": "development-b34-020",
+          "topic_id": "topic-b34-020",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/20"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-020:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-020:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "CANDIDATE_EXCLUDED",
+        "reason_text": "Equivalent rejected or historical draft must not be resurrected even though excluded from active load.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-021",
+      "given": "Required publish ledger cannot be read; no known positive equivalent record.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-021:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-021:evidence",
+            "source_url": "https://example.invalid/releases/21",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Required publish ledger cannot be read; no known positive equivalent record.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Required publish ledger cannot be read; no known positive equivalent record.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-021:state",
+        "state_variants": [
+          "publish_ledger=unreadable"
+        ],
+        "state_complete": false,
+        "recent_related_coverage": false,
+        "incremental_value": "Required publish ledger cannot be read; no known positive equivalent record.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-021",
+        "assessment_ref": "fixture:B34-021:assessment",
+        "state_snapshot_ref": "fixture:B34-021:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-021",
+          "development_id": "development-b34-021",
+          "topic_id": "topic-b34-021",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/21"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-021:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "AMBIGUOUS_IDENTITY",
+          "matched_refs": [
+            "fixture:B34-021:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "BLOCKED_AMBIGUOUS_IDENTITY",
+        "reason_code": "STATE_UNAVAILABLE_OR_CONFLICTING",
+        "reason_text": "Required publish ledger cannot be read; no known positive equivalent record.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "id": "B34-022",
+      "given": "Exceptional main value is evidenced but main capacity is exhausted; Story remains eligible.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-022:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-022:evidence",
+            "source_url": "https://example.invalid/releases/22",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Exceptional main value is evidenced but main capacity is exhausted; Story remains eligible.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Exceptional main value is evidenced but main capacity is exhausted; Story remains eligible.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": "Users need the newly documented consequence and supported alternatives explained as a standalone main piece.",
+        "state_snapshot_ref": "fixture:B34-022:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Exceptional main value is evidenced but main capacity is exhausted; Story remains eligible.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": true,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-022",
+        "assessment_ref": "fixture:B34-022:assessment",
+        "state_snapshot_ref": "fixture:B34-022:state",
+        "severity": "EXCEPTIONAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-022",
+          "development_id": "development-b34-022",
+          "topic_id": "topic-b34-022",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/22"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-022:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "IMMEDIATE_STORY_DRAFT",
+        "reason_code": "EXCEPTIONAL_STORY_ONLY",
+        "reason_text": "Exceptional main value is evidenced but main capacity is exhausted; Story remains eligible.",
+        "draft_targets": [
+          "STORY"
+        ],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-023",
+      "given": "Evidence is verified but Story quality threshold or format requirement fails.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-023:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-023:evidence",
+            "source_url": "https://example.invalid/releases/23",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Evidence is verified but Story quality threshold or format requirement fails.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Evidence is verified but Story quality threshold or format requirement fails.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-023:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Evidence is verified but Story quality threshold or format requirement fails.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": false,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-023",
+        "assessment_ref": "fixture:B34-023:assessment",
+        "state_snapshot_ref": "fixture:B34-023:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-023",
+          "development_id": "development-b34-023",
+          "topic_id": "topic-b34-023",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/23"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-023:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "BLOCKED_DRAFT_SAFETY",
+        "reason_code": "STORY_QUALITY_BLOCK",
+        "reason_text": "Evidence is verified but Story quality threshold or format requirement fails.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-024",
+      "given": "Verified material Story is blocked by safe active-load capacity.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-024:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-024:evidence",
+            "source_url": "https://example.invalid/releases/24",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Verified material Story is blocked by safe active-load capacity.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Verified material Story is blocked by safe active-load capacity.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-024:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Verified material Story is blocked by safe active-load capacity.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": false,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-024",
+        "assessment_ref": "fixture:B34-024:assessment",
+        "state_snapshot_ref": "fixture:B34-024:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-024",
+          "development_id": "development-b34-024",
+          "topic_id": "topic-b34-024",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/24"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-024:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "BLOCKED_DRAFT_SAFETY",
+        "reason_code": "STORY_LOAD_BLOCK",
+        "reason_text": "Verified material Story is blocked by safe active-load capacity.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-025",
+      "given": "Required Story worker or cadence dependency is unavailable.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-025:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-025:evidence",
+            "source_url": "https://example.invalid/releases/25",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Required Story worker or cadence dependency is unavailable.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Required Story worker or cadence dependency is unavailable.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-025:state",
+        "state_variants": [
+          "initialized_empty_required_stores"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Required Story worker or cadence dependency is unavailable.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": false,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-025",
+        "assessment_ref": "fixture:B34-025:assessment",
+        "state_snapshot_ref": "fixture:B34-025:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-025",
+          "development_id": "development-b34-025",
+          "topic_id": "topic-b34-025",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/25"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-025:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "DISTINCT_EVENT",
+          "matched_refs": [],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "BLOCKED_DRAFT_SAFETY",
+        "reason_code": "DRAFT_DEPENDENCY_UNAVAILABLE",
+        "reason_text": "Required Story worker or cadence dependency is unavailable.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-026",
+      "given": "New official consequence is verified, but same-event parent publication is UNKNOWN and coverage scope unreconciled.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-026:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-026:evidence",
+            "source_url": "https://example.invalid/releases/26",
+            "authority": "synthetic first-party release",
+            "supported_claim": "New official consequence is verified, but same-event parent publication is UNKNOWN and coverage scope unreconciled.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "New official consequence is verified, but same-event parent publication is UNKNOWN and coverage scope unreconciled.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-026:state",
+        "state_variants": [
+          "parent.publication.state=UNKNOWN; parent.publication.attempts=1"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": true,
+        "incremental_value": "New official consequence is verified, but same-event parent publication is UNKNOWN and coverage scope unreconciled.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": {
+          "parent_claim": "Earlier official scoped development.",
+          "new_claim": "New official consequence is verified, but same-event parent publication is UNKNOWN and coverage scope unreconciled.",
+          "evidence_ref": "fixture:B34-026:evidence"
+        }
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-026",
+        "assessment_ref": "fixture:B34-026:assessment",
+        "state_snapshot_ref": "fixture:B34-026:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-026",
+          "development_id": "development-b34-026",
+          "topic_id": "topic-b34-026",
+          "identity_basis": "EXACT_IDENTIFIER",
+          "identity_refs": [
+            "https://example.invalid/releases/26"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-026:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "MATERIAL_FOLLOW_UP",
+          "matched_refs": [
+            "fixture:B34-026:state"
+          ],
+          "parent_development_id": "development-parent-026",
+          "follow_up_reason": "USER_CONSEQUENCE_CHANGED"
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "UNRESOLVED_EVENT_HISTORY",
+        "reason_text": "New official consequence is verified, but same-event parent publication is UNKNOWN and coverage scope unreconciled.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": true
+      }
+    },
+    {
+      "id": "B34-027",
+      "given": "Same official URL now confirms general availability for a previously excluded region; snapshot proves the material change.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-027:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-027:evidence",
+            "source_url": "https://example.invalid/releases/27",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Same official URL now confirms general availability for a previously excluded region; snapshot proves the material change.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Same official URL now confirms general availability for a previously excluded region; snapshot proves the material change.",
+        "timing_loss": "Waiting delays useful action on the confirmed change.",
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-027:state",
+        "state_variants": [
+          "parent.publication.state=PUBLISHED"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": true,
+        "incremental_value": "Same official URL now confirms general availability for a previously excluded region; snapshot proves the material change.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": {
+          "parent_claim": "Earlier official scoped development.",
+          "new_claim": "Same official URL now confirms general availability for a previously excluded region; snapshot proves the material change.",
+          "evidence_ref": "fixture:B34-027:evidence"
+        },
+        "source_revision_comparison": "Same canonical URL; changed factual scope."
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-027",
+        "assessment_ref": "fixture:B34-027:assessment",
+        "state_snapshot_ref": "fixture:B34-027:state",
+        "severity": "MATERIAL_BREAKING",
+        "event": {
+          "event_id": "event-b34-027",
+          "development_id": "development-b34-027",
+          "topic_id": "topic-b34-027",
+          "identity_basis": "CANONICAL_SOURCE",
+          "identity_refs": [
+            "https://example.invalid/releases/27"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-027:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "MATERIAL_FOLLOW_UP",
+          "matched_refs": [
+            "fixture:B34-027:state"
+          ],
+          "parent_development_id": "development-parent-027",
+          "follow_up_reason": "AVAILABILITY_CHANGED"
+        },
+        "routing_decision": "IMMEDIATE_STORY_DRAFT",
+        "reason_code": "MATERIAL_TIME_VALUE",
+        "reason_text": "Same official URL now confirms general availability for a previously excluded region; snapshot proves the material change.",
+        "draft_targets": [
+          "STORY"
+        ],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    },
+    {
+      "id": "B34-028",
+      "given": "Same source has cosmetic prose changes only; long elapsed time does not renew unchanged claims.",
+      "input_findings": {
+        "assessment_ref": "fixture:B34-028:assessment",
+        "verification_state": "PASS",
+        "evidence": [
+          {
+            "ref": "fixture:B34-028:evidence",
+            "source_url": "https://example.invalid/releases/28",
+            "authority": "synthetic first-party release",
+            "supported_claim": "Same source has cosmetic prose changes only; long elapsed time does not renew unchanged claims.",
+            "scope": "Only the product, affected audience and availability stated in this synthetic release."
+          }
+        ],
+        "audience_value": "Same source has cosmetic prose changes only; long elapsed time does not renew unchanged claims.",
+        "timing_loss": null,
+        "standalone_main_value": null,
+        "state_snapshot_ref": "fixture:B34-028:state",
+        "state_variants": [
+          "CONSIDERED_UNCHANGED_DEVELOPMENT; recent_window=elapsed"
+        ],
+        "state_complete": true,
+        "recent_related_coverage": false,
+        "incremental_value": "Same source has cosmetic prose changes only; long elapsed time does not renew unchanged claims.",
+        "coverage_config_ref": "fixture:coverage-config-v1",
+        "story_quality_pass": true,
+        "story_load_pass": true,
+        "dependencies_available": true,
+        "main_selected": false,
+        "main_eligible": false,
+        "delta": null,
+        "source_revision_comparison": "Same canonical URL; unchanged factual scope."
+      },
+      "expected": {
+        "schema": "nullone.breaking-routing.v1",
+        "candidate_id": "candidate-b34-028",
+        "assessment_ref": "fixture:B34-028:assessment",
+        "state_snapshot_ref": "fixture:B34-028:state",
+        "severity": "NORMAL",
+        "event": {
+          "event_id": "event-b34-028",
+          "development_id": "development-b34-028",
+          "topic_id": "topic-b34-028",
+          "identity_basis": "CANONICAL_SOURCE",
+          "identity_refs": [
+            "https://example.invalid/releases/28"
+          ]
+        },
+        "verification": {
+          "state": "PASS",
+          "evidence_refs": [
+            "fixture:B34-028:evidence"
+          ]
+        },
+        "dedup": {
+          "decision": "EXACT_DUPLICATE",
+          "matched_refs": [
+            "fixture:B34-028:state"
+          ],
+          "parent_development_id": null,
+          "follow_up_reason": null
+        },
+        "routing_decision": "SUPPRESS_DUPLICATE",
+        "reason_code": "EXACT_EVENT_DUPLICATE",
+        "reason_text": "Same source has cosmetic prose changes only; long elapsed time does not renew unchanged claims.",
+        "draft_targets": [],
+        "main_draft_justification": null,
+        "reconciliation_required": false
+      }
+    }
+  ]
+}

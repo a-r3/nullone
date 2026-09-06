@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 COMMANDS = [
     [sys.executable, "tests/test_acceptance_contracts.py"],
+    [sys.executable, "tests/test_breaking_routing_contract.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
     [sys.executable, "tests/test_behavioral_regressions.py"],
     [sys.executable, "tests/test_morning_editorial.py"],
