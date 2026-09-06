@@ -21,6 +21,8 @@ private/
 workspace/social/ops/private/
 workspace/social/ops/manifests/
 workspace/social/ops/reliability-proof/
+workspace/social/ops/run-outcomes/
+workspace/social/ops/notifications/
 workspace/social/state/
 workspace/social/research/
 workspace/social/drafts/
