@@ -55,7 +55,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational issues #27, #28 and #29 are CLOSED; #30–#37 remain open
+- operational issues #27, #28, #29 and #30 are CLOSED; #31–#37 remain open
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -66,11 +66,15 @@ Relevant issues:
 - #5 offline behavioral regression tests — CLOSED; PR #39 squash-merged as `72e5c31e5bb3db922f30a2f8ea91c5b2d7ef8b41`
 - #27 explicit domain run outcomes/health — CLOSED; PR #40 squash-merged as `c70047a9e3123d19b46968715c3fc294a51d69d4`
 - #28 Morning Editorial network failure behavior — CLOSED; PR #42 squash-merged as `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`
-- #29 Daily Analytics Zernio access/runtime bootstrap — CLOSED; PR #44 squash-merged as `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; production NOT deployed; #30 is now the next main engineering issue
-- #30 Telegram failure alerts — OPEN; repo-level implementation exists on branch `feature/n30-telegram-failure-alerts` (not merged, no PR opened yet); see "Repo-level #30 implementation" below
-- #31–#33 cadence/Story
-- #34–#36 breaking
-- #37 controlled production activation/validation
+- #29 Daily Analytics Zernio access/runtime bootstrap — CLOSED; PR #44 squash-merged as `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; production NOT deployed
+- #30 Telegram failure alerts — CLOSED/COMPLETED; PR #47 squash-merged as `31ac4cca9e4255d5ba665ea42989ab9237eb05c2` (was `feature/n30-telegram-failure-alerts`); this is repo-level only — scheduler-native OpenClaw `failureAlert` is NOT activated in production, the domain notifier is NOT wired into any live scheduled job, and no real Telegram/live scheduled validation has occurred; see "Verified #30 completion" below
+- #31 cadence contract decision — OPEN; may proceed in parallel with #34
+- #32 cadence controller — OPEN; depends on #31
+- #33 Story draft pipeline — OPEN; depends on the cadence contract/controller (#31/#32)
+- #34 breaking policy decision — OPEN; may proceed in parallel with #31
+- #35 breaking identity/dedup — OPEN; depends on #34
+- #36 breaking draft routing — OPEN; depends on the required cadence/Story and breaking policy/dedup foundations (#31–#33, #34/#35)
+- #37 controlled production activation/validation — OPEN; remains the final controlled deployment/preflight/live-validation boundary under its existing, unchanged contract
 
 ### Verified #5 completion — 2026-09-05 18:32–18:34
 PR #39 `Add isolated behavioral regression tests to CI` was verified with local authenticated `gh` and, after the repository became public, independently visible through the GitHub connector.
@@ -194,14 +198,21 @@ Validation:
 - 15 Morning Editorial tests PASS (final count), alongside the existing run-outcome tests, behavioral regression tests, acceptance-contract validation, and all script self-tests
 - no network or subprocess calls occur in the new tests; the real provider invocation path is never exercised
 
-### Repo-level #30 implementation — 2026-09-06 (branch, not merged)
+### Verified #30 completion — 2026-09-06
 
 Issue #30 `Send concise Telegram alerts for meaningful workflow failures`
-has a repo-level implementation on branch
-`feature/n30-telegram-failure-alerts` (based cleanly on `main` at
-`875eeb7`, the #3 verdict-record merge). **Not merged. No PR opened.
-Issue #30 is not closed.** Do not upgrade this status until a PR
-actually merges.
+is complete in the development repository. PR #47 ("Add deduplicated
+workflow failure alerts (#30)") squash-merged to `main` as
+`31ac4cca9e4255d5ba665ea42989ab9237eb05c2` (was branch
+`feature/n30-telegram-failure-alerts`, based cleanly on `main` at
+`875eeb7`, the #3 verdict-record merge). Issue #30 auto-closed
+(CLOSED/COMPLETED) via the PR's `Closes #30` keyword. **This is
+repo-level only**: scheduler-native OpenClaw `failureAlert` is still NOT
+activated in production, the domain notifier is still NOT wired into any
+live scheduled job, and no real Telegram/live scheduled validation has
+occurred — #37 remains the controlled production deployment/preflight/
+live-validation boundary for all of that. Do not say production alerting
+is active.
 
 Architecture — two distinct failure surfaces, kept separate:
 - **Scheduler/execution failures** (e.g. the confirmed 2026-09-05
@@ -302,7 +313,7 @@ alert routing and state safety` follow-up commit):
   runtime modules were **not modified** by this change
 - production deployment: **NOT performed**
 - real Telegram send / live scheduled validation: **NOT performed**
-- issue #30: **NOT closed**; no PR opened
+- issue #30: **CLOSED/COMPLETED**; merged via PR #47 as `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`
 
 ## Reliability proof
 Baseline: 2026-09-04 03:47 Asia/Baku
@@ -321,9 +332,9 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 - Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
 - `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
 
-Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) are the **proof-derived blocking operational bundle** this verdict identified — #27/#28/#29 are merged in Git but not deployed, and #30 remains the next main engineering implementation item. This bundle is not the complete set of everything #37 requires; remaining required M0 engineering continues per the existing roadmap, including applicable #31–#36 Story/breaking work. #37 remains the final, explicit controlled production deployment/preflight/live-validation boundary once the required reviewed M0 changes (including this bundle) are ready; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. This bundle is not the complete set of everything #37 requires; remaining required M0 engineering continues per the existing roadmap, including the #31–#36 Story/breaking dependency chain below. #37 remains the final, explicit controlled production deployment/preflight/live-validation boundary once the required reviewed M0 changes (including this bundle) are ready; production deployment of the bundle occurs within #37 itself, not as a separate pre-#37 stage. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order: #30 is the next main engineering implementation item; #31/#34 decision work and later Story/breaking implementation may proceed in parallel per existing roadmap; #37 is the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27/#28/#29/#30 bundle and observes genuine scheduled behavior before controlled production activation is considered complete. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order: #31 (cadence contract decision) and #34 (breaking policy decision) are the next main engineering items and may proceed in parallel; #32 (cadence controller, depends on #31) and #35 (breaking identity/dedup, depends on #34) may then proceed in parallel after their respective decisions; #33 (Story draft pipeline) depends on the cadence contract/controller; #36 (breaking draft routing) depends on the required cadence/Story and breaking policy/dedup foundations; #37 remains the controlled production deployment/preflight/live-validation boundary that deploys the reviewed #27/#28/#29/#30 bundle (plus applicable #31–#36 work) and observes genuine scheduled behavior before controlled production activation is considered complete. #31–#36 are not optional under the current #37 contract, and #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -393,13 +404,13 @@ Direction:
 No retry has been performed. Do not auto-retry.
 
 ## Immediate engineering order
-#4, #5, #27, #28 and #29 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`). No production deployment has been performed for #27, #28, or #29.
+#4, #5, #27, #28, #29 and #30 are complete in Git and merged (#28 via PR #42, squash merge commit `dee4ce1b3fc2ee9285454ea71d23b5eb63a76728`; #29 via PR #44, squash merge commit `d5db8ff0b907c0ea43b58da27f08c2d47eb94151`; #30 via PR #47, squash merge commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`). No production deployment has been performed for #27, #28, #29, or #30.
 
 Current order:
 1. the #3 read-only reliability proof evaluation is complete at repo/report level with a final verdict of FAIL — see `docs/reliability/2026-09-proof-verdict.md`; #3 itself is now CLOSED/COMPLETED (PR #46 merged as `875eeb715cac3c933b29694fec3c07fba094a39e`) — this closure records the verdict, it does not itself authorize production deployment or #37
-2. #30 concise Telegram failure alerts consuming truthful domain health is the next main engineering implementation item — a repo-level implementation exists on branch `feature/n30-telegram-failure-alerts` (see "Repo-level #30 implementation" above) but is not merged and #30 is not closed
-3. #31/#34 decision work may proceed in parallel as planned, then relevant Story/breaking implementation
-4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete; #37 also performs the scheduler-native `failureAlert` activation recorded in `docs/deployment/37-preflight-notification-requirements.md`
+2. #30 concise Telegram failure alerts consuming truthful domain health is complete and merged (see "Verified #30 completion" above); production activation remains pending #37
+3. #31 (cadence contract decision) and #34 (breaking policy decision) are the next main engineering items and may proceed in parallel; #32 (depends on #31) and #35 (depends on #34) may then proceed in parallel after their respective decisions; #33 (Story draft pipeline) depends on the cadence contract/controller; #36 (breaking draft routing) depends on the required cadence/Story and breaking policy/dedup foundations
+4. once the reviewed prerequisite changes are ready, #37 performs the controlled production deployment/preflight/live-validation boundary — it deploys the exact reviewed SHAs/components required, including #27/#28/#29/#30 as applicable, and then observes genuine scheduled behavior before controlled production activation is considered complete; #37 also performs the scheduler-native `failureAlert` activation recorded in `docs/deployment/37-preflight-notification-requirements.md`; #37's acceptance criteria are unchanged
 
 The #3 evaluation is complete at report level and #3 is now closed (PR #46 merged); GitHub development continues per this order. No uncontrolled production changes should occur; production deployment happens only through the explicit #37 controlled-deployment/validation gate, except genuine emergency recovery of a concrete production failure under existing hotfix rules. No synthetic production cycles.
 
