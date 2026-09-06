@@ -1,0 +1,287 @@
+{
+  "schema": "nullone.cadence-contract-examples.v1",
+  "contract_version": "1.0.0",
+  "contract_doc": "docs/contracts/cadence-contract-v1.md",
+  "note": "Documentation fixtures for issue #31. These are hand-authored worked examples of the deterministic contract defined in the contract doc. They are not executed against a decision function in this repository -- implementing that function is issue #32. tests/test_cadence_contract_fixture.py validates shape/hygiene and the fixed downtime/no-quality regression expectation and audit context.",
+  "default_config": {
+    "main_target_min": 2,
+    "main_target_max_breaking": 3,
+    "story_target_min": 3,
+    "story_target_max_breaking": 6,
+    "main_min_spacing_minutes": 120,
+    "story_min_spacing_minutes": 45,
+    "quiet_hours_enabled": true,
+    "daypart_boundaries": {
+      "quiet_end": "07:00",
+      "morning_end": "13:00",
+      "afternoon_end": "19:00"
+    }
+  },
+  "cases": [
+    {
+      "name": "early_morning_nothing_published",
+      "description": "Early morning, nothing published yet today; quiet hours suppress candidate search even though both counters are at zero.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T03:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T20:10:00+04:00"},
+        "story_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T21:40:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "QUIET_HOURS",
+        "permitted_action": "NONE",
+        "daypart": "QUIET"
+      }
+    },
+    {
+      "name": "midday_silence_no_story_today",
+      "description": "Midday, main target already met, Story has not run yet today and a verified Story candidate is available.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T13:15:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 2, "pending": 0, "last_published_at": "2026-09-06T09:50:00+04:00"},
+        "story_load": {"published_today": 0, "pending": 0, "last_published_at": null},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "PREPARE_STORY",
+        "reason_code": "STORY_GAP",
+        "permitted_action": "CANDIDATE_SEARCH_AND_PREPARE",
+        "daypart": "AFTERNOON"
+      }
+    },
+    {
+      "name": "story_already_present_today",
+      "description": "Both main and Story counters already meet their guidance targets for today.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T16:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 2, "pending": 0, "last_published_at": "2026-09-06T15:50:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T13:40:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "TARGETS_MET",
+        "permitted_action": "NONE",
+        "daypart": "AFTERNOON"
+      }
+    },
+    {
+      "name": "two_main_posts_zero_story",
+      "description": "Two main pieces already published today does not satisfy the independent Story counter.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T19:30:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 2, "pending": 0, "last_published_at": "2026-09-06T15:50:00+04:00"},
+        "story_load": {"published_today": 0, "pending": 0, "last_published_at": null},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "PREPARE_STORY",
+        "reason_code": "STORY_GAP",
+        "permitted_action": "CANDIDATE_SEARCH_AND_PREPARE",
+        "daypart": "EVENING"
+      }
+    },
+    {
+      "name": "strong_news_day_healthy_load",
+      "description": "Breaking day with healthy main and Story load; both counters already meet the breaking-day guidance ceiling.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T20:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T19:00:00+04:00"},
+        "story_load": {"published_today": 5, "pending": 0, "last_published_at": "2026-09-06T18:35:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": true, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "TARGETS_MET",
+        "permitted_action": "NONE",
+        "daypart": "EVENING"
+      }
+    },
+    {
+      "name": "no_quality_candidate",
+      "description": "Main load has a genuine gap but no candidate currently passes quality/verification; Story target is already met so it cannot mask the main gap's reason.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T11:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T20:00:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T10:30:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": false, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "NO_QUALITY_CANDIDATE",
+        "permitted_action": "NONE",
+        "daypart": "MORNING"
+      }
+    },
+    {
+      "name": "pending_story_draft_exists",
+      "description": "A Story review draft is already pending human approval; do not recommend preparing another Story even though the numeric Story gap is not yet closed.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T14:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 2, "pending": 0, "last_published_at": "2026-09-06T09:50:00+04:00"},
+        "story_load": {"published_today": 0, "pending": 1, "last_published_at": null},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "PENDING_STORY_EXISTS",
+        "permitted_action": "NONE",
+        "daypart": "AFTERNOON"
+      }
+    },
+    {
+      "name": "pending_main_draft_exists",
+      "description": "A main-post review draft is already pending human approval; do not recommend preparing another main candidate.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T10:15:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 1, "last_published_at": "2026-09-05T20:00:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T09:00:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "PENDING_MAIN_EXISTS",
+        "permitted_action": "NONE",
+        "daypart": "MORNING"
+      }
+    },
+    {
+      "name": "publication_unknown_for_equivalent_main",
+      "description": "A main candidate's publication state is UNKNOWN after an ambiguous attempt; it counts as pending, not as an empty slot, so no equivalent candidate is manufactured.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T16:30:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 1, "last_published_at": "2026-09-05T20:00:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T13:35:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null},
+        "notes": "main_load.pending == 1 here represents a manifest with publication.state == UNKNOWN, per the format-accounting table."
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "PENDING_MAIN_EXISTS",
+        "permitted_action": "NONE",
+        "daypart": "AFTERNOON"
+      }
+    },
+    {
+      "name": "downtime_restart_targets_already_met",
+      "description": "Machine restarts after downtime; current state independently already meets both targets, so the reason surfaces the coalescing explicitly instead of a generic TARGETS_MET.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T12:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 2, "pending": 0, "last_published_at": "2026-09-06T09:50:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T10:35:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 14400}}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "COALESCED_AFTER_DOWNTIME",
+        "permitted_action": "NONE",
+        "daypart": "MORNING"
+      }
+    },
+    {
+      "name": "downtime_restart_real_gap_coalesced",
+      "description": "Multiple theoretical cadence opportunities were missed during downtime; restart evaluates current state once and finds a genuine open main gap -- one recommendation, not a replay of every missed slot.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T17:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T20:00:00+04:00"},
+        "story_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T21:30:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 28800}}
+      },
+      "expected_output": {
+        "recommendation": "PREPARE_MAIN_CANDIDATE",
+        "reason_code": "MAIN_GAP",
+        "permitted_action": "CANDIDATE_SEARCH_AND_PREPARE",
+        "daypart": "AFTERNOON"
+      }
+    },
+    {
+      "name": "asia_baku_midnight_day_boundary",
+      "description": "Just after the Asia/Baku calendar day boundary; a Story published minutes before midnight (previous local date) does not count toward today's counters.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-07T00:05:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-06T15:50:00+04:00"},
+        "story_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-06T23:50:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": true, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": null},
+        "notes": "story_load.last_published_at is 2026-09-06 (previous Baku calendar day); published_today correctly resets to 0 for 2026-09-07."
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "QUIET_HOURS",
+        "permitted_action": "NONE",
+        "daypart": "QUIET"
+      }
+    },
+    {
+      "name": "downtime_restart_gap_no_quality_candidate",
+      "description": "Restart after downtime with a real main gap and no quality candidate; preserve NO_QUALITY_CANDIDATE rather than masking it with COALESCED_AFTER_DOWNTIME. The downtime marker remains observable in context.",
+      "input": {
+        "schema": "nullone.cadence-contract.v1",
+        "now": "2026-09-06T11:00:00+04:00",
+        "timezone": "Asia/Baku",
+        "config": {},
+        "main_load": {"published_today": 0, "pending": 0, "last_published_at": "2026-09-05T20:00:00+04:00"},
+        "story_load": {"published_today": 3, "pending": 0, "last_published_at": "2026-09-06T10:30:00+04:00"},
+        "candidate_availability": {"main_quality_candidate_available": false, "story_quality_candidate_available": true},
+        "signal": {"breaking_day": false, "downtime_marker": {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 14400}}
+      },
+      "expected_output": {
+        "recommendation": "NO_ACTION",
+        "reason_code": "NO_QUALITY_CANDIDATE",
+        "permitted_action": "NONE",
+        "daypart": "MORNING",
+        "context": {
+          "downtime_marker": {"restart_after_downtime": true, "time_since_last_evaluation_seconds": 14400}
+        }
+      }
+    }
+  ]
+}
