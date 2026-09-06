@@ -548,5 +548,148 @@ class MainFormatReasonDurabilityTests(unittest.TestCase):
         self.assertNotIn("main_format_reason", result.to_dict())
 
 
+class StrictArtifactValidationTests(unittest.TestCase):
+    """#36 Blocker B: `validate_routing_result_dict` must independently
+    re-validate a plain dict artifact -- never trust a caller merely
+    because it claims the dict came from `evaluate_routing()`.
+    """
+
+    def _normal(self):
+        return router.evaluate_routing(make_input(severity="NORMAL")).to_dict()
+
+    def _material(self):
+        return router.evaluate_routing(
+            make_input(severity="MATERIAL_BREAKING", severity_reason_text="time value")
+        ).to_dict()
+
+    def _exceptional_story_only(self):
+        return router.evaluate_routing(
+            make_input(severity="EXCEPTIONAL_BREAKING", severity_reason_text="exceptional value")
+        ).to_dict()
+
+    def _exceptional_story_and_main(self):
+        return router.evaluate_routing(
+            make_input(
+                severity="EXCEPTIONAL_BREAKING",
+                severity_reason_text="exceptional value",
+                main_justification="standalone value",
+                main_format=main_findings(
+                    carousel_score=45, meaningful_multi_slide_value=True, comparison_value=True,
+                ),
+            )
+        ).to_dict()
+
+    def test_valid_artifacts_round_trip_for_every_decision_shape(self):
+        for build in (
+            self._normal,
+            self._material,
+            self._exceptional_story_only,
+            self._exceptional_story_and_main,
+        ):
+            with self.subTest(build=build.__name__):
+                out = build()
+                validated = router.validate_routing_result_dict(out)
+                self.assertEqual(validated, out)
+                self.assertIsNot(validated, out)
+
+    def test_rejects_non_mapping_input(self):
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(["not", "a", "dict"])
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict("also not a dict")
+
+    def test_rejects_missing_field(self):
+        out = self._material()
+        del out["reason_text"]
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_unknown_field(self):
+        out = self._exceptional_story_and_main()
+        out["main_format_reason"] = "leaked outside the strict schema"
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_main_only_target(self):
+        out = self._exceptional_story_and_main()
+        out["draft_targets"] = ["CAROUSEL"]
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_reordered_targets(self):
+        out = self._exceptional_story_and_main()
+        out["draft_targets"] = ["CAROUSEL", "STORY"]
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_duplicate_targets(self):
+        out = self._material()
+        out["draft_targets"] = ["STORY", "STORY"]
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_incompatible_reason_code(self):
+        out = self._material()
+        out["reason_code"] = "EXCEPTIONAL_MAIN_VALUE"
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_severity_reason_code_mismatch(self):
+        out = self._material()
+        # MATERIAL_BREAKING must pair with MATERIAL_TIME_VALUE, never with
+        # the EXCEPTIONAL_STORY_ONLY reason from a different severity.
+        out["reason_code"] = "EXCEPTIONAL_STORY_ONLY"
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_accelerated_with_reconciliation_required(self):
+        out = self._material()
+        out["reconciliation_required"] = True
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_accelerated_with_ineligible_dedup(self):
+        out = self._material()
+        out["dedup"] = dict(out["dedup"], decision="EXACT_DUPLICATE", matched_refs=["m:1"])
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_story_and_main_with_empty_justification(self):
+        out = self._exceptional_story_and_main()
+        out["main_draft_justification"] = ""
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_main_target_with_material_severity(self):
+        # A main target is only ever accepted when severity is
+        # EXCEPTIONAL_BREAKING -- MATERIAL_BREAKING can never carry one,
+        # including via a directly-mutated artifact that never went
+        # through evaluate_routing() at all.
+        out = self._exceptional_story_and_main()
+        out["severity"] = "MATERIAL_BREAKING"
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_normal_queue_with_non_normal_severity(self):
+        out = self._normal()
+        out["severity"] = "MATERIAL_BREAKING"
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_blocked_unverified_with_pass_verification(self):
+        out = self._normal()
+        out["routing_decision"] = "BLOCKED_UNVERIFIED"
+        out["reason_code"] = "EVIDENCE_INSUFFICIENT"
+        out["severity"] = None
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+    def test_rejects_unaccepted_target_combination_for_normal_queue(self):
+        out = self._normal()
+        out["draft_targets"] = ["STORY"]
+        with self.assertRaises(router.PolicyInputError):
+            router.validate_routing_result_dict(out)
+
+
 if __name__ == "__main__":
     unittest.main()

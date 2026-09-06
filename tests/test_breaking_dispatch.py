@@ -25,12 +25,30 @@ import nullone_breaking_dispatch as dispatch  # noqa: E402
 import nullone_breaking_identity as identity  # noqa: E402
 
 
+_UNSET = object()
+
+
 class FakeResult:
-    def __init__(self, outcome, manifest_id=None, review_post_id=None, reason_code=None):
+    """Fake #33/#36 pipeline result.
+
+    `preview_delivery` defaults to proven Telegram SENT for a DRAFT_CREATED
+    outcome (matching what a real `telegram_sender` produces on success) so
+    the large majority of tests here -- which focus on draft-set identity,
+    Story-first ordering and target-progress bookkeeping, not on preview
+    delivery itself -- keep exercising DRAFT_CREATED -> SUCCEEDED without
+    having to plumb a delivery record through every call site. Tests that
+    specifically exercise Blocker A (missing/malformed delivery proof) pass
+    `preview_delivery=` explicitly to override this default.
+    """
+
+    def __init__(self, outcome, manifest_id=None, review_post_id=None, reason_code=None, preview_delivery=_UNSET):
         self.outcome = outcome
         self.manifest_id = manifest_id
         self.review_post_id = review_post_id
         self.reason_code = reason_code
+        if preview_delivery is _UNSET:
+            preview_delivery = {"status": "SENT"} if outcome == "DRAFT_CREATED" else None
+        self.preview_delivery = preview_delivery
 
 
 def always_permit(*, stage, record):
@@ -58,13 +76,24 @@ def routing_result(
     event_id="event-1",
     development_id="dev-1",
     candidate_id="cand-1",
-    reason_code="MATERIAL_TIME_VALUE",
+    reason_code=None,
     main_justification=None,
+    assessment_ref="assess-1",
 ):
+    # Strict-schema-compliant defaults (Blocker B): reason_code must be
+    # compatible with routing_decision, and a two-target set requires a
+    # non-empty main_draft_justification -- callers that only care about
+    # dispatch/draft-set bookkeeping (the overwhelming majority of tests in
+    # this file) get a valid artifact "for free"; callers testing schema
+    # validity itself override these explicitly.
+    if reason_code is None:
+        reason_code = "EXCEPTIONAL_MAIN_VALUE" if decision == "IMMEDIATE_STORY_AND_MAIN_DRAFT" else "MATERIAL_TIME_VALUE"
+    if main_justification is None and decision == "IMMEDIATE_STORY_AND_MAIN_DRAFT":
+        main_justification = "Distinct standalone audience value."
     return {
         "schema": "nullone.breaking-routing.v1",
         "candidate_id": candidate_id,
-        "assessment_ref": "assess-1",
+        "assessment_ref": assessment_ref,
         "state_snapshot_ref": "state-1",
         "severity": "MATERIAL_BREAKING" if len(targets) == 1 else "EXCEPTIONAL_BREAKING",
         "event": {
@@ -531,6 +560,263 @@ class DomainOutcomeMappingTests(DispatchTestCase):
         self.assertEqual(code, "PREVIEW_DELIVERY_FAILED")
 
 
+class PreviewDeliveryProofTests(DispatchTestCase):
+    """#36 Blocker A: DRAFT_CREATED must not imply Telegram delivery.
+
+    Target SUCCEEDED requires BOTH pipeline outcome == DRAFT_CREATED AND
+    independent proof (`preview_delivery.status == "SENT"`), for both
+    Story and main. Missing/malformed proof is a definite
+    PREVIEW_DELIVERY_FAILED, never UNKNOWN and never SUCCEEDED.
+    """
+
+    def test_story_draft_created_with_sent_proof_succeeds(self):
+        rr = routing_result(targets=("STORY",))
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery={"status": "SENT"},
+            )
+
+        dr = dispatch.dispatch_draft_set(rr, story_runner=story_runner, authoritative_recheck=always_permit)
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "SUCCEEDED")
+
+    def test_story_draft_created_with_no_sender_never_succeeds_and_blocks_main(self):
+        # telegram_sender was never supplied to the Story core -- the
+        # pipeline outcome is still DRAFT_CREATED, but preview_delivery is
+        # None. This is a definite review-delivery failure, not UNKNOWN,
+        # and main must never be attempted.
+        rr = routing_result(decision="IMMEDIATE_STORY_AND_MAIN_DRAFT", targets=("STORY", "FEED"))
+        main_calls = []
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery=None,
+            )
+
+        def main_runner(fmt):  # pragma: no cover - must never run
+            main_calls.append(fmt)
+            return FakeResult("DRAFT_CREATED")
+
+        dr = dispatch.dispatch_draft_set(
+            rr,
+            story_runner=story_runner,
+            main_runner=main_runner,
+            authoritative_recheck=always_permit,
+            main_capacity_recheck=always_capacity_ok,
+        )
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "PREVIEW_DELIVERY_FAILED")
+        self.assertEqual(dr.record["targets"]["STORY"]["reason_code"], "PREVIEW_DELIVERY_UNPROVEN")
+        self.assertEqual(dr.record["targets"]["FEED"]["status"], "PENDING")
+        self.assertEqual(main_calls, [])
+        outcome, code, text = dispatch.dispatch_domain_outcome(rr, dr)
+        self.assertEqual(outcome, "FAILED")
+
+    def test_story_draft_created_with_malformed_preview_delivery_fails(self):
+        rr = routing_result(targets=("STORY",))
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery="not-a-mapping",
+            )
+
+        dr = dispatch.dispatch_draft_set(rr, story_runner=story_runner, authoritative_recheck=always_permit)
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "PREVIEW_DELIVERY_FAILED")
+        self.assertEqual(dr.record["targets"]["STORY"]["reason_code"], "PREVIEW_DELIVERY_UNPROVEN")
+
+    def test_story_draft_created_with_explicit_non_sent_status_fails(self):
+        rr = routing_result(targets=("STORY",))
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery={"status": "FAILED", "error": "boom"},
+            )
+
+        dr = dispatch.dispatch_draft_set(rr, story_runner=story_runner, authoritative_recheck=always_permit)
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "PREVIEW_DELIVERY_FAILED")
+        self.assertEqual(dr.record["targets"]["STORY"]["reason_code"], "PREVIEW_NOT_SENT")
+
+    def test_main_draft_created_with_sent_proof_succeeds(self):
+        rr = routing_result(decision="IMMEDIATE_STORY_AND_MAIN_DRAFT", targets=("STORY", "FEED"))
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery={"status": "SENT"},
+            )
+
+        def main_runner(fmt):
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-main", review_post_id="r-main",
+                preview_delivery={"status": "SENT"},
+            )
+
+        dr = dispatch.dispatch_draft_set(
+            rr,
+            story_runner=story_runner,
+            main_runner=main_runner,
+            authoritative_recheck=always_permit,
+            main_capacity_recheck=always_capacity_ok,
+        )
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(dr.record["targets"]["FEED"]["status"], "SUCCEEDED")
+        outcome, code, text = dispatch.dispatch_domain_outcome(rr, dr)
+        self.assertEqual(outcome, "SUCCEEDED")
+
+    def test_main_draft_created_without_sent_proof_never_succeeds(self):
+        rr = routing_result(decision="IMMEDIATE_STORY_AND_MAIN_DRAFT", targets=("STORY", "FEED"))
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery={"status": "SENT"},
+            )
+
+        def main_runner(fmt):
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-main", review_post_id="r-main",
+                preview_delivery=None,
+            )
+
+        dr = dispatch.dispatch_draft_set(
+            rr,
+            story_runner=story_runner,
+            main_runner=main_runner,
+            authoritative_recheck=always_permit,
+            main_capacity_recheck=always_capacity_ok,
+        )
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(dr.record["targets"]["FEED"]["status"], "PREVIEW_DELIVERY_FAILED")
+        outcome, code, text = dispatch.dispatch_domain_outcome(rr, dr)
+        self.assertEqual(outcome, "FAILED")
+
+    def test_27_never_succeeded_without_sent_proof_for_every_target(self):
+        # Story proven SENT, main only DRAFT_CREATED without proof -- the
+        # #27 domain outcome for the whole set must never be SUCCEEDED
+        # unless EVERY requested target proved delivery.
+        rr = routing_result(decision="IMMEDIATE_STORY_AND_MAIN_DRAFT", targets=("STORY", "CAROUSEL"))
+
+        def story_runner():
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-story", review_post_id="r-story",
+                preview_delivery={"status": "SENT"},
+            )
+
+        def main_runner(fmt):
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="m-main", review_post_id="r-main",
+                preview_delivery={"status": "FAILED"},
+            )
+
+        dr = dispatch.dispatch_draft_set(
+            rr,
+            story_runner=story_runner,
+            main_runner=main_runner,
+            authoritative_recheck=always_permit,
+            main_capacity_recheck=always_capacity_ok,
+        )
+        outcome, code, text = dispatch.dispatch_domain_outcome(rr, dr)
+        self.assertNotEqual(outcome, "SUCCEEDED")
+        self.assertEqual(outcome, "FAILED")
+
+
+class RoutingArtifactValidationTests(DispatchTestCase):
+    """#36 Blocker B: `dispatch_draft_set`/`reserve_draft_set`/
+    `continue_unattempted_target` strictly validate the incoming routing
+    artifact -- before touching any durable state -- rather than trusting
+    a caller merely because it claims the dict came from
+    `evaluate_routing()`.
+    """
+
+    def test_dispatch_rejects_unknown_field_no_side_effects(self):
+        rr = routing_result(targets=("STORY",))
+        rr["main_format_reason"] = "not part of the strict schema"
+        set_id = dispatch.compute_draft_set_id("event-1", "dev-1")
+
+        with self.assertRaises(dispatch.DispatchRejected):
+            dispatch.dispatch_draft_set(
+                rr,
+                story_runner=lambda: (_ for _ in ()).throw(AssertionError("must not run")),
+                authoritative_recheck=always_permit,
+            )
+        self.assertIsNone(dispatch.load_draft_set(set_id))
+
+    def test_dispatch_rejects_missing_field_no_side_effects(self):
+        rr = routing_result(targets=("STORY",))
+        del rr["reason_text"]
+        set_id = dispatch.compute_draft_set_id("event-1", "dev-1")
+
+        with self.assertRaises(dispatch.DispatchRejected):
+            dispatch.dispatch_draft_set(
+                rr,
+                story_runner=lambda: (_ for _ in ()).throw(AssertionError("must not run")),
+                authoritative_recheck=always_permit,
+            )
+        self.assertIsNone(dispatch.load_draft_set(set_id))
+
+    def test_dispatch_rejects_main_only_target_combination(self):
+        rr = routing_result(decision="IMMEDIATE_STORY_AND_MAIN_DRAFT", targets=("STORY", "FEED"))
+        rr["draft_targets"] = ["FEED"]
+
+        with self.assertRaises(dispatch.DispatchRejected):
+            dispatch.dispatch_draft_set(
+                rr,
+                story_runner=lambda: (_ for _ in ()).throw(AssertionError("must not run")),
+                authoritative_recheck=always_permit,
+            )
+
+    def test_reserve_draft_set_rejects_malformed_artifact_directly(self):
+        rr = routing_result(targets=("STORY",))
+        rr["draft_targets"] = ["STORY", "STORY"]
+        set_id = dispatch.compute_draft_set_id("event-1", "dev-1")
+
+        with self.assertRaises(dispatch.DispatchRejected):
+            with dispatch.draft_set_lock(set_id):
+                dispatch.reserve_draft_set(rr)
+        self.assertIsNone(dispatch.load_draft_set(set_id))
+
+    def test_continue_unattempted_target_rejects_malformed_artifact(self):
+        rr = routing_result(targets=("STORY",))
+        dispatch.dispatch_draft_set(
+            rr,
+            story_runner=lambda: FakeResult("CANDIDATE_NOT_ELIGIBLE", reason_code="CANDIDATE_NOT_ELIGIBLE"),
+            authoritative_recheck=always_permit,
+        )
+        malformed = dict(rr)
+        malformed["reason_code"] = "NOT_A_REAL_REASON"
+
+        with self.assertRaises(dispatch.DispatchRejected):
+            dispatch.continue_unattempted_target(
+                malformed,
+                "STORY",
+                story_runner=lambda: FakeResult("DRAFT_CREATED"),
+                authoritative_recheck=always_permit,
+            )
+
+    def test_reload_fails_closed_on_hash_consistent_but_semantically_invalid_decision(self):
+        # A stored decision that is hash-consistent with its own persisted
+        # decision_hash, but is no longer a valid nullone.breaking-routing
+        # .v1 artifact (tampered/inconsistent), must still fail closed on
+        # reload -- the hash check alone is not sufficient.
+        rr = routing_result(targets=("STORY",))
+        set_id = dispatch.compute_draft_set_id("event-1", "dev-1")
+        with dispatch.draft_set_lock(set_id):
+            record, created = dispatch.reserve_draft_set(rr)
+        self.assertTrue(created)
+
+        tampered_decision = dict(record["routing_decision_object"])
+        tampered_decision["draft_targets"] = ["FEED"]  # main-only: invalid
+        record["routing_decision_object"] = tampered_decision
+        record["decision_hash"] = dispatch._decision_hash(tampered_decision)
+        dispatch._write_draft_set(record)
+
+        with self.assertRaises(dispatch.DraftSetError):
+            dispatch.load_draft_set(set_id)
+
+
 class InFlightCrashReplayTests(DispatchTestCase):
     def test_in_flight_written_before_runner_invoked(self):
         rr = routing_result(targets=("STORY",))
@@ -631,6 +917,65 @@ class InFlightCrashReplayTests(DispatchTestCase):
         self.assertEqual(result.record["targets"]["STORY"]["status"], "DISPATCH_IN_FLIGHT")
 
 
+def init_empty_state(tmp_path):
+    (tmp_path / "social" / "ops" / "manifests").mkdir(parents=True, exist_ok=True)
+    state_dir = tmp_path / "social" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "publish-ledger.jsonl").touch()
+    (state_dir / "topic-ledger.jsonl").touch()
+    (state_dir / "candidate-queue.md").touch()
+
+
+def write_state_manifest(tmp_path, candidate_id, *, suffix=None, **review_overrides):
+    """Write one manifest for `candidate_id` under `tmp_path`.
+
+    `suffix` writes a SIBLING manifest (distinct manifest_id/filename)
+    rather than overwriting the default one -- used by
+    `EndToEndExceptionalStateTests` to put a real Story manifest and a
+    real main manifest under the same candidate_id (Blocker C).
+    """
+    manifest_dir = tmp_path / "social" / "ops" / "manifests"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    review = {
+        "create_attempts": 0,
+        "state": "NOT_CREATED",
+        "zernio_draft_id": None,
+        "created_at": None,
+    }
+    review.update(review_overrides)
+    manifest_id = f"manifest-{candidate_id}" if suffix is None else f"manifest-{candidate_id}-{suffix}"
+    manifest = {
+        "schema": "nullone.production.v1",
+        "manifest_id": manifest_id,
+        "candidate_id": candidate_id,
+        "review": review,
+        "publication": {"attempts": 0, "state": "NOT_REQUESTED"},
+        "approval": {"first_stage": False},
+    }
+    filename = f"{manifest_id}.json"
+    (manifest_dir / filename).write_text(
+        __import__("json").dumps(manifest), encoding="utf-8"
+    )
+    return manifest
+
+
+def make_recheck_candidate_input(candidate_id="cand-1"):
+    return identity.CandidateInput(
+        candidate_id=candidate_id,
+        assessment_ref=f"assess:{candidate_id}",
+        state_snapshot_ref=f"state:{candidate_id}",
+        topic_cluster="topic-cluster-1",
+        evidence=(
+            identity.EvidenceItem(
+                ref="e1",
+                supported_claim="claim",
+                product="widget",
+                version="1.0",
+            ),
+        ),
+    )
+
+
 class FreshStateAuthoritativeRecheckTests(DispatchTestCase):
     """#36 hardening section 9: reuses #35 (`nullone_breaking_identity`)
     verbatim via `make_state_authoritative_recheck` -- never forks its
@@ -638,51 +983,13 @@ class FreshStateAuthoritativeRecheckTests(DispatchTestCase):
     """
 
     def _init_empty_state(self):
-        (self.tmp_path / "social" / "ops" / "manifests").mkdir(parents=True, exist_ok=True)
-        state_dir = self.tmp_path / "social" / "state"
-        state_dir.mkdir(parents=True, exist_ok=True)
-        (state_dir / "publish-ledger.jsonl").touch()
-        (state_dir / "topic-ledger.jsonl").touch()
-        (state_dir / "candidate-queue.md").touch()
+        init_empty_state(self.tmp_path)
 
-    def _write_manifest(self, candidate_id, **review_overrides):
-        manifest_dir = self.tmp_path / "social" / "ops" / "manifests"
-        manifest_dir.mkdir(parents=True, exist_ok=True)
-        review = {
-            "create_attempts": 0,
-            "state": "NOT_CREATED",
-            "zernio_draft_id": None,
-            "created_at": None,
-        }
-        review.update(review_overrides)
-        manifest = {
-            "schema": "nullone.production.v1",
-            "manifest_id": f"manifest-{candidate_id}",
-            "candidate_id": candidate_id,
-            "review": review,
-            "publication": {"attempts": 0, "state": "NOT_REQUESTED"},
-            "approval": {"first_stage": False},
-        }
-        (manifest_dir / f"manifest-{candidate_id}.json").write_text(
-            __import__("json").dumps(manifest), encoding="utf-8"
-        )
-        return manifest
+    def _write_manifest(self, candidate_id, *, suffix=None, **review_overrides):
+        return write_state_manifest(self.tmp_path, candidate_id, suffix=suffix, **review_overrides)
 
     def _candidate_input(self, candidate_id="cand-1"):
-        return identity.CandidateInput(
-            candidate_id=candidate_id,
-            assessment_ref=f"assess:{candidate_id}",
-            state_snapshot_ref=f"state:{candidate_id}",
-            topic_cluster="topic-cluster-1",
-            evidence=(
-                identity.EvidenceItem(
-                    ref="e1",
-                    supported_claim="claim",
-                    product="widget",
-                    version="1.0",
-                ),
-            ),
-        )
+        return make_recheck_candidate_input(candidate_id)
 
     def test_external_draft_appears_after_routing_blocks_story(self):
         self._init_empty_state()
@@ -773,6 +1080,114 @@ class FreshStateAuthoritativeRecheckTests(DispatchTestCase):
         self.assertTrue(dr.reconciliation_required)
 
 
+class EndToEndExceptionalStateTests(DispatchTestCase):
+    """#36 end-to-end offline regression (task section 10): an exceptional
+    candidate routed to [STORY, CAROUSEL] or [STORY, FEED], both targets
+    reaching SUCCEEDED with real Telegram SENT proof (Blocker A) and real
+    manifest files for BOTH targets (mirroring what the real #33/#36
+    pipelines persist), a fresh #35 reload that stays PRESENT_WITH_DATA
+    -- never MALFORMED -- with both manifests present (Blocker C), and a
+    dispatcher replay that creates neither target again. No external
+    calls anywhere: only fakes for Story/main runners; the real #35
+    `make_state_authoritative_recheck`/`load_repository_state`/`evaluate`
+    are exercised for real.
+    """
+
+    def _run_two_target_set(self, main_format):
+        init_empty_state(self.tmp_path)
+        candidate_input = make_recheck_candidate_input("cand-1")
+        recheck = dispatch.make_state_authoritative_recheck(candidate_input, self.tmp_path)
+
+        rr = routing_result(
+            decision="IMMEDIATE_STORY_AND_MAIN_DRAFT", candidate_id="cand-1", targets=("STORY", main_format),
+        )
+
+        def story_runner():
+            # Mirrors the real Story pipeline's own side effect: an
+            # immutable manifest persisted under this candidate_id.
+            write_state_manifest(
+                self.tmp_path, "cand-1", suffix="story",
+                create_attempts=1, state="DRAFT_CREATED", zernio_draft_id="story-draft-1",
+            )
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id="manifest-cand-1-story", review_post_id="story-draft-1",
+                preview_delivery={"status": "SENT"},
+            )
+
+        def main_runner(fmt):
+            # Mirrors the real main (#36) pipeline's own side effect: a
+            # SECOND, distinct manifest under the SAME candidate_id.
+            write_state_manifest(
+                self.tmp_path, "cand-1", suffix=fmt.lower(),
+                create_attempts=1, state="DRAFT_CREATED", zernio_draft_id="main-draft-1",
+            )
+            return FakeResult(
+                "DRAFT_CREATED", manifest_id=f"manifest-cand-1-{fmt.lower()}", review_post_id="main-draft-1",
+                preview_delivery={"status": "SENT"},
+            )
+
+        dr = dispatch.dispatch_draft_set(
+            rr,
+            story_runner=story_runner,
+            main_runner=main_runner,
+            authoritative_recheck=recheck,
+            main_capacity_recheck=always_capacity_ok,
+        )
+        return rr, dr, candidate_input, recheck
+
+    def _assert_two_target_set_succeeds_and_state_stays_readable(self, main_format):
+        rr, dr, candidate_input, recheck = self._run_two_target_set(main_format)
+
+        # 1-6: both targets reach SUCCEEDED with real SENT proof; the
+        # authoritative recheck permitted main because it recognized this
+        # set's own just-created Story manifest as the expected sibling.
+        self.assertEqual(dr.record["targets"]["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(dr.record["targets"][main_format]["status"], "SUCCEEDED")
+        outcome, code, text = dispatch.dispatch_domain_outcome(rr, dr)
+        self.assertEqual(outcome, "SUCCEEDED")
+
+        # 7-9: a fresh #35 reload sees BOTH manifests and stays readable.
+        state = identity.load_repository_state(self.tmp_path)
+        self.assertEqual(state.manifests_status, identity.STATE_PRESENT_WITH_DATA)
+        self.assertNotEqual(state.manifests_status, identity.STATE_MALFORMED)
+        self.assertEqual(len(state.manifests_by_candidate_id["cand-1"]), 2)
+
+        # 10: reevaluating the same development suppresses it as already
+        # covered/reserved, never MALFORMED/ambiguous merely because two
+        # manifests exist.
+        fresh = identity.evaluate(candidate_input, state)
+        self.assertEqual(fresh.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertFalse(fresh.reconciliation_required)
+
+        # 11: dispatcher replay creates neither target again.
+        replay_calls = []
+
+        def must_not_run_story():  # pragma: no cover - must never run
+            replay_calls.append("STORY")
+            return FakeResult("DRAFT_CREATED")
+
+        def must_not_run_main(fmt):  # pragma: no cover - must never run
+            replay_calls.append(fmt)
+            return FakeResult("DRAFT_CREATED")
+
+        replay = dispatch.dispatch_draft_set(
+            rr,
+            story_runner=must_not_run_story,
+            main_runner=must_not_run_main,
+            authoritative_recheck=recheck,
+            main_capacity_recheck=always_capacity_ok,
+        )
+        self.assertEqual(replay_calls, [])
+        self.assertEqual(replay.record["targets"]["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(replay.record["targets"][main_format]["status"], "SUCCEEDED")
+
+    def test_exceptional_story_and_carousel_end_to_end(self):
+        self._assert_two_target_set_succeeds_and_state_stays_readable("CAROUSEL")
+
+    def test_exceptional_story_and_feed_end_to_end(self):
+        self._assert_two_target_set_succeeds_and_state_stays_readable("FEED")
+
+
 class ExplicitContinuationTests(DispatchTestCase):
     def test_story_blocked_before_attempt_can_be_explicitly_continued(self):
         rr = routing_result(targets=("STORY",))
@@ -859,7 +1274,7 @@ class ExplicitContinuationTests(DispatchTestCase):
             story_runner=lambda: FakeResult("CANDIDATE_NOT_ELIGIBLE", reason_code="CANDIDATE_NOT_ELIGIBLE"),
             authoritative_recheck=always_permit,
         )
-        conflicting = routing_result(targets=("STORY",), reason_code="DIFFERENT_REASON")
+        conflicting = routing_result(targets=("STORY",), assessment_ref="assess-2")
         with self.assertRaises(dispatch.DraftSetConflict):
             dispatch.continue_unattempted_target(
                 conflicting,

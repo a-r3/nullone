@@ -39,7 +39,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 import nullone_breaking_identity as identity
 import nullone_breaking_router as router
@@ -146,6 +146,27 @@ def draft_set_lock(draft_set_id: str):
 # ---------------------------------------------------------------------------
 
 
+def _validate_routing_artifact(routing_result: Any) -> dict[str, Any]:
+    """Strictly validate an incoming routing artifact before any side effect.
+
+    #36 hardening (Blocker B): a caller merely claiming a dict came from
+    `nullone_breaking_router.evaluate_routing()` is never trusted on its
+    own -- `dispatch_draft_set`, `reserve_draft_set` and
+    `continue_unattempted_target` all call this first, before computing or
+    reserving any durable target state, writing a draft-set sidecar,
+    invoking any recheck, or invoking a Story/main runner. Malformed input
+    is rejected as `DispatchRejected`, never silently accepted or
+    partially trusted.
+    """
+
+    try:
+        return router.validate_routing_result_dict(routing_result)
+    except router.PolicyInputError as e:
+        raise DispatchRejected(
+            f"routing_result failed strict {router.SCHEMA} validation: {e}"
+        ) from e
+
+
 def _decision_hash(routing_result: dict[str, Any]) -> str:
     canonical = json.dumps(routing_result, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -174,6 +195,19 @@ def load_draft_set(draft_set_id: str) -> dict[str, Any] | None:
         raise DraftSetError(
             f"Draft set record's persisted routing decision does not match its own hash: {path}"
         )
+    # #36 hardening (Blocker B): a routing artifact from earlier is not
+    # permanent authorization, and a hash-consistent record is not
+    # necessarily a semantically valid one -- re-run the strict
+    # nullone.breaking-routing.v1 validator on every reload so a
+    # tampered/inconsistent stored decision still fails closed even though
+    # it matches its own persisted hash.
+    try:
+        router.validate_routing_result_dict(stored_decision)
+    except router.PolicyInputError as e:
+        raise DraftSetError(
+            f"Draft set record's persisted routing decision failed strict "
+            f"{router.SCHEMA} validation despite matching its own hash: {path}"
+        ) from e
     return record
 
 
@@ -207,6 +241,8 @@ def reserve_draft_set(
     request can never hijack an unfinished set; a truly distinct
     development requires a new development_id from #35.
     """
+
+    routing_result = _validate_routing_artifact(routing_result)
 
     if routing_result.get("routing_decision") not in ACCELERATED_DECISIONS:
         raise DispatchRejected(
@@ -437,6 +473,28 @@ class DispatchResult:
         return bool(self.record.get("reconciliation_required"))
 
 
+def _preview_delivery_failure_reason(preview_delivery: Any) -> str | None:
+    """Return None if `preview_delivery` proves Telegram SENT; otherwise a
+    specific review-delivery failure reason code.
+
+    #36 hardening (Blocker A): a review draft/manifest existing is never
+    proof that the required human-review Telegram preview was delivered.
+    Missing delivery proof is never classified as UNKNOWN -- when a sender
+    was never supplied (or its result cannot be validated), the workflow
+    has definitively not proven delivery, which is exactly as much a
+    review-delivery failure as an explicit non-SENT status.
+    """
+
+    if not isinstance(preview_delivery, Mapping):
+        return "PREVIEW_DELIVERY_UNPROVEN"
+    status = preview_delivery.get("status")
+    if status == "SENT":
+        return None
+    if isinstance(status, str) and status:
+        return "PREVIEW_NOT_SENT"
+    return "PREVIEW_DELIVERY_UNPROVEN"
+
+
 def _classify_pipeline_outcome(
     record: dict[str, Any],
     target: str,
@@ -444,9 +502,16 @@ def _classify_pipeline_outcome(
 ) -> dict[str, Any]:
     """Apply one #33/#36 pipeline result to `target`'s durable status.
 
-    DRAFT_CREATED -> SUCCEEDED (full human-review boundary reached).
-    PREVIEW_DELIVERY_FAILED -> its own terminal status: the review
-    draft/manifest definitely exists (never recreated), but the required
+    DRAFT_CREATED -> SUCCEEDED only with independent proof of Telegram
+    delivery (`preview_delivery.status == "SENT"`); a DRAFT_CREATED result
+    with `preview_delivery` missing, malformed, or reporting anything
+    other than SENT is a definite review-delivery failure (Blocker A) --
+    the review draft/manifest exists and is never recreated, no automatic
+    Telegram resend is attempted, and this is classified as
+    PREVIEW_DELIVERY_FAILED, never SUCCEEDED and never UNKNOWN.
+    PREVIEW_DELIVERY_FAILED (the pipeline's own native outcome, e.g. an
+    explicit sender failure) -> its own terminal status for the same
+    reason: the review draft/manifest definitely exists, but the required
     human-review Telegram preview was not delivered, so it is never
     SUCCEEDED. A recognized ambiguous pipeline outcome -> AMBIGUOUS
     (reconciliation required, never auto-retried). Anything else
@@ -461,16 +526,26 @@ def _classify_pipeline_outcome(
     manifest_id = getattr(result, "manifest_id", None)
     review_post_id = getattr(result, "review_post_id", None)
     reason_code = getattr(result, "reason_code", None)
+    preview_delivery = getattr(result, "preview_delivery", None)
 
     if outcome == _DRAFT_CREATED_OUTCOME:
+        delivery_failure_reason = _preview_delivery_failure_reason(preview_delivery)
+        if delivery_failure_reason is None:
+            return _update_target(
+                record, target, status="SUCCEEDED",
+                manifest_id=manifest_id, review_post_id=review_post_id, outcome=outcome,
+            )
         return _update_target(
-            record, target, status="SUCCEEDED",
-            manifest_id=manifest_id, review_post_id=review_post_id, outcome=outcome,
+            record, target, status="PREVIEW_DELIVERY_FAILED",
+            manifest_id=manifest_id, review_post_id=review_post_id,
+            outcome=outcome, reason_code=delivery_failure_reason,
         )
     if outcome == _PREVIEW_DELIVERY_FAILED_OUTCOME:
         return _update_target(
             record, target, status="PREVIEW_DELIVERY_FAILED",
-            manifest_id=manifest_id, review_post_id=review_post_id, outcome=outcome,
+            manifest_id=manifest_id, review_post_id=review_post_id,
+            outcome=outcome,
+            reason_code=_preview_delivery_failure_reason(preview_delivery) or "PREVIEW_NOT_SENT",
         )
     if outcome in _PIPELINE_AMBIGUOUS_OUTCOMES:
         return _update_target(
@@ -622,7 +697,13 @@ def dispatch_draft_set(
     whenever the set includes a main target (section 10) -- its absence is
     never interpreted as PASS; it blocks the main target with an explicit
     dependency/safety reason instead.
+
+    `routing_result` is strictly validated (Blocker B) before any durable
+    state is touched -- a caller merely claiming it came from
+    `evaluate_routing()` is never trusted on its own.
     """
+
+    routing_result = _validate_routing_artifact(routing_result)
 
     event = routing_result.get("event") or {}
     event_id = event.get("event_id")
@@ -710,7 +791,12 @@ def continue_unattempted_target(
     continuation never repeats main. Fresh `authoritative_recheck` and (for
     main) `main_capacity_recheck` are re-applied exactly as in ordinary
     dispatch -- continuation grants no bypass of either safety gate.
+
+    `routing_result` is strictly validated (Blocker B) before any durable
+    state is touched, same as `dispatch_draft_set`.
     """
+
+    routing_result = _validate_routing_artifact(routing_result)
 
     event = routing_result.get("event") or {}
     event_id = event.get("event_id")
@@ -854,6 +940,45 @@ def dispatch_domain_outcome(
 # ---------------------------------------------------------------------------
 
 
+def _self_test_routing_result(
+    *,
+    decision="IMMEDIATE_STORY_DRAFT",
+    targets=("STORY",),
+    event_id="event-1",
+    development_id="dev-1",
+    candidate_id="cand-1",
+    reason_code="MATERIAL_TIME_VALUE",
+    main_justification=None,
+) -> dict[str, Any]:
+    return {
+        "schema": router.SCHEMA,
+        "candidate_id": candidate_id,
+        "assessment_ref": "assess-1",
+        "state_snapshot_ref": "state-1",
+        "severity": "MATERIAL_BREAKING" if len(targets) == 1 else "EXCEPTIONAL_BREAKING",
+        "event": {
+            "event_id": event_id,
+            "development_id": development_id,
+            "topic_id": "topic-1",
+            "identity_basis": "EXACT_IDENTIFIER",
+            "identity_refs": ["ref-1"],
+        },
+        "verification": {"state": "PASS", "evidence_refs": ["ev-1"]},
+        "dedup": {
+            "decision": "DISTINCT_EVENT",
+            "matched_refs": [],
+            "parent_development_id": None,
+            "follow_up_reason": None,
+        },
+        "routing_decision": decision,
+        "reason_code": reason_code,
+        "reason_text": "test",
+        "draft_targets": list(targets),
+        "main_draft_justification": main_justification,
+        "reconciliation_required": False,
+    }
+
+
 def self_test() -> int:
     import tempfile
     import nullone_bridge_common as bridge_common
@@ -869,14 +994,7 @@ def self_test() -> int:
             set_id_3 = compute_draft_set_id("event-1", "dev-2")
             assert set_id_1 != set_id_3, "different developments collided"
 
-            routing_result = {
-                "routing_decision": "IMMEDIATE_STORY_DRAFT",
-                "reason_code": "MATERIAL_TIME_VALUE",
-                "candidate_id": "cand-1",
-                "event": {"event_id": "event-1", "development_id": "dev-1"},
-                "draft_targets": ["STORY"],
-                "main_draft_justification": None,
-            }
+            routing_result = _self_test_routing_result()
 
             with draft_set_lock(set_id_1):
                 record, created = reserve_draft_set(routing_result)
@@ -885,14 +1003,31 @@ def self_test() -> int:
                 assert created2 is False
                 assert record2["draft_set_id"] == record["draft_set_id"]
 
-            conflicting = dict(routing_result)
-            conflicting["routing_decision"] = "IMMEDIATE_STORY_AND_MAIN_DRAFT"
-            conflicting["draft_targets"] = ["STORY", "CAROUSEL"]
+            conflicting = _self_test_routing_result(
+                decision="IMMEDIATE_STORY_AND_MAIN_DRAFT",
+                targets=("STORY", "CAROUSEL"),
+                reason_code="EXCEPTIONAL_MAIN_VALUE",
+                main_justification="Distinct standalone value.",
+            )
             try:
                 with draft_set_lock(set_id_1):
                     reserve_draft_set(conflicting)
                 raise AssertionError("expected DraftSetConflict")
             except DraftSetConflict:
+                pass
+
+            # Blocker B: a malformed/unaccepted routing artifact is rejected
+            # before any durable state is touched, never silently trusted.
+            malformed = dict(routing_result)
+            malformed["main_format_reason"] = "not part of the strict schema"
+            try:
+                dispatch_draft_set(
+                    malformed,
+                    story_runner=lambda: (_ for _ in ()).throw(AssertionError("must not run")),
+                    authoritative_recheck=lambda *, stage, record: RecheckResult(permitted=True),
+                )
+                raise AssertionError("expected DispatchRejected")
+            except DispatchRejected:
                 pass
 
             # #27 mapping: NORMAL_QUEUE is a valid explicit no-op success.
@@ -904,22 +1039,22 @@ def self_test() -> int:
             def _always_permit(*, stage, record):
                 return RecheckResult(permitted=True)
 
+            _unset = object()
+
             class _Result:
-                def __init__(self, outcome, manifest_id=None, review_post_id=None):
+                def __init__(self, outcome, manifest_id=None, review_post_id=None, preview_delivery=_unset):
                     self.outcome = outcome
                     self.manifest_id = manifest_id
                     self.review_post_id = review_post_id
                     self.reason_code = None
+                    if preview_delivery is _unset:
+                        preview_delivery = {"status": "SENT"} if outcome == _DRAFT_CREATED_OUTCOME else None
+                    self.preview_delivery = preview_delivery
 
             set_id_4 = compute_draft_set_id("event-2", "dev-2")
-            story_only = {
-                "routing_decision": "IMMEDIATE_STORY_DRAFT",
-                "reason_code": "MATERIAL_TIME_VALUE",
-                "candidate_id": "cand-2",
-                "event": {"event_id": "event-2", "development_id": "dev-2"},
-                "draft_targets": ["STORY"],
-                "main_draft_justification": None,
-            }
+            story_only = _self_test_routing_result(
+                event_id="event-2", development_id="dev-2", candidate_id="cand-2",
+            )
             dr = dispatch_draft_set(
                 story_only,
                 story_runner=lambda: _Result("PREVIEW_DELIVERY_FAILED", "m-1", "r-1"),
@@ -929,16 +1064,30 @@ def self_test() -> int:
             outcome, code, text = dispatch_domain_outcome(story_only, dr)
             assert outcome == "FAILED", "PREVIEW_DELIVERY_FAILED must never map to SUCCEEDED"
 
+            # Blocker A: DRAFT_CREATED without independent SENT proof must
+            # never become target SUCCEEDED -- a sender that was never
+            # supplied is a definite, not an unknown, delivery failure.
+            set_id_4b = compute_draft_set_id("event-2b", "dev-2b")
+            story_only_b = _self_test_routing_result(
+                event_id="event-2b", development_id="dev-2b", candidate_id="cand-2b",
+            )
+            dr_b = dispatch_draft_set(
+                story_only_b,
+                story_runner=lambda: _Result("DRAFT_CREATED", "m-1b", "r-1b", preview_delivery=None),
+                authoritative_recheck=_always_permit,
+            )
+            assert dr_b.record["targets"]["STORY"]["status"] == "PREVIEW_DELIVERY_FAILED"
+            assert dr_b.record["targets"]["STORY"]["reason_code"] == "PREVIEW_DELIVERY_UNPROVEN"
+
             # Missing mandatory main_capacity_recheck blocks, never PASSes silently.
             set_id_5 = compute_draft_set_id("event-3", "dev-3")
-            story_and_main = {
-                "routing_decision": "IMMEDIATE_STORY_AND_MAIN_DRAFT",
-                "reason_code": "EXCEPTIONAL_MAIN_VALUE",
-                "candidate_id": "cand-3",
-                "event": {"event_id": "event-3", "development_id": "dev-3"},
-                "draft_targets": ["STORY", "FEED"],
-                "main_draft_justification": "value",
-            }
+            story_and_main = _self_test_routing_result(
+                decision="IMMEDIATE_STORY_AND_MAIN_DRAFT",
+                targets=("STORY", "FEED"),
+                event_id="event-3", development_id="dev-3", candidate_id="cand-3",
+                reason_code="EXCEPTIONAL_MAIN_VALUE",
+                main_justification="Distinct standalone value.",
+            )
             dr2 = dispatch_draft_set(
                 story_and_main,
                 story_runner=lambda: _Result("DRAFT_CREATED", "m-story", "r-story"),

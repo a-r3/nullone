@@ -84,6 +84,60 @@ CAROUSEL_SCORE_THRESHOLD = 42
 
 MAIN_FORMATS = frozenset({"FEED", "CAROUSEL"})
 
+# Exact accepted top-level fields for a persisted/transmitted
+# `nullone.breaking-routing.v1` artifact -- see `validate_routing_result_dict`.
+# Mirrors `RoutingResult.to_dict()`'s own field set exactly; never grows a
+# 15th field (main_format_reason is deliberately kept outside this schema).
+ROUTING_RESULT_FIELDS = frozenset(
+    {
+        "schema",
+        "candidate_id",
+        "assessment_ref",
+        "state_snapshot_ref",
+        "severity",
+        "event",
+        "verification",
+        "dedup",
+        "routing_decision",
+        "reason_code",
+        "reason_text",
+        "draft_targets",
+        "main_draft_justification",
+        "reconciliation_required",
+    }
+)
+
+_EVENT_FIELDS = frozenset({"event_id", "development_id", "topic_id", "identity_basis", "identity_refs"})
+_VERIFICATION_FIELDS = frozenset({"state", "evidence_refs"})
+_DEDUP_FIELDS = frozenset({"decision", "matched_refs", "parent_development_id", "follow_up_reason"})
+_IDENTITY_BASES = frozenset({"EXACT_IDENTIFIER", "CANONICAL_SOURCE", "NORMALIZED_CLAIM", "UNRESOLVED"})
+_FOLLOW_UP_REASONS = frozenset(
+    {
+        "AVAILABILITY_CHANGED",
+        "OFFICIAL_NUMBER_CHANGED",
+        "AFFECTED_REGION_CHANGED",
+        "MATERIAL_CORRECTION",
+        "PRODUCT_VERSION_CHANGED",
+        "USER_CONSEQUENCE_CHANGED",
+    }
+)
+
+# Accepted #34 reason_code<->routing_decision compatibility (see
+# tests/test_breaking_routing_contract.py's authored REASONS table, which
+# this mirrors exactly -- never re-derived/loosened here).
+REASON_CODES_BY_DECISION: dict[str, frozenset[str]] = {
+    "NORMAL_QUEUE": frozenset({"NORMAL_CADENCE"}),
+    "IMMEDIATE_STORY_DRAFT": frozenset({"MATERIAL_TIME_VALUE", "EXCEPTIONAL_STORY_ONLY"}),
+    "IMMEDIATE_STORY_AND_MAIN_DRAFT": frozenset({"EXCEPTIONAL_MAIN_VALUE"}),
+    "SUPPRESS_DUPLICATE": _SUPPRESS_CODES,
+    "SUPPRESS_RECENT_COVERAGE": frozenset({"NO_INCREMENTAL_AUDIENCE_VALUE"}),
+    "BLOCKED_UNVERIFIED": frozenset({"EVIDENCE_INSUFFICIENT"}),
+    "BLOCKED_AMBIGUOUS_IDENTITY": _AMBIGUOUS_CODES,
+    "BLOCKED_DRAFT_SAFETY": frozenset(
+        {"STORY_QUALITY_BLOCK", "STORY_LOAD_BLOCK", "DRAFT_DEPENDENCY_UNAVAILABLE"}
+    ),
+}
+
 
 class PolicyInputError(ValueError):
     """Structurally invalid/inconsistent input -- POLICY_INPUT_INVALID.
@@ -329,6 +383,202 @@ def _dedup_dict(ri: RoutingInput) -> dict[str, Any]:
         "parent_development_id": dedup.get("parent_development_id"),
         "follow_up_reason": dedup.get("follow_up_reason"),
     }
+
+
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _references(value: Any) -> bool:
+    return isinstance(value, list) and all(_text(item) for item in value)
+
+
+def _reject(message: str) -> None:
+    raise PolicyInputError(f"Invalid {SCHEMA} artifact: {message}")
+
+
+def validate_routing_result_dict(value: Any) -> dict[str, Any]:
+    """Strictly validate a plain dict as an accepted `nullone.breaking-routing.v1`
+    artifact, independent of any trust that it originated from `evaluate_routing()`.
+
+    A caller (e.g. `nullone_breaking_dispatch.py`) must call this -- before
+    computing/reserving any durable target state, writing a draft-set
+    sidecar, invoking any recheck, or invoking a Story/main runner -- on
+    every incoming routing artifact, whether freshly produced or reloaded
+    from durable storage. Enforces:
+
+    * The exact accepted top-level field set (`ROUTING_RESULT_FIELDS`) --
+      an unknown field (e.g. a stray `main_format_reason`) or a missing
+      field is rejected, never silently ignored/defaulted.
+    * Field-level types/enums for `event`/`verification`/`dedup`.
+    * Accepted semantic combinations (issue #34 contract): accelerated
+      decisions require PASS verification, a breaking severity, resolved
+      identity evidence, an acceleration-eligible dedup relation and
+      `reconciliation_required=False`; `draft_targets` is exactly one of
+      the accepted combinations (no reordering, no duplicates, no
+      main-only target); `IMMEDIATE_STORY_AND_MAIN_DRAFT` requires
+      `EXCEPTIONAL_BREAKING` severity and a non-empty
+      `main_draft_justification`; every other decision requires an empty
+      `draft_targets` and a null `main_draft_justification`;
+      `reason_code` must be compatible with `routing_decision`
+      (`REASON_CODES_BY_DECISION`).
+
+    Raises `PolicyInputError` on any violation, before any side effect.
+    Never returns a route/interpretation for malformed input -- a
+    consumer/domain error, never a ninth route. Returns a fresh dict on
+    success (never the caller's own mutable object).
+    """
+
+    if not isinstance(value, Mapping):
+        _reject("value must be an object")
+
+    fields = set(value.keys())
+    if fields != ROUTING_RESULT_FIELDS:
+        missing = sorted(ROUTING_RESULT_FIELDS - fields)
+        unknown = sorted(fields - ROUTING_RESULT_FIELDS)
+        _reject(f"exact field set mismatch (missing={missing}, unknown={unknown})")
+
+    if value["schema"] != SCHEMA:
+        _reject(f"schema must be {SCHEMA!r}, got {value['schema']!r}")
+
+    for name in ("candidate_id", "assessment_ref", "state_snapshot_ref", "reason_text"):
+        if not _text(value[name]):
+            _reject(f"{name} must be a non-empty string")
+
+    route = value["routing_decision"]
+    if route not in ROUTING_DECISIONS:
+        _reject(f"routing_decision is invalid: {route!r}")
+
+    reason_code = value["reason_code"]
+    if not _text(reason_code):
+        _reject("reason_code must be a non-empty string")
+    if reason_code not in REASON_CODES_BY_DECISION.get(route, frozenset()):
+        _reject(f"reason_code {reason_code!r} is not compatible with routing_decision {route!r}")
+
+    severity = value["severity"]
+    if severity is not None and severity not in SEVERITIES:
+        _reject(f"severity is invalid: {severity!r}")
+
+    if not isinstance(value["reconciliation_required"], bool):
+        _reject("reconciliation_required must be a boolean")
+
+    event = value["event"]
+    if not isinstance(event, Mapping) or set(event.keys()) != _EVENT_FIELDS:
+        _reject("event has an invalid field set")
+    for name in ("event_id", "development_id"):
+        if event[name] is not None and not _text(event[name]):
+            _reject(f"event.{name} must be null or a non-empty string")
+    if not _text(event["topic_id"]):
+        _reject("event.topic_id must be a non-empty string")
+    if event["identity_basis"] not in _IDENTITY_BASES:
+        _reject(f"event.identity_basis is invalid: {event['identity_basis']!r}")
+    if not _references(event["identity_refs"]):
+        _reject("event.identity_refs must be a list of non-empty strings")
+
+    verification = value["verification"]
+    if not isinstance(verification, Mapping) or set(verification.keys()) != _VERIFICATION_FIELDS:
+        _reject("verification has an invalid field set")
+    if verification["state"] not in VERIFICATION_STATES:
+        _reject(f"verification.state is invalid: {verification['state']!r}")
+    if not _references(verification["evidence_refs"]):
+        _reject("verification.evidence_refs must be a list of non-empty strings")
+    if verification["state"] == "PASS":
+        if not verification["evidence_refs"]:
+            _reject("verification.evidence_refs must be non-empty for PASS")
+    elif severity is not None:
+        _reject("severity must be null unless verification.state is PASS")
+
+    dedup = value["dedup"]
+    if not isinstance(dedup, Mapping) or set(dedup.keys()) != _DEDUP_FIELDS:
+        _reject("dedup has an invalid field set")
+    if dedup["decision"] not in DEDUP_DECISIONS:
+        _reject(f"dedup.decision is invalid: {dedup['decision']!r}")
+    if not _references(dedup["matched_refs"]):
+        _reject("dedup.matched_refs must be a list of non-empty strings")
+    if dedup["decision"] == "MATERIAL_FOLLOW_UP":
+        if not (
+            _text(dedup["parent_development_id"])
+            and dedup["parent_development_id"] != event["development_id"]
+        ):
+            _reject(
+                "dedup.parent_development_id must be a distinct non-empty "
+                "development id for MATERIAL_FOLLOW_UP"
+            )
+        if dedup["follow_up_reason"] not in _FOLLOW_UP_REASONS:
+            _reject(f"dedup.follow_up_reason is invalid: {dedup['follow_up_reason']!r}")
+        if not dedup["matched_refs"]:
+            _reject("dedup.matched_refs must be non-empty for MATERIAL_FOLLOW_UP")
+    elif dedup["parent_development_id"] is not None or dedup["follow_up_reason"] is not None:
+        _reject("dedup.parent_development_id/follow_up_reason must be null unless MATERIAL_FOLLOW_UP")
+    if dedup["decision"] in ("EXACT_DUPLICATE", "SAME_EVENT"):
+        if not dedup["matched_refs"]:
+            _reject("dedup.matched_refs must be non-empty for EXACT_DUPLICATE/SAME_EVENT")
+        if route != "SUPPRESS_DUPLICATE":
+            _reject("EXACT_DUPLICATE/SAME_EVENT dedup must route to SUPPRESS_DUPLICATE")
+
+    draft_targets = value["draft_targets"]
+    if not isinstance(draft_targets, list):
+        _reject("draft_targets must be a list")
+    targets_tuple = tuple(draft_targets)
+    if targets_tuple not in ((), ("STORY",), ("STORY", "FEED"), ("STORY", "CAROUSEL")):
+        _reject(
+            "draft_targets is not an accepted combination (no reordering, "
+            f"no duplicates, no main-only target): {draft_targets!r}"
+        )
+
+    accelerated = route in ACCELERATED_DECISIONS
+    if accelerated:
+        if verification["state"] != "PASS":
+            _reject("accelerated routing_decision requires verification.state == PASS")
+        if severity not in ("MATERIAL_BREAKING", "EXCEPTIONAL_BREAKING"):
+            _reject("accelerated routing_decision requires a breaking severity")
+        if not (_text(event["event_id"]) and _text(event["development_id"])):
+            _reject("accelerated routing_decision requires event_id and development_id")
+        if event["identity_basis"] == "UNRESOLVED" or not event["identity_refs"]:
+            _reject("accelerated routing_decision requires resolved identity evidence")
+        if dedup["decision"] not in ("DISTINCT_EVENT", "MATERIAL_FOLLOW_UP"):
+            _reject("accelerated routing_decision requires an acceleration-eligible dedup relation")
+        if value["reconciliation_required"]:
+            _reject("accelerated routing_decision must have reconciliation_required == False")
+
+    if route == "IMMEDIATE_STORY_AND_MAIN_DRAFT":
+        if severity != "EXCEPTIONAL_BREAKING":
+            _reject("IMMEDIATE_STORY_AND_MAIN_DRAFT requires severity == EXCEPTIONAL_BREAKING")
+        if targets_tuple not in (("STORY", "FEED"), ("STORY", "CAROUSEL")):
+            _reject(
+                "IMMEDIATE_STORY_AND_MAIN_DRAFT requires draft_targets == "
+                "[STORY, FEED] or [STORY, CAROUSEL]"
+            )
+        if not _text(value["main_draft_justification"]):
+            _reject("IMMEDIATE_STORY_AND_MAIN_DRAFT requires a non-empty main_draft_justification")
+    else:
+        if value["main_draft_justification"] is not None:
+            _reject(
+                "main_draft_justification must be null unless routing_decision is "
+                "IMMEDIATE_STORY_AND_MAIN_DRAFT"
+            )
+        expected_targets = ("STORY",) if route == "IMMEDIATE_STORY_DRAFT" else ()
+        if targets_tuple != expected_targets:
+            _reject(f"draft_targets must be {list(expected_targets)!r} for routing_decision {route!r}")
+
+    if route == "IMMEDIATE_STORY_DRAFT":
+        expected_reason = "MATERIAL_TIME_VALUE" if severity == "MATERIAL_BREAKING" else "EXCEPTIONAL_STORY_ONLY"
+        if reason_code != expected_reason:
+            _reject(
+                f"IMMEDIATE_STORY_DRAFT with severity={severity!r} requires "
+                f"reason_code {expected_reason!r}, got {reason_code!r}"
+            )
+
+    if route == "NORMAL_QUEUE" and severity != "NORMAL":
+        _reject("NORMAL_QUEUE requires severity == NORMAL")
+
+    if route == "BLOCKED_UNVERIFIED" and verification["state"] == "PASS":
+        _reject("BLOCKED_UNVERIFIED requires verification.state != PASS")
+
+    if route == "BLOCKED_AMBIGUOUS_IDENTITY" and not value["reconciliation_required"]:
+        _reject("BLOCKED_AMBIGUOUS_IDENTITY requires reconciliation_required == True")
+
+    return dict(value)
 
 
 # ---------------------------------------------------------------------------

@@ -64,13 +64,24 @@ def make_candidate(
     )
 
 
-def write_manifest(workspace: Path, candidate_id: str, **overrides) -> Path:
+def write_manifest(workspace: Path, candidate_id: str, *, suffix: str | None = None, **overrides) -> Path:
+    """Write one manifest for `candidate_id`.
+
+    `suffix` (e.g. "story"/"feed"/"carousel") writes a SIBLING manifest --
+    a distinct manifest_id and a distinct filename -- rather than
+    overwriting the default one, so a test can put more than one manifest
+    under the same candidate_id (Blocker C: an intentional #36 two-target
+    draft set). Omitting it preserves the exact prior single-manifest
+    filename/manifest_id convention every existing call site relies on.
+    """
     manifest_dir = workspace / "social" / "ops" / "manifests"
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
+    manifest_id = f"manifest-{candidate_id}" if suffix is None else f"manifest-{candidate_id}-{suffix}"
+
     manifest = {
         "schema": "nullone.production.v1",
-        "manifest_id": f"manifest-{candidate_id}",
+        "manifest_id": manifest_id,
         "created_at": "2026-01-01T00:00:00+00:00",
         "candidate_id": candidate_id,
         "topic": f"Topic for {candidate_id}",
@@ -110,7 +121,8 @@ def write_manifest(workspace: Path, candidate_id: str, **overrides) -> Path:
     for section, patch in overrides.items():
         manifest[section].update(patch) if isinstance(manifest.get(section), dict) else manifest.update({section: patch})
 
-    path = manifest_dir / f"{candidate_id}.json"
+    filename = f"{candidate_id}.json" if suffix is None else f"{candidate_id}-{suffix}.json"
+    path = manifest_dir / filename
     path.write_text(json.dumps(manifest), encoding="utf-8")
     return path
 
@@ -1633,6 +1645,159 @@ class SchemaAlignmentTests(unittest.TestCase):
             self.assertIn(dedup["follow_up_reason"], bi.FOLLOW_UP_REASONS)
             event = result["event"]
             self.assertEqual(set(event), {"event_id", "development_id", "topic_id", "identity_basis", "identity_refs"})
+
+
+class MultiManifestCardinalityTests(unittest.TestCase):
+    """#36 Blocker C: an intentional two-target draft set (one Story
+    manifest and one Feed/Carousel manifest sharing the same candidate_id)
+    is a normal outcome, never MALFORMED merely because more than one
+    manifest exists for a candidate_id. Existing #35 identity policy
+    (precedence, dedup definitions, follow-up semantics) is unchanged --
+    this only hardens the state-reader's cardinality assumption.
+    """
+
+    def _evaluate(self, candidate_id="candidate-1"):
+        candidate = make_candidate(candidate_id)
+        state = bi.load_repository_state(self.workspace)
+        return state, bi.evaluate(candidate, state)
+
+    def setUp(self):
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmpdir_ctx.name)
+        self.addCleanup(self._tmpdir_ctx.cleanup)
+
+    def test_a_story_draft_created_feed_not_created_is_readable_and_reserved(self):
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-story"})
+        write_manifest(self.workspace, "candidate-1", suffix="feed", format="FEED")
+
+        state, result = self._evaluate()
+        self.assertEqual(state.manifests_status, bi.STATE_PRESENT_WITH_DATA)
+        self.assertEqual(len(state.manifests_by_candidate_id["candidate-1"]), 2)
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertFalse(result.reconciliation_required)
+        matched_refs = result.dedup["matched_refs"]
+        self.assertIn("manifest:manifest-candidate-1-story", matched_refs)
+        self.assertIn("manifest:manifest-candidate-1-feed", matched_refs)
+
+    def test_b_story_and_carousel_both_draft_created_is_readable_not_malformed(self):
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-story"})
+        write_manifest(self.workspace, "candidate-1", suffix="carousel", format="CAROUSEL",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-carousel"})
+
+        state, result = self._evaluate()
+        self.assertEqual(state.manifests_status, bi.STATE_PRESENT_WITH_DATA)
+        self.assertNotEqual(state.manifests_status, bi.STATE_MALFORMED)
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertFalse(result.reconciliation_required)
+
+    def test_c_story_clean_main_publication_unknown_unsafe_wins(self):
+        write_manifest(self.workspace, "candidate-1", suffix="story")
+        write_manifest(self.workspace, "candidate-1", suffix="main",
+                        publication={"state": "UNKNOWN", "attempts": 1})
+
+        _, result = self._evaluate()
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_d_story_draft_created_main_consumed_publication_attempt_suppresses(self):
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-story"})
+        write_manifest(self.workspace, "candidate-1", suffix="main",
+                        publication={"state": "NOT_REQUESTED", "attempts": 1})
+
+        _, result = self._evaluate()
+        self.assertEqual(result.reason_code, "EXISTING_CONSEQUENTIAL_STATE")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_e_story_review_unknown_main_draft_created_unresolved_remains_governing(self):
+        # The unresolved/unsafe Story state must remain governing even
+        # though the Main manifest's DRAFT_CREATED is itself resolved -- a
+        # clean sibling must never silently downgrade an unsafe one.
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "REVIEW_UNKNOWN", "create_attempts": 1})
+        write_manifest(self.workspace, "candidate-1", suffix="main",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-main"})
+
+        _, result = self._evaluate()
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
+        self.assertTrue(result.reconciliation_required)
+
+    def test_f_arbitrary_filesystem_ordering_is_deterministic(self):
+        write_manifest(self.workspace, "candidate-1", suffix="aaa-story",
+                        review={"state": "REVIEW_UNKNOWN", "create_attempts": 1})
+        write_manifest(self.workspace, "candidate-1", suffix="zzz-main",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-main"})
+        _, first = self._evaluate()
+
+        with tempfile.TemporaryDirectory() as td2:
+            workspace2 = Path(td2)
+            # Same two manifests, written in the opposite name order, so a
+            # directory listing would (absent the module's own sort) come
+            # back in a different physical order.
+            write_manifest(workspace2, "candidate-1", suffix="zzz-main",
+                            review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-main"})
+            write_manifest(workspace2, "candidate-1", suffix="aaa-story",
+                            review={"state": "REVIEW_UNKNOWN", "create_attempts": 1})
+            candidate = make_candidate("candidate-1")
+            state2 = bi.load_repository_state(workspace2)
+            second = bi.evaluate(candidate, state2)
+
+        self.assertEqual(first.reason_code, second.reason_code)
+        self.assertEqual(first.reconciliation_required, second.reconciliation_required)
+        self.assertEqual(first.dedup, second.dedup)
+
+    def test_g_genuinely_malformed_sibling_still_fails_closed(self):
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-story"})
+        manifest_dir = self.workspace / "social" / "ops" / "manifests"
+        (manifest_dir / "candidate-1-broken.json").write_text("{not valid json", encoding="utf-8")
+
+        state, result = self._evaluate()
+        self.assertEqual(state.manifests_status, bi.STATE_MALFORMED)
+        self.assertEqual(result.dedup["decision"], "AMBIGUOUS_IDENTITY")
+
+    def test_duplicate_manifest_id_across_different_content_is_malformed(self):
+        # Two different manifest records claiming the SAME manifest_id is
+        # genuine identity corruption, never an intentional sibling (real
+        # siblings always have distinct manifest_id -- see
+        # _manifest_id_for_version).
+        manifest_dir = self.workspace / "social" / "ops" / "manifests"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-story"})
+        colliding = json.loads((manifest_dir / "candidate-1-story.json").read_text())
+        colliding["review"]["zernio_draft_id"] = "different-draft-id"
+        (manifest_dir / "candidate-1-story-collision.json").write_text(json.dumps(colliding), encoding="utf-8")
+
+        state = bi.load_repository_state(self.workspace)
+        self.assertEqual(state.manifests_status, bi.STATE_MALFORMED)
+
+    def test_byte_identical_duplicate_manifest_is_deduplicated_not_malformed(self):
+        write_manifest(self.workspace, "candidate-1")
+        manifest_dir = self.workspace / "social" / "ops" / "manifests"
+        content = (manifest_dir / "candidate-1.json").read_text()
+        (manifest_dir / "candidate-1-copy.json").write_text(content, encoding="utf-8")
+
+        state = bi.load_repository_state(self.workspace)
+        self.assertEqual(state.manifests_status, bi.STATE_PRESENT_WITH_DATA)
+        self.assertEqual(len(state.manifests_by_candidate_id["candidate-1"]), 1)
+
+    def test_two_target_set_does_not_poison_a_single_candidate_reevaluation(self):
+        # After both targets of an intentional draft set exist, a fresh
+        # #35 read must remain PRESENT_WITH_DATA/auditable, and
+        # reevaluating the same development suppresses it as already
+        # covered/reserved rather than failing closed.
+        write_manifest(self.workspace, "candidate-1", suffix="story",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-story"})
+        write_manifest(self.workspace, "candidate-1", suffix="feed", format="FEED",
+                        review={"state": "DRAFT_CREATED", "create_attempts": 1, "zernio_draft_id": "z-feed"})
+
+        state, result = self._evaluate()
+        self.assertEqual(state.manifests_status, bi.STATE_PRESENT_WITH_DATA)
+        self.assertEqual(result.dedup["decision"], "EXACT_DUPLICATE")
+        self.assertEqual(result.reason_code, "EXISTING_DRAFT_REQUEST")
 
 
 if __name__ == "__main__":
