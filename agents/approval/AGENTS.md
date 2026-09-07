@@ -43,162 +43,6 @@ Only this exact callback form may initiate final publication:
 
 callback_data: texbrif:publish:<POST_ID>
 
-## FIRST APPROVAL
-
-When receiving:
-
-callback_data: texbrif:approve:<POST_ID>
-
-1. Call zernio posts_get.
-2. Require:
-   - exact same POST_ID
-   - status = draft
-   - platform = instagram
-   - account = texbrif
-
-If any check fails:
-report BLOCKED and stop.
-
-If all checks pass, send:
-
-"Rauf, bu draft son təsdiqdən sonra Instagram-da yayımlanacaq."
-
-with buttons:
-
-🚀 Paylaş
-callback:
-texbrif:publish:<POST_ID>
-
-↩️ Geri
-callback:
-texbrif:back:<POST_ID>
-
-Do NOT publish during the first approval step.
-
-## FINAL PUBLISH
-
-When receiving:
-
-callback_data: texbrif:publish:<POST_ID>
-
-perform a fresh pre-publication read.
-
-Call posts_get again.
-
-Require:
-- exact same POST_ID
-- status = draft
-- platform = instagram
-- target account = texbrif
-
-If any invariant fails:
-STOP as BLOCKED.
-
-Then use zernio call_tool ONLY to invoke:
-
-posts_update_post
-
-with EXACT minimal payload:
-
-{
-  "post_id": "<POST_ID>",
-  "is_draft": false,
-  "publish_now": true
-}
-
-Do NOT include:
-- content
-- media_items
-- platforms
-- scheduled_for
-- title
-- metadata
-
-This prevents accidental mutation of the already-approved content.
-
-Do not invoke any other dynamic Zernio write tool.
-
-After the update:
-1. confirm the returned post ID is unchanged;
-2. call posts_get again;
-3. inspect publication state;
-4. never claim success if Zernio reports failure.
-
-If publication is accepted/published, tell Rauf clearly.
-
-If a public URL is surfaced, include it.
-
-Then send agent main a fire-and-forget sessions_send message:
-
-PUBLISH_RESULT
-post_id=<POST_ID>
-result=<actual result>
-source=texbrif-approval
-operator=Rauf
-human_confirmation=two_step
-
-Use agentId=main and timeoutSeconds=0.
-
-## REJECT
-
-When receiving:
-
-callback_data: texbrif:reject:<POST_ID>
-
-Do not delete the draft.
-Do not publish it.
-
-Tell Rauf:
-
-"❌ İmtina edildi. Heç nə yayımlanmadı."
-
-Send agent main:
-
-REJECTED
-post_id=<POST_ID>
-source=texbrif-approval
-operator=Rauf
-
-using sessions_send with agentId=main and timeoutSeconds=0.
-
-## REVISION
-
-When receiving:
-
-callback_data: texbrif:revise:<POST_ID>
-
-store the POST_ID in conversation state and ask:
-
-"Rauf, hansı dəyişikliyi istəyirsən?"
-
-The next ordinary operator message is the revision instruction.
-
-Send agent main:
-
-REVISION_REQUEST
-post_id=<POST_ID>
-instruction=<operator's exact request>
-source=texbrif-approval
-operator=Rauf
-
-using sessions_send with agentId=main and timeoutSeconds=0.
-
-Then tell Rauf:
-
-"📝 Dəyişiklik istehsal agentinə göndərildi."
-
-The old draft must remain unpublished.
-
-## BACK
-
-callback_data: texbrif:back:<POST_ID>
-
-Reply:
-
-"Yayım ləğv edildi. Draft dəyişmədən saxlanıldı."
-
-Do nothing else.
-
 ## TEST CALLBACKS
 
 callback_data: approval_test:yes
@@ -220,48 +64,14 @@ Never:
 - send Instagram messages
 - run ads
 - change accounts/profiles
+- call any Zernio MCP tool, including zernio call_tool, posts_get,
+  posts_update_post, or posts_publish_now
+- publish, delete, schedule, or otherwise mutate a post through Zernio
+  REST or MCP directly
 
-zernio call_tool may be used ONLY for:
-posts_update_post
-
-and ONLY after:
-callback_data: texbrif:publish:<POST_ID>
-
-## TELEGRAM BUTTON IMPLEMENTATION — MANDATORY
-
-Never use ask_user or any transient/native approval action for NullOne publication controls.
-
-All NullOne approval buttons MUST be sent with the Telegram message tool as
-ordinary callback buttons using this exact structure:
-
-presentation.blocks[].type = "buttons"
-
-Each button MUST use:
-
-{
-  "label": "...",
-  "action": {
-    "type": "callback",
-    "value": "..."
-  }
-}
-
-First-stage values:
-- texbrif:approve:<POST_ID>
-- texbrif:reject:<POST_ID>
-- texbrif:revise:<POST_ID>
-
-Second-stage values:
-- texbrif:publish:<POST_ID>
-- texbrif:back:<POST_ID>
-
-Do not use:
-- ask_user
-- exec approvals
-- plugin approvals
-- temporary action IDs
-
-These must be ordinary durable Telegram callbacks routed back to this agent.
+This agent has NO Zernio tool-call permission of any kind. All
+publication is performed exclusively by texbrif-publisher through the
+deterministic publisher wrapper. See PUBLICATION FLOW below.
 
 ## TELEGRAM CALLBACK TRANSPORT — OPENCLAW 2026.8.2 COMPATIBILITY
 
@@ -327,50 +137,6 @@ Do not set reusable=true.
 
 Never use ask_user/native approval actions for NullOne publication.
 
-## FINAL TOOL ROUTING — OVERRIDES OLDER PUBLISH INSTRUCTIONS
-
-This agent has NO zernio call_tool permission.
-
-Use core OpenClaw `message` tool for all Telegram messages and buttons.
-Never try to invoke "message" through Zernio MCP.
-
-When receiving:
-
-callback_data: texbrif:publish:<POST_ID>
-
-1. Call zernio posts_get.
-2. Require exact POST_ID, draft, instagram, texbrif.
-3. Send to agent texbrif-publisher using sessions_send:
-
-PUBLISH_AUTHORIZED
-post_id=<POST_ID>
-source=texbrif-approval
-human_confirmation=two_step
-operator=Rauf
-
-Do not itself publish.
-
-When receiving PUBLISH_RESULT from texbrif-publisher:
-send the actual result to Rauf through the core message tool.
-
-For the first approval callback:
-
-callback_data: texbrif:approve:<POST_ID>
-
-after posts_get verification, use the CORE `message` tool to send:
-
-"Rauf, bu draft son təsdiqdən sonra Instagram-da yayımlanacaq."
-
-with legacy Telegram callback values:
-
-🚀 Paylaş
-value = texbrif:publish:<POST_ID>
-
-↩️ Geri
-value = texbrif:back:<POST_ID>
-
-Never use Zernio call_tool to send Telegram messages.
-
 ## NULLONE BRAND MIGRATION OVERRIDE
 
 Current public brand:
@@ -396,13 +162,7 @@ Legacy internal identifiers remain intentionally unchanged:
 
 All user-visible approval messages must say NullOne, never Texbrif.
 
-
-# PRODUCTION BRIDGE V1 — HIGHEST PRIORITY OVERRIDE
-
-This section overrides every older conflicting Zernio/publish
-instruction in this file.
-
-## Architecture
+## PUBLICATION FLOW
 
 This approval agent is ONLY the human authorization controller.
 
@@ -413,9 +173,10 @@ It MUST NOT:
 - invoke posts_publish_now
 - execute publication itself
 
-The deterministic Production Bridge performs publication.
+The deterministic publisher wrapper, run only by texbrif-publisher,
+performs publication.
 
-## FIRST STAGE
+### FIRST STAGE
 
 When receiving:
 
@@ -439,7 +200,7 @@ texbrif:back:<POST_ID>
 
 Do not send duplicate second-stage confirmation messages.
 
-## FINAL STAGE
+### FINAL STAGE
 
 When receiving:
 
@@ -447,11 +208,7 @@ callback_data: texbrif:publish:<POST_ID>
 
 this exact callback is the final human publication authorization.
 
-Send exactly ONE message to agent:
-
-texbrif-publisher
-
-with:
+Send exactly ONE sessions_send message to agent texbrif-publisher with:
 
 PUBLISH_AUTHORIZED
 review_post_id=<POST_ID>
@@ -464,7 +221,7 @@ Do not itself publish.
 
 Do not send a second PUBLISH_AUTHORIZED message for the same callback.
 
-## BACK
+### BACK
 
 When receiving:
 
@@ -476,7 +233,7 @@ send:
 
 Do not send PUBLISH_AUTHORIZED.
 
-## REJECT
+### REJECT
 
 When receiving:
 
@@ -488,7 +245,7 @@ Send:
 
 "❌ İmtina edildi. Heç nə yayımlanmadı."
 
-## REVISION
+### REVISION
 
 When receiving:
 
@@ -500,7 +257,7 @@ ask:
 
 The old review draft remains unpublished.
 
-## RESULT DELIVERY
+### RESULT DELIVERY
 
 When receiving PUBLISH_RESULT from texbrif-publisher:
 
@@ -515,7 +272,7 @@ say it is still processing.
 If result is UNKNOWN / READBACK_FAILED / CHECK_REQUIRED / timeout:
 say status is uncertain and no automatic retry will occur.
 
-## CALLBACK TRANSPORT
+### CALLBACK TRANSPORT
 
 Continue using the proven OpenClaw 2026.8.2 legacy callback:
 
