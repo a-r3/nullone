@@ -57,12 +57,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from nullone_analytics_provider_factory import build_production_analytics_provider
 from nullone_analytics_workflow import AnalyticsWorkflowResult, run_analytics_workflow
 from nullone_bridge_common import BridgeError
-from nullone_claude_editorial_provider import default_invoke_provider
-from nullone_failure_notify import OpenClawTelegramTransport, notify_if_required
 from nullone_morning_workflow import MorningWorkflowResult, run_morning_workflow
+from nullone_scheduled_run_dispatch import run_analytics_trigger, run_morning_trigger
 
 
 def _load_trigger(path: str) -> dict[str, Any]:
@@ -84,35 +82,6 @@ def _load_trigger(path: str) -> dict[str, Any]:
     return value
 
 
-def _production_notifier(result: dict[str, Any]) -> dict[str, Any]:
-    """The only place this CLI knows OpenClaw/Telegram is the transport.
-
-    Neither `MorningWorkflow` nor `AnalyticsWorkflow` import
-    `OpenClawTelegramTransport` themselves; both accept an injected
-    `notifier` callable, and this is the production one.
-
-    Passes `scheduler_native_failure_owned=False` explicitly: this
-    function is only ever reached by `run_morning_workflow`/
-    `run_analytics_workflow` after they have already established a valid,
-    reconciled persisted #27 result, meaning THIS application invocation
-    has itself completed and will exit 0. A legacy persisted
-    `scheduler_status="error"`/`"failed"` value (the exact shape #28
-    persists for an exhausted-retry Morning provider failure) must never
-    be allowed to defer this alert to OpenClaw's native `failureAlert` in
-    that case -- that native alert will never fire for a process that
-    exits 0, which would otherwise silently drop the alert entirely. See
-    `docs/deployment/59-scheduled-workflows-deployment.md` and
-    `nullone_failure_notify.notify_if_required`'s docstring for the full
-    ownership-routing contract this narrow override participates in.
-    """
-
-    return notify_if_required(
-        result,
-        transport=OpenClawTelegramTransport(),
-        scheduler_native_failure_owned=False,
-    )
-
-
 def _report(result: MorningWorkflowResult | AnalyticsWorkflowResult) -> int:
     print(f"APPLICATION_EXECUTION={result.application_execution}")
     print(f"DOMAIN_OUTCOME={result.domain_outcome}")
@@ -128,21 +97,13 @@ def _report(result: MorningWorkflowResult | AnalyticsWorkflowResult) -> int:
 
 def morning(trigger_file: str) -> int:
     trigger = _load_trigger(trigger_file)
-    result = run_morning_workflow(
-        trigger,
-        invoke_provider=default_invoke_provider,
-        notifier=_production_notifier,
-    )
+    result = run_morning_trigger(trigger)
     return _report(result)
 
 
 def analytics(trigger_file: str) -> int:
     trigger = _load_trigger(trigger_file)
-    result = run_analytics_workflow(
-        trigger,
-        provider_factory=build_production_analytics_provider,
-        notifier=_production_notifier,
-    )
+    result = run_analytics_trigger(trigger)
     return _report(result)
 
 

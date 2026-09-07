@@ -36,6 +36,10 @@ COMMANDS = [
     [sys.executable, "tests/test_analytics_workflow.py"],
     [sys.executable, "tests/test_scheduled_workflows_capability_negative.py"],
     [sys.executable, "tests/test_scheduled_run_cli.py"],
+    [sys.executable, "tests/test_schedule_registry.py"],
+    [sys.executable, "tests/test_scheduled_occurrence_authority.py"],
+    [sys.executable, "tests/test_scheduled_run_dispatch.py"],
+    [sys.executable, "tests/test_scheduled_wakeup_cli.py"],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_breaking_identity.py",
@@ -103,6 +107,16 @@ COMMANDS = [
     ],
     [
         sys.executable,
+        "workspace/social/ops/scripts/nullone_schedule_registry.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_scheduled_occurrence_authority.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
         "workspace/social/ops/scripts/nullone_analytics_provider_factory.py",
         "self-test",
     ],
@@ -119,6 +133,11 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-scheduled-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-scheduled-wakeup.py",
         "self-test",
     ],
     [
