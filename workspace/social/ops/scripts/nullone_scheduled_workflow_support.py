@@ -61,6 +61,19 @@ class ScheduledWorkflowSupportError(ValueError):
     contract."""
 
 
+# Stable, generic text for a malformed notifier result. Deliberately never
+# formatted with the rejected value itself (or its repr, or an exception
+# message derived from it): an injected `notifier` is caller-controlled and
+# its return may echo whatever an eventual real transport/credential
+# failure put there -- including something that merely looks secret-like.
+# Callers report this exact string as `reason_text`; any distinguishing
+# detail belongs only in `safe_notification_result_context()`'s type-level
+# metadata.
+NOTIFICATION_RESULT_INVALID_MESSAGE = (
+    "Notifier returned a result that does not satisfy the #30 notification contract."
+)
+
+
 def derive_local_date(scheduled_for: str, *, timezone_name: str = "Asia/Baku") -> str:
     """Return the `YYYY-MM-DD` local business date for a canonical UTC instant.
 
@@ -118,21 +131,40 @@ def validate_notification_outcome(outcome: Any) -> str:
     (`FAILED`, `UNKNOWN`, `ALREADY_FAILED`, `ALREADY_UNKNOWN`, ...) passes
     through here unchanged and is never treated as malformed -- #30 has
     already durably consumed its one automatic attempt for those.
+
+    The raised exception's message is always the same stable, generic
+    `NOTIFICATION_RESULT_INVALID_MESSAGE` -- never the rejected `outcome`,
+    its `status` value, or a repr of either: an injected `notifier` is
+    caller-controlled and this must never become a channel for echoing
+    arbitrary content into application/operator output. Use
+    `safe_notification_result_context(outcome)` for safe, value-free
+    diagnostics instead.
     """
 
     if not isinstance(outcome, dict):
-        raise ScheduledWorkflowSupportError(
-            f"notifier result must be an object, got {type(outcome).__name__}"
-        )
+        raise ScheduledWorkflowSupportError(NOTIFICATION_RESULT_INVALID_MESSAGE)
 
     status = outcome.get("status")
 
     if not isinstance(status, str) or status not in VALID_NOTIFICATION_STATUSES:
-        raise ScheduledWorkflowSupportError(
-            f"notifier result has an unrecognized status: {status!r}"
-        )
+        raise ScheduledWorkflowSupportError(NOTIFICATION_RESULT_INVALID_MESSAGE)
 
     return status
+
+
+def safe_notification_result_context(outcome: Any) -> dict[str, Any]:
+    """Safe, value-free type-level diagnostics for a rejected notifier result.
+
+    Never echoes the rejected `outcome` itself, its `status` field, or a
+    repr of either -- only Python type names, which are never sensitive
+    and never attacker/notifier-controlled content. Callers use this to
+    populate `context` alongside `NOTIFICATION_RESULT_INVALID_MESSAGE`.
+    """
+
+    context: dict[str, Any] = {"result_type": type(outcome).__name__}
+    if isinstance(outcome, dict):
+        context["status_type"] = type(outcome.get("status")).__name__
+    return context
 
 
 def safe_trigger_context(trigger: Any) -> dict[str, Any]:

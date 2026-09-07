@@ -40,10 +40,15 @@ Daily Analytics production boundary (#61): the production
 .build_production_analytics_provider`) is a fail-closed placeholder that
 never reads `ZERNIO_ANALYTICS_API_TOKEN` -- see that module's docstring.
 Running `analytics` against a real trigger today, without #61, always
-yields `application_execution=FAILED`,
-`reason_code=RUNTIME_CRASHED` (reason text carrying
-`PROVIDER_SECRET_WIRING_PENDING_61`), by design. It never fabricates a
-Zernio bootstrap attempt.
+yields `application_execution=FAILED`, `reason_code=RUNTIME_CRASHED`,
+`context.error_type=ProviderSecretWiringPendingError` (the raised
+placeholder's own exception message is never included in `reason_text` or
+`context` -- only its stable `type(exc).__name__` -- since a future real
+credential/provider failure at this same seam must never be assumed safe
+to echo into operator-facing output; the static fact that this is
+specifically the pending-#61 seam is documented here and in
+`nullone_analytics_provider_factory.py`, not recovered from raw exception
+text). It never fabricates a Zernio bootstrap attempt.
 """
 from __future__ import annotations
 

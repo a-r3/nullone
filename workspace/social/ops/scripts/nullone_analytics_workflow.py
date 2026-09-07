@@ -56,9 +56,11 @@ from nullone_run_outcome import (
     validate_result_structure,
 )
 from nullone_scheduled_workflow_support import (
+    NOTIFICATION_RESULT_INVALID_MESSAGE,
     ScheduledWorkflowSupportError,
     derive_local_date,
     results_agree,
+    safe_notification_result_context,
     safe_trigger_context,
     validate_notification_outcome,
 )
@@ -324,15 +326,22 @@ def run_analytics_workflow(
 
         try:
             notification_status = validate_notification_outcome(notification_outcome)
-        except ScheduledWorkflowSupportError as exc:
+        except ScheduledWorkflowSupportError:
+            # Deliberately never interpolates the rejected notification_outcome
+            # (or the raised exception's text derived from it) into
+            # reason_text: an injected notifier's return is caller-controlled
+            # and must never become a channel for echoing arbitrary content
+            # into application/operator output. Only safe, value-free type
+            # names go into context.
             return _notification_failed(
                 reason_code="NOTIFICATION_RESULT_INVALID",
-                reason_text=f"Notifier returned an invalid result: {exc}",
+                reason_text=NOTIFICATION_RESULT_INVALID_MESSAGE,
                 occurrence_id=occurrence_id,
                 run_id=expected_run_id,
                 persisted_result=persisted_result,
                 result_file=persisted_file,
                 analytics_date=analytics_date,
+                context=safe_notification_result_context(notification_outcome),
             )
 
     return AnalyticsWorkflowResult(
@@ -795,6 +804,36 @@ def self_test() -> int:
             assert result.reason_code == "NOTIFICATION_RESULT_INVALID", (index, result)
             assert result.notification_status is None, (index, result)
             assert result.domain_outcome == "SUCCEEDED", (index, result)
+
+        # 16b. A malformed notifier result carrying secret-like content in
+        #      its (rejected) status value must never surface that content
+        #      into reason_text or context -- only the stable generic
+        #      NOTIFICATION_RESULT_INVALID_MESSAGE and safe type names.
+        secret_markers = ["FAKE-SECRET-zat_123456", "token=FAKE_SECRET"]
+        leak_cases = [
+            {"status": "FAKE-SECRET-zat_123456"},
+            {"status": "token=FAKE_SECRET"},
+            {"status": ["FAKE_SECRET"]},
+        ]
+        for index, bad_outcome in enumerate(leak_cases):
+            result = run_analytics_workflow(
+                make_trigger(external_occurrence_id=f"openclaw-occ-analytics-notifier-leak-{index}"),
+                provider_factory=success_factory,
+                notifier=lambda _r, _bad=bad_outcome: _bad,
+                artifact_root=root / f"case16b-{index}",
+                output_root=root / f"case16b-{index}" / "run-outcomes",
+            )
+            assert result.application_execution == "FAILED", (index, result)
+            assert result.reason_code == "NOTIFICATION_RESULT_INVALID", (index, result)
+            assert result.reason_text == NOTIFICATION_RESULT_INVALID_MESSAGE, (index, result)
+            context_dump = repr(result.context)
+            for marker in secret_markers:
+                assert marker not in result.reason_text, (index, result.reason_text)
+                assert marker not in context_dump, (index, result.context)
+            assert result.context == {
+                "result_type": "dict",
+                "status_type": type(bad_outcome["status"]).__name__,
+            }, (index, result.context)
 
         legitimate_cases = [
             "FAILED", "UNKNOWN", "ALREADY_FAILED", "ALREADY_UNKNOWN",

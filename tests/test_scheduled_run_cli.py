@@ -379,5 +379,90 @@ class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
             self.assertEqual(len(transport_calls), 1)
 
 
+class MalformedNotifierLeakRegressionTests(unittest.TestCase):
+    """Proves a malformed notifier result's secret-like content never
+    reaches the CLI's own printed output (`cli._report`'s
+    `REASON_TEXT=...` line), matching the same guarantee already proven at
+    the workflow-result level in `nullone_morning_workflow.py`/
+    `nullone_analytics_workflow.py`'s own `self_test()`."""
+
+    SECRET_MARKERS = ("FAKE-SECRET-zat_123456", "token=FAKE_SECRET")
+    LEAK_CASES = (
+        {"status": "FAKE-SECRET-zat_123456"},
+        {"status": "token=FAKE_SECRET"},
+        {"status": ["FAKE_SECRET"]},
+    )
+
+    def _assert_report_output_is_clean(self, result) -> None:
+        import contextlib
+        import io
+
+        self.assertEqual(result.application_execution, "FAILED")
+        self.assertEqual(result.reason_code, "NOTIFICATION_RESULT_INVALID")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            exit_code = cli._report(result)
+        captured = buf.getvalue()
+
+        self.assertNotEqual(exit_code, 0)
+        for marker in self.SECRET_MARKERS:
+            self.assertNotIn(marker, captured, captured)
+
+    def test_morning_malformed_notifier_leak_absent_from_cli_output(self):
+        import tempfile
+
+        for index, bad_outcome in enumerate(self.LEAK_CASES):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                artifact_root = root / "artifacts"
+
+                def succeed():
+                    board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
+                    board.parent.mkdir(parents=True, exist_ok=True)
+                    board.write_text("# board\n", encoding="utf-8")
+
+                trigger = make_trigger(
+                    workflow_id="morning-editorial",
+                    external_occurrence_id=f"cli-morning-notifier-leak-{index}",
+                    scheduled_for="2026-09-08T04:30:00Z",
+                    triggered_at="2026-09-08T04:30:02Z",
+                )
+                result = run_morning_workflow(
+                    trigger,
+                    invoke_provider=succeed,
+                    notifier=lambda _r, _bad=bad_outcome: _bad,
+                    artifact_root=artifact_root,
+                    output_root=root / "run-outcomes",
+                    sleep=lambda _s: None,
+                )
+                self._assert_report_output_is_clean(result)
+
+    def test_analytics_malformed_notifier_leak_absent_from_cli_output(self):
+        import tempfile
+
+        for index, bad_outcome in enumerate(self.LEAK_CASES):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+
+                def unauthorized_factory():
+                    raise ConnectorUnauthorizedError("missing token")
+
+                trigger = make_trigger(external_occurrence_id=f"cli-analytics-notifier-leak-{index}")
+                # A BLOCKED domain outcome (unauthorized provider) still
+                # reaches the #30 notifier boundary -- see
+                # SchedulerDomainSeparationExitCodeTests above -- so this
+                # exercises the same NOTIFICATION_RESULT_INVALID path
+                # without needing a real successful connector fixture.
+                result = run_analytics_workflow(
+                    trigger,
+                    provider_factory=unauthorized_factory,
+                    notifier=lambda _r, _bad=bad_outcome: _bad,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                )
+                self._assert_report_output_is_clean(result)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

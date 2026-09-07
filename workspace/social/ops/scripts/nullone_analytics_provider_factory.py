@@ -41,9 +41,14 @@ class ProviderSecretWiringPendingError(RuntimeError):
     `BLOCKED` #27 result, which would misleadingly report that a *real*
     Zernio bootstrap attempt was made. This is a distinct, uncaught
     orchestration condition instead -- `AnalyticsWorkflow` reports it as a
-    scheduler/application execution-level failure (`RUNTIME_CRASHED`,
-    reason text carrying this exact reason code), never as a domain
-    outcome, and no #27 result is fabricated.
+    scheduler/application execution-level failure
+    (`reason_code=RUNTIME_CRASHED`, `context.error_type=
+    ProviderSecretWiringPendingError`), never as a domain outcome, and no
+    #27 result is fabricated. This exception's own message (constructed
+    below) is never included in that reported `reason_text`/`context` --
+    only the exception's stable class name is -- so the exact pending-#61
+    fact is documented statically here and at the CLI docstring, never
+    recovered through raw exception text.
     """
 
 

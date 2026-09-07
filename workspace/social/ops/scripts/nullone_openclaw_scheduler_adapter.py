@@ -66,17 +66,45 @@ own stable `id` plus the exact intended `scheduled_for` instant -- values
 a caller can in principle supply deterministically ahead of any particular
 execution attempt, unlike a UUID OpenClaw only mints during execution.
 
-Confirmed gap (documented, not guessed around): `openclaw cron add/edit
---help`'s documented `--command*` flags do not show an environment variable
-that reliably carries the *intended* cron-tick instant to a command-payload
-job, as distinct from wall-clock execution time. Until #37 activation
-confirms exactly what a `--command` job's environment receives from a live
-Gateway invocation, the caller of this adapter (the future #37 job wiring,
-not this module) is responsible for supplying the exact intended scheduled
-instant as `scheduled_for`. This adapter never substitutes the current time
-for it: `map_openclaw_occurrence` fails closed if `scheduled_for` is
-missing/blank, matching the scheduler-invocation contract's "no
-current-time substitution" rule.
+CONFIRMED BLOCKER (2026-09-07, upgraded from an earlier `--help`-only
+inference to direct source verification against the installed OpenClaw
+2026.8.2 package -- `docs/deployment/59-scheduled-workflows-deployment.md`
+carries the full citation trail): command-payload jobs do NOT receive the
+intended scheduled occurrence through any argv, environment, or stdin
+channel. `dist/server-cron-DtqkVgKM.js`'s `runCronCommandJob` (function at
+line 209; the process-spawn call at lines 223-231) passes `payload.env`/
+`payload.input`/`payload.argv` straight through to the spawned process
+completely unmodified -- no `runAtMs`, `dueAt`, or any other scheduler-
+owned occurrence value is merged in at execution time. Those `payload.env`/
+`payload.input` values themselves originate exclusively from
+`dist/cron-cli-DqFGSvBK.js`'s `parseCronCommandEnv` (line 57, a literal
+`KEY=VALUE` string parser with no templating/interpolation of any kind)
+fed by the static `--command-env`/`--command-input` CLI flags captured once
+at job authoring/edit time (lines 748-749); `docs/automation/cron-jobs.md`
+("Command payloads") documents the same flags as static process-environment/
+stdin overrides. `runAtMs` is tracked by the scheduler only for its own
+diagnostics (failure-alert text, delivery message timestamps, the
+`cron:<jobId>:<startedAt>` run-history key) -- never passed into the
+command process. A manual `openclaw automations run <job-id>` force-run
+goes through this exact same `runCronCommandJob` path with the exact same
+static `payload.env`/`payload.input`, so neither a scheduled nor a manual
+invocation ever receives the caller's intended tick.
+
+Because of this, #59's OpenClaw trigger edge cannot be completed today:
+this adapter's `map_openclaw_occurrence` correctly requires the caller to
+already have the exact intended `scheduled_for` in hand and fails closed
+(`SchedulerInvocationError`) if it is missing/blank rather than
+substituting the current time -- but no OpenClaw 2026.8.2 command-payload
+mechanism exists for a future `--command nullone-scheduled-run.py ...` job
+to obtain that value itself. Supplying it would require inventing a
+substitute (current wall clock, `runAtMs`, nearest cron tick, or similar),
+which this adapter and this repository deliberately refuse to do (see
+`docs/deployment/59-scheduled-workflows-deployment.md`'s "OpenClaw trigger
+edge: CONFIRMED BLOCKED" section for the full acceptance-gap writeup).
+Status: `#59_OPENCLAW_TRIGGER_EDGE = BLOCKED`, reason
+`EXACT_INTENDED_SCHEDULED_OCCURRENCE_NOT_EXPOSED_TO_COMMAND_PAYLOAD`. This
+is a distinct, narrower problem from #37 (live job-payload migration/
+activation) and must not be silently folded into it or into #61.
 """
 from __future__ import annotations
 

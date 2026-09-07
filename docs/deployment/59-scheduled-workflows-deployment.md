@@ -91,18 +91,102 @@ is a reviewed design choice standing in for evidence this repository does
 not have (no same-occurrence retry was observed in the 2026-09-07
 inspection window), not a claim of direct proof.
 
-**Confirmed gap, documented rather than guessed around**: `openclaw cron
-add/edit --help`'s documented `--command*` flags (the job type #37 would
-use to invoke `nullone-scheduled-run.py` directly, replacing the current
-prompt-only `agentTurn` payload) do not show an environment variable that
-reliably carries the *intended* cron-tick instant to a command-payload job,
-as distinct from wall-clock execution time. Before #37 activates a real
-`--command` job pointed at this repository's CLI, the exact wiring that
-supplies `scheduled_for` (the OpenClaw edge caller's responsibility, not
-`nullone_openclaw_scheduler_adapter.py`'s) must be confirmed against the
-live Gateway's actual command-job invocation environment at that time --
-never guessed from this document. Status:
-`UNPROVEN_LIVE / DEFERRED_TO_#37`.
+## OpenClaw trigger edge: CONFIRMED BLOCKED
+
+This section supersedes an earlier, weaker "confirmed gap... Status:
+`UNPROVEN_LIVE / DEFERRED_TO_#37`" note that was based only on `openclaw
+cron add/edit --help`'s flag listing. On 2026-09-07 this was upgraded to
+direct, read-only source inspection of the exact installed OpenClaw
+**2026.8.2** npm package (`~/.nvm/versions/node/v22.23.2/lib/node_modules/
+openclaw`), specifically its command-payload execution and CLI flag-parsing
+code and the matching prose in `docs/automation/cron-jobs.md`. No job was
+created, edited, enabled, disabled, removed, or run; no file in that
+package was modified.
+
+**Question asked**: does a scheduled command-payload job's process (argv,
+environment, or stdin) receive any scheduler-owned metadata identifying
+the *intended* logical scheduled occurrence (a due/scheduled tick, as
+distinct from actual execution start time)?
+
+**Answer: NO**, confirmed directly in source, not inferred:
+
+- `dist/server-cron-DtqkVgKM.js`, function `runCronCommandJob` (defined at
+  line 209): the actual process-spawn options built at lines 223-231 are
+
+  ```js
+  const result = await runCommandWithTimeout(payload.argv, {
+      timeoutMs: secondsToMs(payload.timeoutSeconds) ?? DEFAULT_COMMAND_TIMEOUT_MS,
+      ...payload.cwd ? { cwd: payload.cwd } : {},
+      ...payload.input !== void 0 ? { input: payload.input } : {},
+      ...payload.env ? { env: payload.env } : {},
+      ...
+  });
+  ```
+
+  `payload.argv`/`payload.input`/`payload.env` are passed through
+  completely unmodified from the stored job definition. Nothing here merges
+  in `runAtMs`, a due/scheduled timestamp, or any other scheduler-owned
+  occurrence value.
+- The call site (`runCommandJob: async ({ job, abortSignal }) => { const
+  result = await runCronCommandJob({ job, abortSignal, nowMs: Date.now });
+  ...`, line 3212) passes the stored `job` object as-is; the scheduler's own
+  `runAtMs` for that execution is tracked separately (used only for
+  `job.state.runningAtMs`, failure-alert text, and delivery-message
+  timestamps -- confirmed at lines 2410-2419 and 2548 of the same file --
+  never merged into `payload.env`/`payload.input`/`payload.argv`).
+- `payload.env`/`payload.input` themselves originate exclusively from the
+  CLI layer: `dist/cron-cli-DqFGSvBK.js`'s `parseCronCommandEnv` (line 57)
+  is a literal `KEY=VALUE` string parser with no templating or
+  interpolation syntax of any kind, fed by the static `--command-env`/
+  `--command-input` flags captured once at `automations create`/`edit` time
+  (`env: parseCronCommandEnv(opts.commandEnv)`, `input: typeof
+  opts.commandInput === "string" ? opts.commandInput : void 0`, lines
+  748-749). `docs/automation/cron-jobs.md`'s "Command payloads" section
+  documents the identical contract in prose: "Optional `--command-env
+  KEY=VALUE` (repeatable), `--command-input`, ... control the process
+  environment, stdin, and output bounds" -- author-supplied, static,
+  captured at job-authoring time, not scheduler-populated per run.
+- Manual runs use the identical code path: `docs/cli/cron.md`'s "Manual
+  runs" section confirms `openclaw automations run <job-id>` force-runs
+  through the same `runCronCommandJob`/stored-`payload` mechanism, so a
+  manual run and a genuinely scheduled run are indistinguishable from the
+  command process's own point of view -- neither ever receives an intended-
+  occurrence value distinct from whatever static `--command-env`/
+  `--command-input` the job was authored with.
+
+**Conclusion**: no OpenClaw 2026.8.2 command-payload mechanism exists for a
+future `--command nullone-scheduled-run.py morning --trigger-file <path>`
+job to learn its own intended `scheduled_for` from the Gateway at
+invocation time. The only values available to such a process are: (a)
+whatever static text was baked into `--command-env`/`--command-input` when
+the job was created/edited (which cannot itself be a *future* scheduled
+tick, since job authoring happens once, long before any particular
+occurrence fires), and (b) ordinary process/OS state (wall clock, etc.).
+Per this document's and `nullone_openclaw_scheduler_adapter.py`'s explicit
+design rule, none of those are acceptable substitutes for the exact
+intended scheduled occurrence -- inventing one (current wall clock,
+`runAtIso`, nearest cron tick, file mtime, session UUID, "probably this
+day's 08:30") would silently weaken the `nullone.scheduler-invocation.v1`
+contract's identity/replay guarantees, so this repository does not do that.
+
+```text
+#59_OPENCLAW_TRIGGER_EDGE = BLOCKED
+reason = EXACT_INTENDED_SCHEDULED_OCCURRENCE_NOT_EXPOSED_TO_COMMAND_PAYLOAD
+```
+
+This is a distinct, narrower problem than #37 (live job-payload migration/
+activation, which presupposes a working command-payload wiring) and must
+not be silently folded into #37 or into #61. Resolving it requires an
+explicit, separately reviewed architecture decision -- for example another
+OpenClaw payload surface (a script payload, which runs headlessly with
+access to the owning agent's tools and could in principle read job/run
+state through the `automations`/`cron` API itself, rather than through
+static command env/stdin -- not evaluated here, out of this PR's scope), a
+non-OpenClaw scheduler adapter (e.g. a systemd timer that itself knows and
+supplies the exact intended tick), a reviewed wrapper with a newly
+evaluated deterministic occurrence source, or a narrower amendment to
+issue #59's own acceptance criteria. None of those is implemented by this
+PR.
 
 `nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id,
 openclaw_job_id, scheduled_for, triggered_at)` is a pure function (no I/O,
@@ -110,7 +194,9 @@ no subprocess, no network) deriving `external_occurrence_id =
 f"openclaw-job-{openclaw_job_id}-at-{scheduled_for}"` and computing
 `occurrence_id` via the existing contract rule. It fails closed
 (`SchedulerInvocationError`) if `scheduled_for` is missing/blank rather
-than substituting the current time.
+than substituting the current time -- this remains correct and unchanged;
+the blocker above is about what supplies `scheduled_for` to this function
+in a live OpenClaw command-payload deployment, which is not yet possible.
 
 ## MorningWorkflow
 
@@ -427,8 +513,13 @@ normalized OpenClaw occurrence (job id 0666d47b-..., scheduled_for)
 Would replace the current `agentTurn` payload
 (`"Read social/ops/prompts/morning-editorial.md and execute it exactly."`)
 with a `--command`/`--command-argv` job invoking this repository's CLI.
-Exact `--command-env`/argv wiring for `scheduled_for` remains open pending
-the confirmed gap above.
+**This exact shape cannot be activated today**: per "OpenClaw trigger edge:
+CONFIRMED BLOCKED" above, no OpenClaw 2026.8.2 command-payload mechanism
+supplies `scheduled_for` to the invoked process, and this repository
+deliberately does not substitute a heuristic for it. This is a distinct
+architecture gap from #37's own scope (live job-payload migration/
+activation presupposes a working wiring already exists) and is not
+resolved by #37 alone.
 
 ### Daily Analytics (DESIRED / NOT DEPLOYED)
 
