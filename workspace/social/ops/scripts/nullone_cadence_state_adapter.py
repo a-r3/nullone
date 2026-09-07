@@ -50,7 +50,21 @@ compatibility case, not automatic malformation:
   read-time derived value only, kept alongside (not merged
   indistinguishably into) the original row.
 - A row whose format stays `UNKNOWN` is excluded from both the main and
-  Story format buckets -- it is never invented into either counter.
+  Story format buckets -- it is never invented into either counter. It
+  ALSO never participates in published-ID reconciliation (the mechanism
+  that suppresses a manifest counted elsewhere as "pending" once its
+  own ledger publication is confirmed): only a native or
+  deterministically recovered known-format `PUBLISHED` row can
+  contribute a `manifest_id`/`live_zernio_post_id` there. An
+  `UNKNOWN`-format row can therefore never silently zero out (suppress)
+  a pending manifest it happens to name, and can never manufacture a
+  false cadence gap that way -- regardless of whether the row itself is
+  decision-relevant. Identifier indices (`manifest_id` and
+  `live_zernio_post_id`) also preserve every format seen against each
+  identifier rather than picking one by file order, filename, or
+  modification time; a duplicate identifier recorded against manifests
+  of more than one format is itself ambiguous evidence and resolves to
+  `UNKNOWN`, exactly like conflicting cross-identifier evidence.
 - If an `UNKNOWN`-format row could still be *decision-relevant* --
   its `result == PUBLISHED` and (a) it falls on today's Asia/Baku
   calendar date, or (b) it may still fall inside the configured main or
@@ -262,23 +276,59 @@ def _load_ledger_rows(ledger_path: Path) -> list[tuple[int, dict[str, Any]]]:
 
 def _build_manifest_indices(
     manifests: list[dict[str, Any]],
-) -> tuple[dict[str, dict[str, Any]], dict[str, set[str]]]:
-    manifest_by_id: dict[str, dict[str, Any]] = {}
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Index manifests by identifier, preserving ALL format evidence.
+
+    Both indices map identifier -> set-of-formats, never identifier ->
+    a single manifest. A last-write-wins `dict[id] = manifest` mapping
+    would silently pick one manifest's format when the same identifier
+    appears on more than one manifest file (e.g. a duplicate/corrupt
+    `manifest_id`); preserving the full set lets the caller detect that
+    ambiguity instead of resolving it by file order, filename, or
+    modification time.
+    """
+
+    formats_by_manifest_id: dict[str, set[str]] = {}
     formats_by_live_id: dict[str, set[str]] = {}
 
     for manifest in manifests:
-        manifest_by_id[manifest["manifest_id"]] = manifest
+        formats_by_manifest_id.setdefault(manifest["manifest_id"], set()).add(
+            manifest["format"]
+        )
 
         live_id = manifest["publication"].get("live_zernio_post_id")
         if isinstance(live_id, str) and live_id:
             formats_by_live_id.setdefault(live_id, set()).add(manifest["format"])
 
-    return manifest_by_id, formats_by_live_id
+    return formats_by_manifest_id, formats_by_live_id
+
+
+def _resolve_identifier_format(
+    identifier: Any, formats_by_identifier: dict[str, set[str]]
+) -> tuple[str | None, bool]:
+    """Resolve one identifier against an identifier->formats index.
+
+    Returns `(format, ambiguous)`. `format` is `None` when there is no
+    evidence at all, or when the identifier maps to more than one
+    distinct format (`ambiguous = True` in that case) -- a duplicate
+    identifier recorded against manifests that all agree on one format
+    is NOT ambiguous and resolves normally.
+    """
+
+    if not isinstance(identifier, str) or identifier not in formats_by_identifier:
+        return None, False
+
+    candidates = formats_by_identifier[identifier]
+
+    if len(candidates) == 1:
+        return next(iter(candidates)), False
+
+    return None, True
 
 
 def _resolve_missing_format(
     row: dict[str, Any],
-    manifest_by_id: dict[str, dict[str, Any]],
+    formats_by_manifest_id: dict[str, set[str]],
     formats_by_live_id: dict[str, set[str]],
 ) -> tuple[str | None, str]:
     """Attempt deterministic read-time format recovery for one ledger row.
@@ -287,31 +337,20 @@ def _resolve_missing_format(
     `live_zernio_post_id` linkage (contract section 5). Recovery succeeds
     only when the evidence resolves to exactly one format; any missing,
     conflicting, or internally ambiguous (one identifier matching more
-    than one format across manifests) evidence fails safe to unknown --
-    never a heuristic guess.
+    than one format -- whether across distinct manifests or a duplicated
+    `manifest_id`) evidence fails safe to unknown -- never a heuristic
+    guess, and never picked by file order, filename, or modification
+    time.
     """
 
-    manifest_id = row.get("manifest_id")
-    live_id = row.get("live_zernio_post_id")
+    manifest_id_format, manifest_id_ambiguous = _resolve_identifier_format(
+        row.get("manifest_id"), formats_by_manifest_id
+    )
+    live_id_format, live_id_ambiguous = _resolve_identifier_format(
+        row.get("live_zernio_post_id"), formats_by_live_id
+    )
 
-    manifest_id_format: str | None = None
-    if isinstance(manifest_id, str) and manifest_id in manifest_by_id:
-        manifest_id_format = manifest_by_id[manifest_id]["format"]
-
-    live_id_format: str | None = None
-    live_id_ambiguous = False
-    if isinstance(live_id, str) and live_id in formats_by_live_id:
-        candidates = formats_by_live_id[live_id]
-        if len(candidates) == 1:
-            live_id_format = next(iter(candidates))
-        else:
-            # The same live_zernio_post_id is recorded against manifests
-            # of more than one format: the identifier itself is
-            # ambiguous evidence. Fail safe rather than silently
-            # preferring the other identifier.
-            live_id_ambiguous = True
-
-    if live_id_ambiguous:
+    if manifest_id_ambiguous or live_id_ambiguous:
         return None, FORMAT_SOURCE_UNKNOWN
 
     found = {f for f in (manifest_id_format, live_id_format) if f is not None}
@@ -330,7 +369,7 @@ def _resolve_missing_format(
 
 def _effective_row_format(
     row: dict[str, Any],
-    manifest_by_id: dict[str, dict[str, Any]],
+    formats_by_manifest_id: dict[str, set[str]],
     formats_by_live_id: dict[str, set[str]],
 ) -> tuple[str | None, str]:
     native = row.get("format")
@@ -342,19 +381,19 @@ def _effective_row_format(
     # string are all treated identically: never guessed, only
     # deterministically recovered from authoritative linkage or left
     # UNKNOWN.
-    return _resolve_missing_format(row, manifest_by_id, formats_by_live_id)
+    return _resolve_missing_format(row, formats_by_manifest_id, formats_by_live_id)
 
 
 def _classify_ledger_rows(
     ledger_rows: list[tuple[int, dict[str, Any]]],
-    manifest_by_id: dict[str, dict[str, Any]],
+    formats_by_manifest_id: dict[str, set[str]],
     formats_by_live_id: dict[str, set[str]],
 ) -> list[dict[str, Any]]:
     classified: list[dict[str, Any]] = []
 
     for lineno, row in ledger_rows:
         effective_format, source = _effective_row_format(
-            row, manifest_by_id, formats_by_live_id
+            row, formats_by_manifest_id, formats_by_live_id
         )
         classified.append(
             {
@@ -368,6 +407,20 @@ def _classify_ledger_rows(
     return classified
 
 
+def _validate_spacing_minutes(value: Any, field: str) -> int:
+    # Mirrors nullone_cadence_controller._non_negative_int() exactly
+    # (non-negative int, bool excluded) without importing/duplicating
+    # its full config-merge machinery: this adapter only ever needs
+    # these two scalar values ahead of controller evaluation, for
+    # issue #60 decision-relevance. A malformed value here must fail
+    # deterministically rather than raise an unrelated TypeError deeper
+    # in the max()/arithmetic below or silently coerce into an unsafe
+    # classification.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        _fail(f"{field} must be a non-negative integer, got {value!r}")
+    return value
+
+
 def _spacing_minutes(config: dict[str, Any] | None) -> tuple[int, int]:
     main = _CONTROLLER_DEFAULT_CONFIG["main_min_spacing_minutes"]
     story = _CONTROLLER_DEFAULT_CONFIG["story_min_spacing_minutes"]
@@ -375,6 +428,9 @@ def _spacing_minutes(config: dict[str, Any] | None) -> tuple[int, int]:
     if config:
         main = config.get("main_min_spacing_minutes", main)
         story = config.get("story_min_spacing_minutes", story)
+
+    main = _validate_spacing_minutes(main, "config.main_min_spacing_minutes")
+    story = _validate_spacing_minutes(story, "config.story_min_spacing_minutes")
 
     return main, story
 
@@ -440,10 +496,29 @@ def _fail_unresolved_decision_relevant(entries: list[dict[str, Any]]) -> None:
     )
 
 
-def _index_published_ids(ledger_rows: list[dict[str, Any]]) -> frozenset[str]:
+def _index_published_ids(classified_rows: list[dict[str, Any]]) -> frozenset[str]:
+    """Identifiers that a PUBLISHED row has confirmed as audience-facing.
+
+    Consumes the classified (not raw) ledger representation: an
+    UNKNOWN-format row -- native format could not be read, and
+    read-time recovery from manifest linkage did not resolve to exactly
+    one format -- contributes NO identifier here, even if it names a
+    `manifest_id`/`live_zernio_post_id` and even if `result ==
+    PUBLISHED`. Otherwise such a row could silently reconcile (and thus
+    suppress) an unrelated or wrongly-linked pending manifest -- exactly
+    the false-gap risk issue #60 must prevent. A native or
+    deterministically recovered known-format PUBLISHED row still
+    reconciles its own manifest exactly as before.
+    """
+
     ids: set[str] = set()
 
-    for row in ledger_rows:
+    for item in classified_rows:
+        if item["effective_format"] is None:
+            continue
+
+        row = item["row"]
+
         if row.get("result") != "PUBLISHED":
             continue
 
@@ -597,8 +672,10 @@ def collect_format_loads(
         state_root=state_root, now=now, timezone_name=timezone_name
     )
 
-    manifest_by_id, formats_by_live_id = _build_manifest_indices(manifests)
-    classified = _classify_ledger_rows(ledger_rows, manifest_by_id, formats_by_live_id)
+    formats_by_manifest_id, formats_by_live_id = _build_manifest_indices(manifests)
+    classified = _classify_ledger_rows(
+        ledger_rows, formats_by_manifest_id, formats_by_live_id
+    )
 
     main_spacing, story_spacing = _spacing_minutes(config)
 
@@ -619,7 +696,7 @@ def collect_format_loads(
     if relevant_unresolved:
         _fail_unresolved_decision_relevant(relevant_unresolved)
 
-    published_ids = _index_published_ids([row for _, row in ledger_rows])
+    published_ids = _index_published_ids(classified)
 
     main_load = _format_load(
         classified_rows=classified,
@@ -702,8 +779,10 @@ def analyze_ledger_compatibility(
         state_root=state_root, now=now, timezone_name=timezone_name
     )
 
-    manifest_by_id, formats_by_live_id = _build_manifest_indices(manifests)
-    classified = _classify_ledger_rows(ledger_rows, manifest_by_id, formats_by_live_id)
+    formats_by_manifest_id, formats_by_live_id = _build_manifest_indices(manifests)
+    classified = _classify_ledger_rows(
+        ledger_rows, formats_by_manifest_id, formats_by_live_id
+    )
 
     main_spacing, story_spacing = _spacing_minutes(config)
 

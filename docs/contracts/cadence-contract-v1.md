@@ -587,10 +587,18 @@ written before this repository required every row to carry `format`.
   reports alongside its source, never merged indistinguishably into the
   row as if it had always been native.
 - **Unresolved format**: missing, conflicting, or ambiguous evidence
-  (including one identifier matching manifests of more than one format)
+  (including one identifier — a `manifest_id` or a
+  `live_zernio_post_id` — matching manifests of more than one format,
+  whether across distinct manifests or a duplicated `manifest_id`)
   leaves a row's format `UNKNOWN`. An `UNKNOWN`-format row is excluded
   from both the main and Story buckets — it is never guessed into
-  either.
+  either — and never participates in published-ID reconciliation
+  either: only a native or deterministically recovered known-format
+  `PUBLISHED` row can contribute a `manifest_id`/`live_zernio_post_id`
+  toward suppressing a pending manifest counted elsewhere. An
+  unresolved row therefore never suppresses manifest pending state and
+  cannot manufacture a false gap that way, regardless of whether the
+  row itself is decision-relevant.
 - **Decision-relevant vs. decision-irrelevant uncertainty**: an
   `UNKNOWN`-format row only matters if it could still change today's
   counters or the current anti-burst spacing decision, i.e. its

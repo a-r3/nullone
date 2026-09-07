@@ -1011,5 +1011,420 @@ class ReadOnlyProofTests(unittest.TestCase):
             self.assertEqual(before_hash, after_hash)
 
 
+class DuplicateManifestIdEvidenceTests(unittest.TestCase):
+    """Hardening finding A: duplicate manifest_id must not be resolved by
+    file order/filename/mtime -- it must preserve all format evidence."""
+
+    def test_duplicate_same_format_manifest_id_still_recovers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            # Two manifest files both claim manifest_id "same", agreeing
+            # on STORY. This is unusual but not itself ambiguous: the
+            # identifier's evidence set is {STORY}, one format.
+            write_manifest(manifest_dir, "same", fmt="STORY")
+            (manifest_dir / "same-duplicate.json").write_text(
+                (manifest_dir / "same.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-01-01T09:00:00+04:00",
+                    "manifest_id": "same",
+                },
+            )
+
+            report = analyze_ledger_compatibility(state_root=root, now=NOW)
+            self.assertEqual(report["recovered_format_rows"], 1)
+            self.assertEqual(report["recovered_rows"][0]["effective_format"], "STORY")
+
+    def test_duplicate_conflicting_format_manifest_id_is_unresolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            # Two manifest files share manifest_id "same" but disagree on
+            # format: FEED vs STORY. Whichever file glob/sort happens to
+            # read last must NOT silently win.
+            write_manifest(manifest_dir, "same", fmt="FEED")
+            (manifest_dir / "aaa-conflict.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "nullone.production.v1",
+                        "manifest_id": "same",
+                        "format": "STORY",
+                        "review": {"state": "DRAFT_CREATED", "zernio_draft_id": None},
+                        "approval": {"first_stage": False, "final_publish": False},
+                        "publication": {"state": "NOT_REQUESTED", "live_zernio_post_id": None},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-01-01T09:00:00+04:00",  # old/irrelevant
+                    "manifest_id": "same",
+                },
+            )
+
+            report = analyze_ledger_compatibility(state_root=root, now=NOW)
+            self.assertEqual(report["recovered_format_rows"], 0)
+            self.assertEqual(report["unknown_format_rows"], 1)
+
+            # Old and irrelevant: a normal read still succeeds.
+            loads = collect_format_loads(state_root=root, now=NOW)
+            self.assertEqual(loads["main_load"]["published_today"], 0)
+            self.assertEqual(loads["story_load"]["published_today"], 0)
+
+    def test_duplicate_conflicting_manifest_id_today_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            write_manifest(manifest_dir, "same", fmt="FEED")
+            (manifest_dir / "aaa-conflict.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "nullone.production.v1",
+                        "manifest_id": "same",
+                        "format": "STORY",
+                        "review": {"state": "DRAFT_CREATED", "zernio_draft_id": None},
+                        "approval": {"first_stage": False, "final_publish": False},
+                        "publication": {"state": "NOT_REQUESTED", "live_zernio_post_id": None},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-09-06T08:00:00+04:00",  # today
+                    "manifest_id": "same",
+                },
+            )
+
+            with self.assertRaises(CadenceStateError):
+                collect_format_loads(state_root=root, now=NOW)
+
+
+class PublishedIdReconciliationHardeningTests(unittest.TestCase):
+    """Hardening finding B: unresolved rows must never contribute
+    published_ids, and therefore must never suppress a pending manifest
+    or manufacture a false cadence gap."""
+
+    def test_unresolved_row_contributes_zero_published_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            write_manifest(manifest_dir, "m-feed", fmt="FEED")
+            write_manifest(
+                manifest_dir, "m-story", fmt="STORY", live_zernio_post_id="live-story"
+            )
+
+            # Conflicting evidence (manifest_id -> FEED, live id -> STORY)
+            # -> UNKNOWN, and old enough to be decision-irrelevant.
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-01-01T09:00:00+04:00",
+                    "manifest_id": "m-feed",
+                    "live_zernio_post_id": "live-story",
+                },
+            )
+
+            report = analyze_ledger_compatibility(state_root=root, now=NOW)
+            self.assertEqual(report["unknown_format_rows"], 1)
+
+    def test_old_unresolved_conflicting_row_never_suppresses_pending_manifests(self):
+        # This is the regression that would FAIL on pre-hardening head
+        # 3ce74944deb0cead24bfcbcb999fb0a3bcec5753: raw published_ids
+        # indexing there would add both "m-feed" and "live-story" to
+        # published_ids from this single UNKNOWN row, silently
+        # reconciling (and zeroing out) both pending manifests below.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            write_manifest(
+                manifest_dir,
+                "m-feed",
+                fmt="FEED",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=False,
+            )
+            write_manifest(
+                manifest_dir,
+                "m-story",
+                fmt="STORY",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=False,
+                live_zernio_post_id="live-story",
+            )
+
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-01-01T09:00:00+04:00",  # old + irrelevant
+                    "manifest_id": "m-feed",
+                    "live_zernio_post_id": "live-story",
+                },
+            )
+
+            loads = collect_format_loads(state_root=root, now=NOW)
+            self.assertEqual(loads["main_load"]["pending"], 1)
+            self.assertEqual(loads["story_load"]["pending"], 1)
+
+    def test_old_unresolved_conflicting_row_cannot_produce_false_prepare(self):
+        # Controller-level proof of the same fixture: with correct
+        # pending accounting (1 pending each) and a config whose minimums
+        # are already met by that one pending item each (effective_load
+        # == target_min == 1 => gap == False for both), the deterministic
+        # evaluation must not recommend PREPARE_MAIN_CANDIDATE or
+        # PREPARE_STORY. Pre-hardening, the same fixture's false
+        # published_id suppression would have zeroed both pending counts
+        # (effective_load 0 < target_min 1 => gap True for both) and,
+        # with both candidate-availability flags true and neither format
+        # recently active/quiet, produced PREPARE_MAIN_CANDIDATE instead
+        # (main is checked before Story).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            write_manifest(
+                manifest_dir,
+                "m-feed",
+                fmt="FEED",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=False,
+            )
+            write_manifest(
+                manifest_dir,
+                "m-story",
+                fmt="STORY",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=False,
+                live_zernio_post_id="live-story",
+            )
+
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-01-01T09:00:00+04:00",
+                    "manifest_id": "m-feed",
+                    "live_zernio_post_id": "live-story",
+                },
+            )
+
+            config = {"main_target_min": 1, "story_target_min": 1}
+            request = assemble_cadence_request(
+                state_root=root,
+                now=NOW,
+                candidate_availability={
+                    "main_quality_candidate_available": True,
+                    "story_quality_candidate_available": True,
+                },
+                config=config,
+            )
+            result = evaluate_cadence(request)
+
+            self.assertNotEqual(result["recommendation"], "PREPARE_MAIN_CANDIDATE")
+            self.assertNotEqual(result["recommendation"], "PREPARE_STORY")
+            self.assertEqual(result["recommendation"], "NO_ACTION")
+            self.assertEqual(result["reason_code"], "TARGETS_MET")
+
+    def test_recovered_known_format_row_still_reconciles_its_own_manifest(self):
+        # Section 6: the fix must not disable reconciliation outright --
+        # a deterministically recovered row must still perform the
+        # existing stale-pending-manifest-vs-confirmed-publish precedence.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+
+            write_manifest(
+                manifest_dir,
+                "m-feed",
+                fmt="FEED",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=True,
+                publication_state="PUBLISH_ACCEPTED",
+            )
+            append_raw_ledger_row(
+                ledger_path,
+                {
+                    "result": "PUBLISHED",
+                    "timestamp": "2026-09-06T09:00:00+04:00",  # today
+                    "manifest_id": "m-feed",
+                },
+            )
+
+            report = analyze_ledger_compatibility(state_root=root, now=NOW)
+            self.assertEqual(report["recovered_format_rows"], 1)
+            self.assertEqual(report["recovered_rows"][0]["effective_format"], "FEED")
+
+            loads = collect_format_loads(state_root=root, now=NOW)
+            self.assertEqual(loads["main_load"]["published_today"], 1)
+            self.assertEqual(loads["main_load"]["pending"], 0)
+
+    def test_native_feed_reconciliation_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+            write_manifest(
+                manifest_dir,
+                "native-feed",
+                fmt="FEED",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=True,
+                publication_state="PUBLISH_ACCEPTED",
+                live_zernio_post_id="live-native-feed",
+            )
+            append_ledger_row(
+                ledger_path,
+                fmt="FEED",
+                result="PUBLISHED",
+                timestamp="2026-09-06T09:00:00+04:00",
+                manifest_id="native-feed",
+                live_zernio_post_id="live-native-feed",
+            )
+
+            loads = collect_format_loads(state_root=root, now=NOW)
+            self.assertEqual(loads["main_load"]["published_today"], 1)
+            self.assertEqual(loads["main_load"]["pending"], 0)
+
+    def test_native_carousel_reconciliation_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+            write_manifest(
+                manifest_dir,
+                "native-carousel",
+                fmt="CAROUSEL",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=True,
+                publication_state="PUBLISH_ACCEPTED",
+            )
+            append_ledger_row(
+                ledger_path,
+                fmt="CAROUSEL",
+                result="PUBLISHED",
+                timestamp="2026-09-06T09:00:00+04:00",
+                manifest_id="native-carousel",
+            )
+
+            loads = collect_format_loads(state_root=root, now=NOW)
+            self.assertEqual(loads["main_load"]["published_today"], 1)
+            self.assertEqual(loads["main_load"]["pending"], 0)
+
+    def test_native_story_reconciliation_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            ledger_path = root / "state/publish-ledger.jsonl"
+            write_manifest(
+                manifest_dir,
+                "native-story",
+                fmt="STORY",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=True,
+                publication_state="PUBLISH_ACCEPTED",
+                live_zernio_post_id="live-native-story",
+            )
+            append_ledger_row(
+                ledger_path,
+                fmt="STORY",
+                result="PUBLISHED",
+                timestamp="2026-09-06T09:00:00+04:00",
+                manifest_id="native-story",
+                live_zernio_post_id="live-native-story",
+            )
+
+            loads = collect_format_loads(state_root=root, now=NOW)
+            self.assertEqual(loads["story_load"]["published_today"], 1)
+            self.assertEqual(loads["story_load"]["pending"], 0)
+
+
+class SpacingConfigValidationTests(unittest.TestCase):
+    """Item 12: malformed spacing config values must fail deterministically,
+    never raise an unrelated TypeError or produce an unsafe classification."""
+
+    def test_non_integer_main_spacing_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "ops/manifests").mkdir(parents=True)
+
+            with self.assertRaises(CadenceStateError):
+                collect_format_loads(
+                    state_root=root,
+                    now=NOW,
+                    config={"main_min_spacing_minutes": "not-a-number"},
+                )
+
+    def test_boolean_story_spacing_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "ops/manifests").mkdir(parents=True)
+
+            with self.assertRaises(CadenceStateError):
+                collect_format_loads(
+                    state_root=root,
+                    now=NOW,
+                    config={"story_min_spacing_minutes": True},
+                )
+
+    def test_negative_main_spacing_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "ops/manifests").mkdir(parents=True)
+
+            with self.assertRaises(CadenceStateError):
+                collect_format_loads(
+                    state_root=root,
+                    now=NOW,
+                    config={"main_min_spacing_minutes": -5},
+                )
+
+    def test_valid_integer_spacing_overrides_are_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "ops/manifests").mkdir(parents=True)
+
+            # Must not raise.
+            collect_format_loads(
+                state_root=root,
+                now=NOW,
+                config={"main_min_spacing_minutes": 30, "story_min_spacing_minutes": 15},
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
