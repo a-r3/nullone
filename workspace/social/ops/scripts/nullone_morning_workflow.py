@@ -54,6 +54,7 @@ from nullone_scheduled_workflow_support import (
     derive_local_date,
     results_agree,
     safe_trigger_context,
+    validate_notification_outcome,
 )
 from nullone_scheduler_invocation import SchedulerInvocationError, accept_workflow_trigger
 
@@ -113,6 +114,37 @@ def _failed(
         result_file=None,
         notification_status=None,
         reconciliation_required=reconciliation_required,
+        reason_code=reason_code,
+        reason_text=reason_text,
+        board_date=board_date,
+        context=context or {},
+    )
+
+
+def _notification_failed(
+    *,
+    reason_code: str,
+    reason_text: str,
+    occurrence_id: str,
+    run_id: str,
+    persisted_result: dict[str, Any],
+    result_file: Path,
+    board_date: str | None,
+    context: dict[str, Any] | None = None,
+) -> MorningWorkflowResult:
+    """A #27 result was established/validated/reconciled, but the
+    notification decision itself could not be trusted. Distinct from
+    `_failed()`: domain_outcome/result_file are known-good here and must
+    still be reported."""
+
+    return MorningWorkflowResult(
+        application_execution="FAILED",
+        domain_outcome=persisted_result["domain_outcome"],
+        run_id=run_id,
+        occurrence_id=occurrence_id,
+        result_file=str(result_file),
+        notification_status=None,
+        reconciliation_required=False,
         reason_code=reason_code,
         reason_text=reason_text,
         board_date=board_date,
@@ -260,24 +292,29 @@ def run_morning_workflow(
         try:
             notification_outcome = notifier(persisted_result)
         except Exception as exc:  # noqa: BLE001 - unsafe/corrupt notifier state, never silently retried
-            return MorningWorkflowResult(
-                application_execution="FAILED",
-                domain_outcome=persisted_result["domain_outcome"],
-                run_id=expected_run_id,
-                occurrence_id=occurrence_id,
-                result_file=str(persisted_file),
-                notification_status=None,
-                reconciliation_required=False,
+            return _notification_failed(
                 reason_code="NOTIFICATION_STATE_UNSAFE",
-                reason_text=f"Notification orchestration could not safely proceed: {exc}",
+                reason_text="Notification orchestration could not safely proceed.",
+                occurrence_id=occurrence_id,
+                run_id=expected_run_id,
+                persisted_result=persisted_result,
+                result_file=persisted_file,
                 board_date=board_date,
+                context={"error_type": type(exc).__name__},
             )
 
-        notification_status = (
-            notification_outcome.get("status")
-            if isinstance(notification_outcome, dict)
-            else None
-        )
+        try:
+            notification_status = validate_notification_outcome(notification_outcome)
+        except ScheduledWorkflowSupportError as exc:
+            return _notification_failed(
+                reason_code="NOTIFICATION_RESULT_INVALID",
+                reason_text=f"Notifier returned an invalid result: {exc}",
+                occurrence_id=occurrence_id,
+                run_id=expected_run_id,
+                persisted_result=persisted_result,
+                result_file=persisted_file,
+                board_date=board_date,
+            )
 
     return MorningWorkflowResult(
         application_execution="COMPLETED",
@@ -686,7 +723,9 @@ def self_test() -> int:
         assert result.reconciliation_required is True
 
         # 13. Notifier raising (unsafe/corrupt notification state) -> FAILED,
-        #     without rerunning Morning or rewriting the #27 result.
+        #     without rerunning Morning or rewriting the #27 result. The
+        #     raised exception's own text (here containing a fake
+        #     secret-like marker) must never be echoed into reason_text.
         unsafe_trigger = make_trigger(external_occurrence_id="openclaw-occ-morning-unsafe")
         unsafe_calls: list[int] = []
 
@@ -697,8 +736,10 @@ def self_test() -> int:
             if not board.is_file():
                 board.write_text("# Editorial board\n", encoding="utf-8")
 
+        FAKE_NOTIFIER_SECRET = "FAKE-NOTIFIER-SECRET-should-never-be-echoed"
+
         def raising_notifier(_persisted: dict[str, Any]) -> dict[str, Any]:
-            raise RuntimeError("existing notification record is unreadable")
+            raise RuntimeError(f"transport auth failed token={FAKE_NOTIFIER_SECRET}")
 
         result = run_morning_workflow(
             unsafe_trigger,
@@ -711,6 +752,62 @@ def self_test() -> int:
         assert result.application_execution == "FAILED", result
         assert result.reason_code == "NOTIFICATION_STATE_UNSAFE", result
         assert result.domain_outcome == "SUCCEEDED", result
+        assert result.result_file is not None, result
+        assert FAKE_NOTIFIER_SECRET not in result.reason_text, result.reason_text
+        assert result.context.get("error_type") == "RuntimeError", result
+
+        # 14. Malformed notifier results must fail closed -- application
+        #     FAILED, no rerun, no #27 rewrite, no second attempt; a
+        #     legitimate #30 FAILED/UNKNOWN/ALREADY_* outcome must NOT be
+        #     treated as malformed.
+        malformed_cases = [None, "sent", {}, {"status": None}, {"status": ""}, {"status": "SUCCESS"}]
+        for index, bad_outcome in enumerate(malformed_cases):
+            case_artifact_root = root / f"case14-{index}" / "artifacts"
+            case_output_root = root / f"case14-{index}" / "run-outcomes"
+            trigger = make_trigger(external_occurrence_id=f"openclaw-occ-morning-malformed-notifier-{index}")
+
+            def succeed_case(_ar=case_artifact_root) -> None:
+                board = _ar / "social/research/daily/2026-09-08-editorial-board.md"
+                board.parent.mkdir(parents=True, exist_ok=True)
+                board.write_text("# Editorial board\n", encoding="utf-8")
+
+            result = run_morning_workflow(
+                trigger,
+                invoke_provider=succeed_case,
+                notifier=lambda _r, _bad=bad_outcome: _bad,
+                artifact_root=case_artifact_root,
+                output_root=case_output_root,
+                sleep=lambda _s: None,
+            )
+            assert result.application_execution == "FAILED", (index, bad_outcome, result)
+            assert result.reason_code == "NOTIFICATION_RESULT_INVALID", (index, result)
+            assert result.notification_status is None, (index, result)
+            assert result.domain_outcome == "SUCCEEDED", (index, result)
+
+        legitimate_cases = [
+            "FAILED", "UNKNOWN", "ALREADY_FAILED", "ALREADY_UNKNOWN",
+            "ALREADY_PENDING", "NOT_REQUIRED", "SENT", "ALREADY_SENT",
+        ]
+        for index, status in enumerate(legitimate_cases):
+            case_artifact_root = root / f"case15-{index}" / "artifacts"
+            case_output_root = root / f"case15-{index}" / "run-outcomes"
+            trigger = make_trigger(external_occurrence_id=f"openclaw-occ-morning-legit-notifier-{index}")
+
+            def succeed_case(_ar=case_artifact_root) -> None:
+                board = _ar / "social/research/daily/2026-09-08-editorial-board.md"
+                board.parent.mkdir(parents=True, exist_ok=True)
+                board.write_text("# Editorial board\n", encoding="utf-8")
+
+            result = run_morning_workflow(
+                trigger,
+                invoke_provider=succeed_case,
+                notifier=lambda _r, _status=status: {"status": _status},
+                artifact_root=case_artifact_root,
+                output_root=case_output_root,
+                sleep=lambda _s: None,
+            )
+            assert result.application_execution == "COMPLETED", (index, status, result)
+            assert result.notification_status == status, (index, result)
 
     print("MORNING_WORKFLOW_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

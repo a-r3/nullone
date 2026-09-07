@@ -60,6 +60,7 @@ from nullone_scheduled_workflow_support import (
     derive_local_date,
     results_agree,
     safe_trigger_context,
+    validate_notification_outcome,
 )
 from nullone_scheduler_invocation import SchedulerInvocationError, accept_workflow_trigger
 
@@ -119,6 +120,37 @@ def _failed(
         result_file=None,
         notification_status=None,
         reconciliation_required=reconciliation_required,
+        reason_code=reason_code,
+        reason_text=reason_text,
+        analytics_date=analytics_date,
+        context=context or {},
+    )
+
+
+def _notification_failed(
+    *,
+    reason_code: str,
+    reason_text: str,
+    occurrence_id: str,
+    run_id: str,
+    persisted_result: dict[str, Any],
+    result_file: Path,
+    analytics_date: str | None,
+    context: dict[str, Any] | None = None,
+) -> AnalyticsWorkflowResult:
+    """A #27 result was established/validated/reconciled, but the
+    notification decision itself could not be trusted. Distinct from
+    `_failed()`: domain_outcome/result_file are known-good here and must
+    still be reported."""
+
+    return AnalyticsWorkflowResult(
+        application_execution="FAILED",
+        domain_outcome=persisted_result["domain_outcome"],
+        run_id=run_id,
+        occurrence_id=occurrence_id,
+        result_file=str(result_file),
+        notification_status=None,
+        reconciliation_required=False,
         reason_code=reason_code,
         reason_text=reason_text,
         analytics_date=analytics_date,
@@ -191,12 +223,17 @@ def run_analytics_workflow(
             output_root=output_root,
         )
     except Exception as exc:  # noqa: BLE001 - a runtime/provider crash is a typed orchestration failure
+        # Deliberately never interpolates str(exc): the provider factory
+        # boundary (#61's eventual seam) may one day wrap a real Zernio/
+        # credential failure, and an arbitrary exception message must never
+        # be assumed safe to echo into application/operator output. The
+        # exception's class name alone is enough to distinguish e.g. the
+        # #61 PROVIDER_SECRET_WIRING_PENDING_61 placeholder
+        # (ProviderSecretWiringPendingError) from any other crash, without
+        # ever depending on its message text containing anything specific.
         return _failed(
             reason_code="RUNTIME_CRASHED",
-            reason_text=(
-                "Daily Analytics runtime raised before establishing a result: "
-                f"{exc}"
-            ),
+            reason_text="Daily Analytics runtime raised before establishing a result.",
             occurrence_id=occurrence_id,
             run_id=expected_run_id,
             analytics_date=analytics_date,
@@ -274,24 +311,29 @@ def run_analytics_workflow(
         try:
             notification_outcome = notifier(persisted_result)
         except Exception as exc:  # noqa: BLE001 - unsafe/corrupt notifier state, never silently retried
-            return AnalyticsWorkflowResult(
-                application_execution="FAILED",
-                domain_outcome=persisted_result["domain_outcome"],
-                run_id=expected_run_id,
-                occurrence_id=occurrence_id,
-                result_file=str(persisted_file),
-                notification_status=None,
-                reconciliation_required=False,
+            return _notification_failed(
                 reason_code="NOTIFICATION_STATE_UNSAFE",
-                reason_text=f"Notification orchestration could not safely proceed: {exc}",
+                reason_text="Notification orchestration could not safely proceed.",
+                occurrence_id=occurrence_id,
+                run_id=expected_run_id,
+                persisted_result=persisted_result,
+                result_file=persisted_file,
                 analytics_date=analytics_date,
+                context={"error_type": type(exc).__name__},
             )
 
-        notification_status = (
-            notification_outcome.get("status")
-            if isinstance(notification_outcome, dict)
-            else None
-        )
+        try:
+            notification_status = validate_notification_outcome(notification_outcome)
+        except ScheduledWorkflowSupportError as exc:
+            return _notification_failed(
+                reason_code="NOTIFICATION_RESULT_INVALID",
+                reason_text=f"Notifier returned an invalid result: {exc}",
+                occurrence_id=occurrence_id,
+                run_id=expected_run_id,
+                persisted_result=persisted_result,
+                result_file=persisted_file,
+                analytics_date=analytics_date,
+            )
 
     return AnalyticsWorkflowResult(
         application_execution="COMPLETED",
@@ -551,14 +593,20 @@ def self_test() -> int:
 
         # 9. RUNTIME_CRASHED: provider factory raises something #29 does not
         #    catch (simulating the #61 PROVIDER_SECRET_WIRING_PENDING seam) ->
-        #    non-zero, no #27 result fabricated.
+        #    non-zero, no #27 result fabricated. The exception's own message
+        #    (here containing a fake secret-like marker, standing in for
+        #    whatever a real future #61 credential failure might embed) must
+        #    never be echoed into application/operator output -- only the
+        #    stable exception *type name* may be used to identify it.
         class ProviderSecretWiringPendingError(RuntimeError):
             pass
 
+        FAKE_SECRET_MARKER = "FAKE-SECRET-should-never-be-echoed-zat_1234567890"
+
         def pending_secret_factory() -> ZernioReadOnlyAnalyticsConnector:
             raise ProviderSecretWiringPendingError(
-                "Daily Analytics production AnalyticsProvider construction is "
-                "pending issue #61."
+                f"Daily Analytics production AnalyticsProvider construction "
+                f"failed: token={FAKE_SECRET_MARKER}"
             )
 
         result = run_analytics_workflow(
@@ -569,7 +617,9 @@ def self_test() -> int:
         assert result.application_execution == "FAILED", result
         assert result.reason_code == "RUNTIME_CRASHED", result
         assert result.domain_outcome is None, result
-        assert "#61" in result.reason_text, result.reason_text
+        assert result.context.get("error_type") == "ProviderSecretWiringPendingError", result
+        assert FAKE_SECRET_MARKER not in result.reason_text, result.reason_text
+        assert FAKE_SECRET_MARKER not in str(result.context), result.context
 
         # 10. Missing persisted result -> RESULT_MISSING_OR_CORRUPT.
         def fake_run_analytics_missing(**kwargs: Any) -> dict[str, Any]:
@@ -709,8 +759,12 @@ def self_test() -> int:
         assert len({r.run_id for r in results}) == 1
 
         # 15. Notifier raising -> NOTIFICATION_STATE_UNSAFE, no #27 rewrite.
+        #     The raised exception's own text (here containing a fake
+        #     secret-like marker) must never be echoed into reason_text.
+        FAKE_NOTIFIER_SECRET = "FAKE-NOTIFIER-SECRET-should-never-be-echoed"
+
         def raising_notifier(_persisted: dict[str, Any]) -> dict[str, Any]:
-            raise RuntimeError("existing notification record is unreadable")
+            raise RuntimeError(f"transport auth failed token={FAKE_NOTIFIER_SECRET}")
 
         result = run_analytics_workflow(
             make_trigger(external_occurrence_id="openclaw-occ-analytics-unsafe"),
@@ -720,6 +774,42 @@ def self_test() -> int:
         assert result.application_execution == "FAILED", result
         assert result.reason_code == "NOTIFICATION_STATE_UNSAFE", result
         assert result.domain_outcome == "SUCCEEDED", result
+        assert result.result_file is not None, result
+        assert FAKE_NOTIFIER_SECRET not in result.reason_text, result.reason_text
+        assert result.context.get("error_type") == "RuntimeError", result
+
+        # 16. Malformed notifier results must fail closed -- application
+        #     FAILED, no rerun, no #27 rewrite, no second attempt; a
+        #     legitimate #30 FAILED/UNKNOWN/ALREADY_* outcome must NOT be
+        #     treated as malformed.
+        malformed_cases = [None, "sent", {}, {"status": None}, {"status": ""}, {"status": "SUCCESS"}]
+        for index, bad_outcome in enumerate(malformed_cases):
+            result = run_analytics_workflow(
+                make_trigger(external_occurrence_id=f"openclaw-occ-analytics-malformed-notifier-{index}"),
+                provider_factory=success_factory,
+                notifier=lambda _r, _bad=bad_outcome: _bad,
+                artifact_root=root / f"case16-{index}",
+                output_root=root / f"case16-{index}" / "run-outcomes",
+            )
+            assert result.application_execution == "FAILED", (index, bad_outcome, result)
+            assert result.reason_code == "NOTIFICATION_RESULT_INVALID", (index, result)
+            assert result.notification_status is None, (index, result)
+            assert result.domain_outcome == "SUCCEEDED", (index, result)
+
+        legitimate_cases = [
+            "FAILED", "UNKNOWN", "ALREADY_FAILED", "ALREADY_UNKNOWN",
+            "ALREADY_PENDING", "NOT_REQUIRED", "SENT", "ALREADY_SENT",
+        ]
+        for index, status in enumerate(legitimate_cases):
+            result = run_analytics_workflow(
+                make_trigger(external_occurrence_id=f"openclaw-occ-analytics-legit-notifier-{index}"),
+                provider_factory=success_factory,
+                notifier=lambda _r, _status=status: {"status": _status},
+                artifact_root=root / f"case17-{index}",
+                output_root=root / f"case17-{index}" / "run-outcomes",
+            )
+            assert result.application_execution == "COMPLETED", (index, status, result)
+            assert result.notification_status == status, (index, result)
 
     print("ANALYTICS_WORKFLOW_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

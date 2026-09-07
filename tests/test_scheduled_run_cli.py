@@ -25,7 +25,9 @@ SCRIPTS = ROOT / "workspace/social/ops/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from nullone_analytics_workflow import run_analytics_workflow  # noqa: E402
+from nullone_editorial_runtime import ProviderUnreachableError  # noqa: E402
 from nullone_failure_notify import notify_if_required  # noqa: E402
+from nullone_morning_workflow import run_morning_workflow  # noqa: E402
 from nullone_run_outcome import assess_run  # noqa: E402
 from nullone_scheduler_invocation import compute_occurrence_id  # noqa: E402
 from nullone_zernio_analytics_adapter import ConnectorUnauthorizedError  # noqa: E402
@@ -214,6 +216,164 @@ class NotifierAtMostOnceTests(unittest.TestCase):
                 notifier=real_notifier,
                 artifact_root=root / "artifacts", output_root=root / "run-outcomes",
             )
+            self.assertEqual(first.notification_status, "SENT")
+            self.assertEqual(second.notification_status, "ALREADY_SENT")
+            self.assertEqual(len(transport_calls), 1)
+
+
+class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
+    """Proves the pre-hardening no-alert gap is fixed end to end through
+    the real production notifier binding (`cli._production_notifier`),
+    which is the exact wiring `nullone-scheduled-run.py morning` uses.
+
+    Before this fix: a persistent real #28 Morning provider failure
+    persists `scheduler_status="error"`/`domain_outcome="FAILED"`; the new
+    #59 CLI correctly exits 0 for that (valid orchestration completed);
+    but the unmodified #30 `notify_if_required()` saw `scheduler_status
+    ="error"` and deferred to OpenClaw's native `failureAlert` -- which
+    never fires because the process exits 0. Net result: silence. This
+    test proves that gap is closed: the production notifier now passes
+    `scheduler_native_failure_owned=False` explicitly, so the alert fires
+    exactly once, and exact replay does not resend.
+    """
+
+    @staticmethod
+    def _isolated_notify_if_required(output_root):
+        """A stand-in for `nullone_failure_notify.notify_if_required` that
+        forwards every call unchanged except pinning `output_root` to an
+        isolated temp directory -- `cli._production_notifier` itself never
+        exposes an `output_root` override (correctly: production always
+        uses the real default), so a test exercising it verbatim must
+        instead isolate storage by patching the name `cli.notify_if_required`
+        resolves at call time, not by passing extra arguments through
+        `_production_notifier`."""
+
+        def _wrapped(result, *, transport, scheduler_native_failure_owned=None, **kwargs):
+            return notify_if_required(
+                result,
+                transport=transport,
+                output_root=output_root,
+                scheduler_native_failure_owned=scheduler_native_failure_owned,
+                **kwargs,
+            )
+
+        return _wrapped
+
+    def test_morning_provider_failure_reaches_domain_alert_exactly_once(self):
+        import json
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            transport_calls = []
+
+            class FakeTransport:
+                def send(self, message: str) -> None:
+                    transport_calls.append(message)
+
+            trigger = make_trigger(
+                workflow_id="morning-editorial",
+                source="openclaw",
+                external_occurrence_id="cli-morning-native-alert",
+                scheduled_for="2026-09-08T04:30:00Z",
+                triggered_at="2026-09-08T04:30:02Z",
+            )
+
+            provider_calls = []
+
+            def always_unreachable():
+                provider_calls.append(1)
+                raise ProviderUnreachableError("ENOTFOUND")
+
+            isolated_notify = self._isolated_notify_if_required(root / "notifications")
+
+            with mock.patch.object(cli, "OpenClawTelegramTransport", return_value=FakeTransport()), \
+                 mock.patch.object(cli, "notify_if_required", isolated_notify):
+                first = run_morning_workflow(
+                    trigger,
+                    invoke_provider=always_unreachable,
+                    notifier=cli._production_notifier,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                    sleep=lambda _s: None,
+                )
+
+            # Confirm #28 really did persist the legacy scheduler-native
+            # shape this regression is about -- not a hypothetical one.
+            persisted = json.loads(Path(first.result_file).read_text(encoding="utf-8"))
+            self.assertEqual(persisted["scheduler_status"], "error")
+            self.assertEqual(persisted["domain_outcome"], "FAILED")
+
+            self.assertEqual(first.application_execution, "COMPLETED")
+            self.assertEqual(cli._report(first), 0)
+            self.assertEqual(first.domain_outcome, "FAILED")
+            self.assertEqual(first.notification_status, "SENT")
+            self.assertEqual(len(transport_calls), 1)
+            self.assertGreaterEqual(len(provider_calls), 1)
+
+            # Exact replay: provider not called again, no second alert,
+            # still exit 0.
+            with mock.patch.object(cli, "OpenClawTelegramTransport", return_value=FakeTransport()), \
+                 mock.patch.object(cli, "notify_if_required", isolated_notify):
+                second = run_morning_workflow(
+                    trigger,
+                    invoke_provider=lambda: (_ for _ in ()).throw(
+                        AssertionError("provider must not run again on replay")
+                    ),
+                    notifier=cli._production_notifier,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                    sleep=lambda _s: None,
+                )
+
+            self.assertEqual(second.application_execution, "COMPLETED")
+            self.assertEqual(cli._report(second), 0)
+            self.assertEqual(second.notification_status, "ALREADY_SENT")
+            self.assertEqual(len(transport_calls), 1)
+
+    def test_daily_blocked_result_unchanged_by_ownership_override(self):
+        """The explicit False override must not change Daily Analytics'
+        already-correct scheduler_status="succeeded" BLOCKED behavior."""
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            transport_calls = []
+
+            class FakeTransport:
+                def send(self, message: str) -> None:
+                    transport_calls.append(message)
+
+            def unauthorized_factory():
+                raise ConnectorUnauthorizedError("missing token")
+
+            trigger = make_trigger(external_occurrence_id="cli-daily-blocked-unchanged")
+            isolated_notify = self._isolated_notify_if_required(root / "notifications")
+
+            with mock.patch.object(cli, "OpenClawTelegramTransport", return_value=FakeTransport()), \
+                 mock.patch.object(cli, "notify_if_required", isolated_notify):
+                first = run_analytics_workflow(
+                    trigger,
+                    provider_factory=unauthorized_factory,
+                    notifier=cli._production_notifier,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                )
+                second = run_analytics_workflow(
+                    trigger,
+                    provider_factory=lambda: (_ for _ in ()).throw(
+                        AssertionError("provider must not run again on replay")
+                    ),
+                    notifier=cli._production_notifier,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                )
+
+            self.assertEqual(first.application_execution, "COMPLETED")
+            self.assertEqual(first.domain_outcome, "BLOCKED")
+            self.assertEqual(cli._report(first), 0)
             self.assertEqual(first.notification_status, "SENT")
             self.assertEqual(second.notification_status, "ALREADY_SENT")
             self.assertEqual(len(transport_calls), 1)

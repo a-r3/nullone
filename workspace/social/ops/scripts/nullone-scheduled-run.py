@@ -85,9 +85,27 @@ def _production_notifier(result: dict[str, Any]) -> dict[str, Any]:
     Neither `MorningWorkflow` nor `AnalyticsWorkflow` import
     `OpenClawTelegramTransport` themselves; both accept an injected
     `notifier` callable, and this is the production one.
+
+    Passes `scheduler_native_failure_owned=False` explicitly: this
+    function is only ever reached by `run_morning_workflow`/
+    `run_analytics_workflow` after they have already established a valid,
+    reconciled persisted #27 result, meaning THIS application invocation
+    has itself completed and will exit 0. A legacy persisted
+    `scheduler_status="error"`/`"failed"` value (the exact shape #28
+    persists for an exhausted-retry Morning provider failure) must never
+    be allowed to defer this alert to OpenClaw's native `failureAlert` in
+    that case -- that native alert will never fire for a process that
+    exits 0, which would otherwise silently drop the alert entirely. See
+    `docs/deployment/59-scheduled-workflows-deployment.md` and
+    `nullone_failure_notify.notify_if_required`'s docstring for the full
+    ownership-routing contract this narrow override participates in.
     """
 
-    return notify_if_required(result, transport=OpenClawTelegramTransport())
+    return notify_if_required(
+        result,
+        transport=OpenClawTelegramTransport(),
+        scheduler_native_failure_owned=False,
+    )
 
 
 def _report(result: MorningWorkflowResult | AnalyticsWorkflowResult) -> int:

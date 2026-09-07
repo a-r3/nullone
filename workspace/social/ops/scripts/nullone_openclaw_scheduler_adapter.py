@@ -18,7 +18,11 @@ values, with no I/O, subprocess, or network capability of its own.
 
 Confirmed OpenClaw 2026.8.2 read-only evidence (2026-09-07,
 `openclaw cron list/get/runs --json` against the live Gateway; read-only,
-no job created/edited/enabled/disabled/removed/run):
+no job created/edited/enabled/disabled/removed/run), split explicitly into
+what was directly verified versus what is this adapter's own inference/
+design choice built on top of it:
+
+VERIFIED:
 
 - A cron/automation job's stable identity is its own UUID `id` field
   (e.g. `0666d47b-aceb-4a4d-960a-b4888f2066ed` for the live
@@ -26,25 +30,41 @@ no job created/edited/enabled/disabled/removed/run):
   for the live `texbrif-daily-analytics` job). `declarationKey` is present
   on some other jobs as an alternate stable identity, but not on these two;
   `id` is always present and is the identity this adapter uses.
-- `openclaw cron runs --id <id> --json` shows each attempt's own
-  `sessionKey` embeds a per-ATTEMPT UUID (`...:run:<uuid>`) that differs
-  between a failed attempt and its later successful retry for the *same*
-  logical scheduled occurrence -- confirmed directly: the real
-  2026-09-05 09:07 `ENOTFOUND` failure and the real 2026-09-06 08:30
-  success for `texbrif-morning-editorial` are two separate run records
-  with two different `run:<uuid>` suffixes. That per-attempt id is
-  therefore NOT a safe stable occurrence identity, and this adapter never
-  uses it -- exactly why `docs/contracts/scheduler-invocation-v1.md`
-  derives `occurrence_id` from `(workflow_id, source,
-  external_occurrence_id, scheduled_for)` rather than trusting a
-  source-supplied per-run id.
-- Each run record also carries `runAtMs`/`runAtIso` (that attempt's own
-  actual start instant, which can lag the job's cron target when a prior
-  attempt failed or the Gateway was delayed -- confirmed: the failed
-  2026-09-05 attempt's `runAtIso` was `09:07:13`, not the job's `08:30`
-  cron target) and the job's own `schedule.expr`/`schedule.tz` (5-field
-  cron + IANA timezone, e.g. `"30 8 * * *"` / `"Asia/Baku"` for both live
+- Each individual cron execution recorded by `openclaw cron runs --id <id>
+  --json` carries its own per-execution `sessionKey`
+  (`agent:<agentId>:cron:<jobId>:run:<uuid>`) and its own actual start
+  instant (`runAtMs`/`runAtIso`). Confirmed directly across two distinct
+  scheduled occurrences of `texbrif-morning-editorial`: the real
+  2026-09-05 (target 08:30, but this execution actually started at
+  09:07:13 after an earlier delay) `ENOTFOUND`/timeout failure and the
+  real 2026-09-06 08:30 success are two separate run records with two
+  different `run:<uuid>` `sessionKey` suffixes. This proves only that
+  distinct cron executions receive distinct per-run identifiers -- it does
+  **not** prove that a retry of one specific logical occurrence receives a
+  new UUID: those two records are two different scheduled days' ticks (the
+  2026-09-06 run is the next day's separate occurrence, not a replay of
+  the failed 2026-09-05 one), and no same-occurrence retry was directly
+  observed in this evidence.
+- Actual execution start time can lag a job's own cron target: the
+  2026-09-05 run's `runAtIso` (`09:07:13`) does not match that job's
+  `08:30` cron target -- confirmed directly.
+- The job's own `schedule.expr`/`schedule.tz` is a plain cron expression
+  plus IANA timezone (e.g. `"30 8 * * *"` / `"Asia/Baku"` for both live
   jobs).
+
+DESIGN CHOICE (an inference this adapter makes, not something the evidence
+above directly proves): this adapter never uses `sessionKey`'s per-run
+UUID, `triggered_at`, or the actual execution instant as occurrence
+identity. That UUID is generated internally by OpenClaw only once an
+execution is already underway -- it is not a value a future command-job
+wiring could know or supply *before* invocation -- and OpenClaw does not
+document it as a stable occurrence identity anywhere this adapter found.
+The scheduler-invocation contract's own requirement (the same logical
+occurrence, including any genuine retry, must yield the same
+`occurrence_id`) is instead satisfied by deriving identity from the job's
+own stable `id` plus the exact intended `scheduled_for` instant -- values
+a caller can in principle supply deterministically ahead of any particular
+execution attempt, unlike a UUID OpenClaw only mints during execution.
 
 Confirmed gap (documented, not guessed around): `openclaw cron add/edit
 --help`'s documented `--command*` flags do not show an environment variable

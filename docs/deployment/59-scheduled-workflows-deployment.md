@@ -41,7 +41,11 @@ inspection of the installed OpenClaw 2026.8.2 CLI and the live Gateway on
 2026-09-07 -- `openclaw cron list/get/runs --json`. No job was created,
 edited, enabled, disabled, removed, or run.
 
-Confirmed facts:
+Confirmed facts are separated below into what was directly VERIFIED versus
+this adapter's own INFERENCE/design choice built on top of that evidence --
+the two must not be conflated.
+
+VERIFIED:
 
 - Both live jobs are legacy prompt-only `agentTurn` automations:
   `texbrif-morning-editorial` (id `0666d47b-aceb-4a4d-960a-b4888f2066ed`,
@@ -54,22 +58,38 @@ Confirmed facts:
 - A job's stable identity is its own UUID `id` field. This adapter uses
   only that field, never a job's display name or prompt text, as the
   stable "source job identity" input.
-- `openclaw cron runs --id <id> --json` proves a per-attempt `sessionKey`
-  (`agent:<agentId>:cron:<jobId>:run:<uuid>`) embeds a DIFFERENT UUID
-  between a failed attempt and its later successful retry for the *same*
-  logical scheduled occurrence: the real 2026-09-05 09:07 `ENOTFOUND`
-  failure and the real 2026-09-06 08:30 success for
-  `texbrif-morning-editorial` are two separate run records with two
-  different `run:<uuid>` suffixes. That per-attempt id is therefore never
-  used as occurrence identity -- exactly why
-  `docs/contracts/scheduler-invocation-v1.md` derives `occurrence_id` from
-  `(workflow_id, source, external_occurrence_id, scheduled_for)` rather
-  than trusting any source-supplied per-run id.
-- Each run record's own `runAtMs`/`runAtIso` is that attempt's actual start
-  instant, which can lag the job's cron target when a prior attempt failed
-  (confirmed: the failed 2026-09-05 attempt's `runAtIso` was `09:07:13`,
-  not the job's `08:30` cron target). Current wall-clock time is therefore
-  never used as occurrence identity by this adapter.
+- Each individual cron execution recorded by `openclaw cron runs --id <id>
+  --json` carries its own per-execution `sessionKey`
+  (`agent:<agentId>:cron:<jobId>:run:<uuid>`) and its own actual start
+  instant (`runAtMs`/`runAtIso`), which can lag the job's own cron target:
+  the real 2026-09-05 `texbrif-morning-editorial` execution (cron target
+  08:30) actually started at `09:07:13` and failed with
+  `ENOTFOUND`/timeout; the real 2026-09-06 execution started on-target at
+  08:30 and succeeded. These are two separate run records with two
+  different `run:<uuid>` `sessionKey` suffixes. This proves only that
+  distinct cron executions get distinct per-run identifiers and that
+  actual start time can lag the cron target -- it does **not** prove that
+  a retry of one specific logical occurrence gets a new UUID: the
+  2026-09-06 run is the *next day's separate scheduled tick*, not a replay
+  of the failed 2026-09-05 one, so no same-occurrence-retry UUID behavior
+  was directly observed here.
+
+INFERENCE / DESIGN CHOICE (not directly proven by the evidence above):
+this adapter deliberately never uses `sessionKey`'s per-run UUID,
+`triggered_at`, or the actual execution instant as occurrence identity.
+That UUID is generated internally by OpenClaw only once an execution is
+already underway, so it is not a value a future command-job wiring could
+know or supply *before* invocation, and OpenClaw does not document it as a
+stable occurrence identity anywhere this adapter found. Current wall-clock
+time is likewise never used as occurrence identity. Instead, the
+scheduler-invocation contract's requirement (the same logical occurrence,
+including any genuine retry, must yield the same `occurrence_id`) is
+satisfied by deriving identity from the job's own stable `id` plus the
+exact intended `scheduled_for` instant -- values a caller can in principle
+supply deterministically ahead of any particular execution attempt. This
+is a reviewed design choice standing in for evidence this repository does
+not have (no same-occurrence retry was observed in the 2026-09-07
+inspection window), not a claim of direct proof.
 
 **Confirmed gap, documented rather than guessed around**: `openclaw cron
 add/edit --help`'s documented `--command*` flags (the job type #37 would
@@ -81,7 +101,8 @@ as distinct from wall-clock execution time. Before #37 activates a real
 supplies `scheduled_for` (the OpenClaw edge caller's responsibility, not
 `nullone_openclaw_scheduler_adapter.py`'s) must be confirmed against the
 live Gateway's actual command-job invocation environment at that time --
-never guessed from this document.
+never guessed from this document. Status:
+`UNPROVEN_LIVE / DEFERRED_TO_#37`.
 
 `nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id,
 openclaw_job_id, scheduled_for, triggered_at)` is a pure function (no I/O,
@@ -122,8 +143,10 @@ sleep=time.sleep, timezone_name="Asia/Baku") -> MorningWorkflowResult`.
 7. Only then calls the injected `notifier(persisted_result)` at most once
    (never `notify_if_required` or `OpenClawTelegramTransport` directly --
    see "Notification composition" below); a notifier exception (unsafe/
-   corrupt on-disk notification state) is `NOTIFICATION_STATE_UNSAFE` and
-   never reruns Morning or rewrites the #27 result.
+   corrupt on-disk notification state) is `NOTIFICATION_STATE_UNSAFE`, and
+   a notifier return that is not one of #30's known statuses is
+   `NOTIFICATION_RESULT_INVALID` -- neither reruns Morning or rewrites the
+   #27 result.
 
 The Claude CLI invocation itself was extracted, behavior-identical, from
 `nullone-morning-editorial-run.py`'s previous in-file
@@ -213,15 +236,25 @@ notification decision.
 trigger (`TRIGGER_REJECTED`), an unparseable `scheduled_for`
 (`SCHEDULED_FOR_INVALID`), the domain runtime raising before establishing
 any result (`RUNTIME_CRASHED` -- this is also how the #61 provider-secret
-placeholder surfaces), a missing/corrupt/mismatched persisted result (the
-table above), an unreconciled in-memory/persisted disagreement, or the
-injected `notifier` raising (`NOTIFICATION_STATE_UNSAFE` -- a #30-level
-unsafe/corrupt on-disk notification-record state, distinct from #30's own
-normal typed `FAILED`/`UNKNOWN` transport outcomes, which are reported
-truthfully via `notification_status` with `application_execution` still
-`"COMPLETED"`: #30 already durably records those without this layer's
-help, and a transport ambiguity is not an orchestration-establishment
-failure).
+placeholder surfaces; the raising exception's own message text is never
+included in `reason_text` or `context`, only its stable
+`type(exc).__name__`, since a future real credential/provider failure
+could otherwise leak sensitive text into operator-facing output), a
+missing/corrupt/mismatched persisted result (the table above), an
+unreconciled in-memory/persisted disagreement, the injected `notifier`
+raising (`NOTIFICATION_STATE_UNSAFE` -- a #30-level unsafe/corrupt on-disk
+notification-record state; likewise never echoes the raised exception's
+message, only its type name), or the injected `notifier` returning
+something that is not one of #30's own known statuses
+(`NOTIFICATION_RESULT_INVALID` -- see "Notification composition" below).
+None of these rerun the domain workflow, rewrite the persisted #27 result,
+or attempt a second notification send.
+
+#30's own normal typed `FAILED`/`UNKNOWN` transport outcomes (and their
+`ALREADY_*` replay forms) are reported truthfully via `notification_status`
+with `application_execution` staying `"COMPLETED"`: #30 already durably
+records those without this layer's help, and a transport ambiguity is not
+an orchestration-establishment failure.
 
 This module deliberately does NOT use the legacy CLI convention
 (`domain_outcome != SUCCEEDED -> process exit 1`) that
@@ -261,53 +294,121 @@ Both workflows call an injected `notifier: Callable[[dict], dict] | None`
 with the exact persisted #27 record, at most once per call, and never
 reimplement actionability, failure identity, the sanitizer, the Telegram
 message, or notification-attempt state -- all of that remains
-`nullone_failure_notify.notify_if_required`'s existing, unmodified job.
-Production wiring binds `notifier` to:
+`nullone_failure_notify.notify_if_required`'s existing job. Production
+wiring in `nullone-scheduled-run.py` (the only place either workflow's
+`notifier` is bound to a real transport; neither workflow module imports
+`OpenClawTelegramTransport` itself, enforced by
+`test_no_openclaw_import_or_cli_invocation`) binds it to:
 
 ```python
-lambda result: notify_if_required(result, transport=OpenClawTelegramTransport())
+def _production_notifier(result):
+    return notify_if_required(
+        result,
+        transport=OpenClawTelegramTransport(),
+        scheduler_native_failure_owned=False,
+    )
 ```
 
-in `nullone-scheduled-run.py` only; neither workflow module imports
-`OpenClawTelegramTransport` (enforced by
-`test_no_openclaw_import_or_cli_invocation`'s `OpenClawTelegramTransport`
-check).
+### Fixed: the scheduler-native-alert ownership gap
+
+An earlier version of this PR left a genuine no-alert gap. #28's
+bounded-retry exhaustion persists a Morning Editorial provider failure as
+`scheduler_status="error"` / `domain_outcome="FAILED"` -- a legacy field
+value that predates #59 and originally meant "the scheduler itself failed;
+let OpenClaw's own native `failureAlert` own it." `notify_if_required()`,
+unmodified, read that field and deferred (`NOT_REQUIRED`,
+`policy=SCHEDULER_NATIVE_FAILURE_ALERT`). But under the new #59 contract,
+`nullone-scheduled-run.py morning` correctly reports
+`application_execution=COMPLETED` (exit 0) for this exact case -- the
+application safely established and validated the result. A process that
+exits 0 never triggers OpenClaw's native `failureAlert`. The combination
+was silent: no native alert (process exited 0) and no domain alert
+(deferred to the native alert that would never fire).
+
+The fix is a narrow, explicit, backward-compatible ownership override on
+`notify_if_required` itself
+(`nullone_failure_notify.py::notify_if_required`,
+`scheduler_native_failure_owned: bool | None = None`):
+
+- `None` (the default; every pre-existing caller, including
+  `nullone-failure-notify-run.py` and all of `tests/test_failure_notify.py`
+  that predate this parameter): behavior is **exactly unchanged** --
+  ownership is still derived from the persisted record's own
+  `scheduler_status`.
+- `True`: the caller explicitly asserts native ownership regardless of
+  `scheduler_status`'s content (this override is available for a future
+  caller that has independently confirmed scheduler-level failure some
+  other way; #59 does not currently pass `True` from anywhere).
+- `False`: the caller explicitly asserts that *this* application
+  invocation has itself completed (and will exit 0), so a legacy
+  `scheduler_status="error"`/`"failed"` value must NOT suppress the domain
+  alert. `_production_notifier` above always passes `False`, because it is
+  only ever reached by `run_morning_workflow`/`run_analytics_workflow`
+  after they have already established, validated, and reconciled a #27
+  result -- i.e. exactly the condition under which the CLI will exit 0.
+
+No copy of the persisted result with a rewritten `scheduler_status` is
+ever constructed, and the on-disk #27 record is never mutated; the
+override only steers which routing branch `notify_if_required` takes.
+
+Effect: a real #28 Morning provider-failure occurrence
+(`scheduler_status="error"`, `domain_outcome="FAILED"`) now reaches the
+domain Telegram alert exactly once through the #59 CLI path
+(`tests/test_scheduled_run_cli.py
+::MorningNativeAlertOwnershipHardeningTests`), while a direct legacy call
+to `notify_if_required` with no override (e.g. any future scheduler-level
+integration that has not adopted #59) is completely unaffected
+(`tests/test_failure_notify.py::ExplicitSchedulerOwnershipOverrideTests
+::test_omitted_parameter_preserves_legacy_deferral_exactly`). Daily
+Analytics, whose #29 BLOCKED/FAILED results already always carry
+`scheduler_status="succeeded"`, is unaffected either way -- the override
+changes nothing for a record that was never scheduler-native to begin
+with.
+
+### Other notification composition properties
 
 - **Healthy results stay quiet**: `domain_outcome=SUCCEEDED` (including
   `empty_success=NO_DATA`/`NO_ACTION`) reaches `notify_if_required`, which
   returns `NOT_REQUIRED` and sends nothing -- the workflow still reports
   this truthfully via `notification_status`.
 - **Actionable domain results notify once**: `BLOCKED`/`FAILED`/actionable
-  `UNKNOWN` (with `scheduler_status` not itself scheduler-native) reach
-  `SENT` on first delivery, `ALREADY_SENT`/`ALREADY_FAILED`/
-  `ALREADY_UNKNOWN` on exact replay -- #30's own durable, locked
-  idempotence is authoritative; no second attempt counter is added here.
-- **Scheduler-native failure ownership preserved unchanged**: when the
-  persisted record's own `scheduler_status` is `error`/`failed`
-  (case-insensitive) -- which is exactly what #28's bounded-retry
-  exhaustion currently persists for Morning Editorial -- `notify_if_
-  required` already defers (`NOT_REQUIRED`,
-  `policy=SCHEDULER_NATIVE_FAILURE_ALERT`) rather than sending a duplicate
-  alert alongside OpenClaw's own native `failureAlert`. Neither workflow
-  module contains any special-case logic for this; it flows through
-  unchanged #28/#30 behavior.
+  `UNKNOWN` reach `SENT` on first delivery, `ALREADY_SENT`/
+  `ALREADY_FAILED`/`ALREADY_UNKNOWN` on exact replay -- #30's own durable,
+  locked idempotence is authoritative; no second attempt counter is added
+  here.
 - **Notifier failure/timeout is never auto-retried**: a `notify_if_
   required` transport timeout (`UNKNOWN`) or definite failure (`FAILED`)
   is a normal, non-exception, durably-recorded #30 return -- reported
   truthfully via `notification_status` with `application_execution`
   staying `"COMPLETED"`, since #30 itself already fails closed against a
-  second automatic send attempt on re-entry. Only a genuinely unsafe/
-  corrupt on-disk notification state (`notify_if_required` raising
-  `NotifierError`) is treated as an application-level orchestration
-  failure (`NOTIFICATION_STATE_UNSAFE`) -- see "Critical scheduler-vs-
-  domain separation" above for the reasoning.
+  second automatic send attempt on re-entry.
+- **Malformed notifier returns fail closed**: `run_morning_workflow`/
+  `run_analytics_workflow` validate every non-exception notifier return
+  through `nullone_scheduled_workflow_support.validate_notification_outcome`
+  against the exact, small allowlist of statuses #30 is documented to
+  return (`NOT_REQUIRED`, `SENT`, `FAILED`, `UNKNOWN`, `ALREADY_PENDING`,
+  `ALREADY_SENT`, `ALREADY_FAILED`, `ALREADY_UNKNOWN`). `None`, a
+  non-mapping, `{}`, a blank/`None` `status`, or any unrecognized status
+  string (e.g. an invented `"SUCCESS"`) is `NOTIFICATION_RESULT_INVALID`
+  -- `application_execution=FAILED`, no rerun, no #27 rewrite, no second
+  attempt. Every one of #30's own legitimate outcomes above (including its
+  fail-closed `FAILED`/`UNKNOWN`/`ALREADY_*` forms) passes through
+  unaffected; this validation never invents a status #30 does not already
+  document.
+- Only a genuinely unsafe/corrupt on-disk notification state
+  (`notify_if_required` raising `NotifierError`, or any other exception)
+  is treated as an application-level orchestration failure
+  (`NOTIFICATION_STATE_UNSAFE`) -- see "Critical scheduler-vs-domain
+  separation" above for the reasoning and the exception-text-scrubbing
+  guarantee.
 
 As required by #37's own preflight notification requirement
 (`docs/deployment/37-preflight-notification-requirements.md`), the
 OpenClaw native `failureAlert` must be configured for both automations as
 part of controlled #37 activation -- **not activated by #59**. This
 document does not repeat or supersede that requirement; it only confirms
-#59's notifier composition already assumes and preserves it.
+#59's notifier composition already assumes and preserves it, and closes
+the specific gap the two would otherwise have interacted to create.
 
 ## OpenClaw job payloads: DESIRED / NOT DEPLOYED
 

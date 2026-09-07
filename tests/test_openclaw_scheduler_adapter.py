@@ -111,5 +111,51 @@ class FailClosedTests(unittest.TestCase):
             )
 
 
+class EvidenceWordingCorrectnessTests(unittest.TestCase):
+    """Regression proving the OpenClaw evidence documentation does not
+    overclaim same-occurrence-retry proof from two records that are
+    actually on different calendar days (and therefore different logical
+    scheduled occurrences), while still allowing the two records to be
+    cited as evidence of the narrower, actually-proven facts (distinct
+    per-run identifiers; actual execution time can lag the cron target)."""
+
+    OVERCLAIM_PHRASES = (
+        "later successful retry for the *same*",
+        "later successful retry for the *same* logical scheduled occurrence",
+        "between a failed attempt and its later successful retry for the",
+    )
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        # Collapse markdown line-wrapping so a phrase search is not
+        # brittle against where a paragraph happens to wrap.
+        return " ".join(text.split())
+
+    def _read_normalized(self, relative_path: str) -> str:
+        raw = (Path(__file__).resolve().parents[1] / relative_path).read_text(encoding="utf-8")
+        return self._normalize(raw)
+
+    def test_adapter_module_does_not_claim_same_occurrence_retry(self):
+        source = self._read_normalized("workspace/social/ops/scripts/nullone_openclaw_scheduler_adapter.py")
+        for phrase in self.OVERCLAIM_PHRASES:
+            self.assertNotIn(self._normalize(phrase), source)
+        # The corrected wording must explicitly disclaim the overclaim,
+        # not merely omit it silently.
+        self.assertIn("does **not** prove", source)
+        self.assertIn("not a replay of the failed 2026-09-05 one", source)
+
+    def test_deployment_doc_does_not_claim_same_occurrence_retry(self):
+        doc = self._read_normalized("docs/deployment/59-scheduled-workflows-deployment.md")
+        for phrase in self.OVERCLAIM_PHRASES:
+            self.assertNotIn(self._normalize(phrase), doc)
+        self.assertIn("does **not** prove", doc)
+        self.assertIn("not a replay of the failed 2026-09-05 one", doc)
+
+    def test_deployment_doc_distinguishes_verified_from_inference(self):
+        doc = self._read_normalized("docs/deployment/59-scheduled-workflows-deployment.md")
+        self.assertIn("VERIFIED:", doc)
+        self.assertIn("INFERENCE / DESIGN CHOICE", doc)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
