@@ -22,6 +22,7 @@ COMMANDS = [
     [sys.executable, "tests/test_breaking_dispatch.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
     [sys.executable, "tests/test_behavioral_regressions.py"],
+    [sys.executable, "tests/test_approval_publication_instruction_safety.py"],
     [sys.executable, "tests/test_morning_editorial.py"],
     [sys.executable, "tests/test_daily_analytics.py"],
     [sys.executable, "tests/test_failure_notify.py"],

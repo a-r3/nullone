@@ -564,6 +564,33 @@ The sanitized evidence summary is
 component/repository level; this preflight records previously uncaptured
 integration prerequisites and does not reopen them.
 
+### Verified #66 completion — 2026-09-07
+
+`agents/approval/AGENTS.md`'s dead `## FIRST APPROVAL`/`## FINAL PUBLISH`
+sections (direct `zernio posts_get` / `zernio call_tool` → `posts_update_post`
+instructions) and the self-contradictory `## FINAL TOOL ROUTING — OVERRIDES
+OLDER PUBLISH INSTRUCTIONS` section have been removed. The file now states one
+authoritative flow: `texbrif-approval` validates the callback, sends
+`sessions_send` `PUBLISH_AUTHORIZED` to `texbrif-publisher`, and never calls
+Zernio itself; `## ABSOLUTE PROHIBITIONS` no longer carries the
+`zernio call_tool may be used ONLY for posts_update_post` carve-out.
+`agents/publisher/AGENTS.md` already authorized only the deterministic
+`nullone-publisher-run.py execute <POST_ID>` wrapper and required no change.
+`tests/test_approval_publication_instruction_safety.py` adds a
+paragraph-scoped capability-negative guard (fails on a reintroduced
+affirmative Zernio-mutation grant, passes legitimate prohibition prose) plus
+a positive delegation-invariant check, registered in `tests/run_offline.py`.
+
+Repository evidence does not include the OpenClaw runtime's actual live
+`toolsAllow`/equivalent tool-grant configuration for the `texbrif-approval`
+or `texbrif-publisher` agents — no tracked job/agent config file in this repo
+carries those grants (the only tracked live-grant evidence at all is the
+unrelated Daily Analytics `toolsAllow=['*']` finding above, which #66 does not
+touch). The actual live capability grant for these two agents is therefore
+`UNVERIFIED_FROM_REPOSITORY` and must be checked during the repeated #37
+read-only production preflight, not assumed equal to the prompt-level
+prohibitions this fix adds.
+
 ### NullOne Application Runtime architecture — #65
 
 OpenClaw independence was already a product/architecture intent, and the
