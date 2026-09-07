@@ -22,15 +22,33 @@ point of this replacement architecture:
            nullone_scheduled_run_dispatch, shared with
            nullone-scheduled-run.py's exact-trigger-file path)
 
-The only things this process may know: the adapter `--source` string and
-the system clock (injected/testable -- see `now` below). It never invokes
-OpenClaw, reads OpenClaw config, knows Telegram/Zernio transport, reads
-secret environment variables, publishes, approves, or processes an approval
-callback -- see `tests/test_scheduled_workflows_capability_negative.py`.
+Architectural split (intentional, not accidental):
+
+- Generic occurrence authority (`resolve_scheduled_occurrence`) remains
+  scheduler-independent and multi-adapter: `source` is part of #65
+  occurrence identity, so alternate namespaces such as `systemd-timer`
+  are still valid at the pure-authority layer.
+- This **current M0 production wake-up executable** pins `--source` to the
+  reviewed allowlist `M0_WAKEUP_SOURCES` (exactly `openclaw`). An unreviewed
+  / typo / alternate CLI source fails closed before occurrence resolution
+  and before any workflow/provider/notifier/#27 side effect. A future
+  adapter namespace requires an explicit reviewed code/config change, not
+  an arbitrary CLI string.
+
+The only things this process may know: the reviewed adapter `--source`
+string and an injected/testable timezone-aware clock (see `now` below).
+It never invokes OpenClaw, reads OpenClaw config, knows Telegram/Zernio
+transport, reads secret environment variables, publishes, approves, or
+processes an approval callback -- see
+`tests/test_scheduled_workflows_capability_negative.py`.
 
 Exit-code contract (distinct from, but consistent with,
 `nullone-scheduled-run.py`'s scheduler-vs-domain rule):
 
+- Infrastructure rejection (`WAKEUP_SOURCE_UNSUPPORTED` /
+  `WAKEUP_CLOCK_INVALID` / authority reject): non-zero. No occurrence
+  resolution side effect beyond the pure call itself, no dispatch, no
+  provider, no notifier, no #27 artifact.
 - `NO_DUE_OCCURRENCE`: exit 0. The wake-up was valid; there was simply no
   current NullOne schedule slot to execute. No provider call, no notifier
   call, no #27 result fabricated.
@@ -46,7 +64,8 @@ resolved schedule slot (never from the observed wake instant), a manual
 run through this exact same static command after today's slot replays the
 same occurrence as a natural scheduled wake would; a manual run before
 today's slot is `NO_DUE_OCCURRENCE`, identically to a natural early wake.
-This process cannot mint a novel arbitrary occurrence.
+This process cannot mint a novel arbitrary occurrence, and cannot mint a
+second namespace merely by typing a different `--source` on the M0 edge.
 """
 from __future__ import annotations
 
@@ -65,18 +84,82 @@ WORKFLOW_BY_COMMAND = {
     "analytics": "daily-analytics",
 }
 
+# Current M0 production wake-up edge allowlist only. Generic
+# `resolve_scheduled_occurrence(..., source=...)` remains multi-adapter;
+# expanding this set requires an explicit reviewed change.
+M0_WAKEUP_SOURCES = frozenset({"openclaw"})
+
+REASON_SOURCE_UNSUPPORTED = "WAKEUP_SOURCE_UNSUPPORTED"
+REASON_CLOCK_INVALID = "WAKEUP_CLOCK_INVALID"
+REASON_AUTHORITY_REJECTED = "WAKEUP_AUTHORITY_REJECTED"
+
 _DISPATCH_BY_WORKFLOW: dict[str, Callable[[dict[str, Any]], Any]] = {
     "morning-editorial": run_morning_trigger,
     "daily-analytics": run_analytics_trigger,
 }
 
 
+class WakeupInfrastructureError(ValueError):
+    """Stable infrastructure rejection on the M0 wake-up edge.
+
+    `args[0]` is always a stable `REASON_*` code -- never an arbitrary
+    operator-supplied string or clock/object repr.
+    """
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _require_m0_wakeup_source(source: object) -> str:
+    """Fail closed unless `source` is an exact reviewed M0 allowlist member.
+
+    No `.strip()` / case-fold / control-character normalization: malformed
+    input must not collapse into a valid identity namespace.
+    """
+
+    if not isinstance(source, str) or source not in M0_WAKEUP_SOURCES:
+        raise WakeupInfrastructureError(REASON_SOURCE_UNSUPPORTED)
+    return source
+
+
+def _require_aware_clock_instant(value: object) -> datetime:
+    """Injected clock must return a timezone-aware datetime.
+
+    Naive datetimes are rejected (never interpreted via host-local TZ).
+    Non-datetime values are rejected. Aware non-UTC values are normalized
+    to UTC only after awareness is proven (`tzinfo` present and
+    `utcoffset()` not None).
+    """
+
+    if not isinstance(value, datetime):
+        raise WakeupInfrastructureError(REASON_CLOCK_INVALID)
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise WakeupInfrastructureError(REASON_CLOCK_INVALID)
+    return value.astimezone(timezone.utc)
+
+
 def _canonical_now(now: Callable[[], datetime]) -> str:
-    return now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        instant = now()
+    except WakeupInfrastructureError:
+        raise
+    except Exception:
+        raise WakeupInfrastructureError(REASON_CLOCK_INVALID) from None
+    aware_utc = _require_aware_clock_instant(instant)
+    return aware_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _report_wakeup_rejected(reason_code: str) -> int:
+    print("STATUS=WAKEUP_REJECTED")
+    print(f"REASON_CODE={reason_code}")
+    print("PROVIDER_CALLED=FALSE")
+    print("NOTIFIER_CALLED=FALSE")
+    return 1
 
 
 def _report_no_due(resolution: ScheduledOccurrenceResolution) -> int:
@@ -123,18 +206,25 @@ def wake_up(
     `now`/`dispatch_by_workflow` are injectable purely for testability;
     the CLI's own `main()` always uses the real clock and the real
     production dispatch functions.
+
+    Source allowlist and clock awareness are enforced here on the M0
+    executable edge before any occurrence resolution or dispatch.
     """
 
+    try:
+        reviewed_source = _require_m0_wakeup_source(source)
+        triggered_at = _canonical_now(now)
+    except WakeupInfrastructureError as exc:
+        return _report_wakeup_rejected(exc.reason_code)
+
     workflow_id = WORKFLOW_BY_COMMAND[command]
-    triggered_at = _canonical_now(now)
 
     try:
         resolution = resolve_scheduled_occurrence(
-            workflow_id=workflow_id, source=source, triggered_at=triggered_at
+            workflow_id=workflow_id, source=reviewed_source, triggered_at=triggered_at
         )
-    except ScheduledOccurrenceAuthorityError as exc:
-        print(f"WAKEUP_REJECTED={exc}")
-        return 1
+    except ScheduledOccurrenceAuthorityError:
+        return _report_wakeup_rejected(REASON_AUTHORITY_REJECTED)
 
     if resolution.status == "NO_DUE_OCCURRENCE":
         return _report_no_due(resolution)
@@ -145,6 +235,7 @@ def wake_up(
 
 def self_test() -> int:
     from datetime import datetime as _dt
+    from datetime import timedelta as _td
 
     class _FakeMorningResult:
         def __init__(self) -> None:
@@ -248,6 +339,38 @@ def self_test() -> int:
         dispatch_by_workflow={"morning-editorial": failing_dispatch, "daily-analytics": failing_dispatch},
     )
     assert exit_code != 0
+
+    # 7. Unreviewed source fails closed before dispatch.
+    exit_code = wake_up(
+        "morning",
+        source="systemd-timer",
+        now=lambda: _dt(2026, 9, 8, 4, 30, 0, tzinfo=timezone.utc),
+        dispatch_by_workflow=fixed,
+    )
+    assert exit_code != 0
+    assert len(calls) == 2  # unchanged from before the rejection
+
+    # 8. Aware non-UTC clock normalizes to the same UTC slot as UTC clock.
+    baku = timezone(_td(hours=4))
+    exit_code = wake_up(
+        "morning",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 11, 8, 30, 0, tzinfo=baku),
+        dispatch_by_workflow=fixed,
+    )
+    assert exit_code == 0
+    assert calls[-1]["triggered_at"] == "2026-09-11T04:30:00Z"
+
+    # 9. Naive clock fails closed; no additional dispatch.
+    before = len(calls)
+    exit_code = wake_up(
+        "morning",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 8, 4, 30, 0),
+        dispatch_by_workflow=fixed,
+    )
+    assert exit_code != 0
+    assert len(calls) == before
 
     print("SCHEDULED_WAKEUP_CLI_SELF_TEST=PASS")
     print("NO_OPENCLAW_EXECUTION=TRUE")

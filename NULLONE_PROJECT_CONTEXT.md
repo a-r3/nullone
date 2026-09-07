@@ -136,7 +136,12 @@ only, still gated by normal review before merge:
 - `nullone-scheduled-wakeup.py` — the static wake-up-only executable edge
   (`nullone-scheduled-wakeup.py morning --source openclaw` /
   `... analytics --source openclaw`), needing no `scheduled_for` argument,
-  no per-occurrence trigger file, and no OpenClaw per-run UUID.
+  no per-occurrence trigger file, and no OpenClaw per-run UUID. The generic
+  occurrence authority remains multi-adapter (`source` is part of #65
+  identity), but this **current M0 production wake-up edge** pins
+  `--source` to reviewed `openclaw` only (`M0_WAKEUP_SOURCES`) and fails
+  closed on unreviewed/typo sources and on timezone-naive or non-datetime
+  injected clocks — before any dispatch/provider/notifier/#27 side effect.
 - `nullone_scheduled_run_dispatch.py` — the shared production dependency
   wiring both `nullone-scheduled-run.py` (exact-trigger-file path) and
   `nullone-scheduled-wakeup.py` (wake-up path) invoke identically, so

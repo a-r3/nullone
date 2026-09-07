@@ -14,13 +14,16 @@ adapters `nullone_scheduled_run_dispatch.py` wires in.
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "workspace/social/ops/scripts"
@@ -48,6 +51,13 @@ def _fixed_clock(dt: datetime):
     def _now() -> datetime:
         return dt
     return _now
+
+
+def _capture_wake_up(*args: Any, **kwargs: Any) -> tuple[int, str]:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = WAKEUP.wake_up(*args, **kwargs)
+    return code, buf.getvalue()
 
 
 class EarlyWakeIsNoOpTests(unittest.TestCase):
@@ -320,6 +330,287 @@ class ManualRunCannotMintNovelOccurrenceTests(unittest.TestCase):
         self.assertEqual(len(seen_triggers), 2)
         self.assertEqual(seen_triggers[0]["occurrence_id"], seen_triggers[1]["occurrence_id"])
         self.assertEqual(seen_triggers[0]["scheduled_for"], seen_triggers[1]["scheduled_for"])
+
+
+class M0SourceAllowlistTests(unittest.TestCase):
+    """Current M0 executable pins source to reviewed `openclaw` only.
+
+    Generic authority still supports alternate namespaces; only this edge
+    rejects them.
+    """
+
+    def test_allowlist_constant_is_exactly_openclaw(self):
+        self.assertEqual(WAKEUP.M0_WAKEUP_SOURCES, frozenset({"openclaw"}))
+
+    def test_reviewed_openclaw_source_proceeds(self):
+        seen: list[dict[str, Any]] = []
+
+        class _FakeResult:
+            application_execution = "COMPLETED"
+            domain_outcome = "SUCCEEDED"
+            run_id = "run_fake"
+            occurrence_id = "occ_fake"
+            result_file = None
+            notification_status = "NOT_REQUIRED"
+            reason_code = "OK"
+            reason_text = "fake"
+
+        def dispatch(trigger: dict[str, Any]):
+            seen.append(trigger)
+            return _FakeResult()
+
+        code, out = _capture_wake_up(
+            "morning",
+            source="openclaw",
+            now=_fixed_clock(datetime(2026, 9, 8, 4, 30, 0, tzinfo=timezone.utc)),
+            dispatch_by_workflow={"morning-editorial": dispatch, "daily-analytics": dispatch},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("SOURCE=openclaw", out)
+        self.assertIn("STATUS=DUE", out)
+
+    def _assert_source_rejected(self, source: object) -> str:
+        provider_calls: list[int] = []
+        notifier_calls: list[int] = []
+
+        def exploding_provider() -> None:
+            provider_calls.append(1)
+            raise AssertionError("provider must not run for unreviewed source")
+
+        def exploding_notifier(_r: dict[str, Any]) -> dict[str, Any]:
+            notifier_calls.append(1)
+            raise AssertionError("notifier must not run for unreviewed source")
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            def dispatch_morning(trigger: dict[str, Any]):
+                return run_morning_workflow(
+                    trigger,
+                    invoke_provider=exploding_provider,
+                    notifier=exploding_notifier,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                    sleep=lambda _s: None,
+                )
+
+            code, out = _capture_wake_up(
+                "morning",
+                source=source,  # type: ignore[arg-type]
+                now=_fixed_clock(datetime(2026, 9, 8, 4, 30, 0, tzinfo=timezone.utc)),
+                dispatch_by_workflow={
+                    "morning-editorial": dispatch_morning,
+                    "daily-analytics": dispatch_morning,
+                },
+            )
+
+            self.assertNotEqual(code, 0)
+            self.assertIn("STATUS=WAKEUP_REJECTED", out)
+            self.assertIn(f"REASON_CODE={WAKEUP.REASON_SOURCE_UNSUPPORTED}", out)
+            self.assertNotIn("STATUS=DUE", out)
+            # Never echo the arbitrary/malformed source back to the operator.
+            if isinstance(source, str) and source not in ("",):
+                self.assertNotIn(source, out)
+            self.assertEqual(provider_calls, [])
+            self.assertEqual(notifier_calls, [])
+            self.assertFalse((root / "run-outcomes").exists())
+            artifact_root = root / "artifacts"
+            if artifact_root.exists():
+                self.assertEqual(list(artifact_root.rglob("*")), [])
+        return out
+
+    def test_systemd_timer_source_rejected(self):
+        self._assert_source_rejected("systemd-timer")
+
+    def test_typo_openclaww_source_rejected(self):
+        self._assert_source_rejected("openclaww")
+
+    def test_unknown_source_rejected(self):
+        self._assert_source_rejected("unknown")
+
+    def test_padded_openclaw_source_rejected_no_strip(self):
+        self._assert_source_rejected(" openclaw ")
+
+    def test_empty_source_rejected(self):
+        self._assert_source_rejected("")
+
+    def test_newline_and_control_source_rejected_without_echo(self):
+        for bad in ("openclaw\n", "openclaw\x00", "\x1bopenclaw", "OPENCLAW"):
+            with self.subTest(source=repr(bad)):
+                out = self._assert_source_rejected(bad)
+                # Stable reason lines only; never re-emit the rejected token.
+                self.assertEqual(
+                    [line for line in out.splitlines() if line.startswith("REASON_CODE=")],
+                    [f"REASON_CODE={WAKEUP.REASON_SOURCE_UNSUPPORTED}"],
+                )
+                if "\x00" in bad:
+                    self.assertNotIn("\x00", out)
+                if "\x1b" in bad:
+                    self.assertNotIn("\x1b", out)
+
+
+class StrictClockContractTests(unittest.TestCase):
+    def test_aware_utc_accepted(self):
+        seen: list[dict[str, Any]] = []
+
+        class _FakeResult:
+            application_execution = "COMPLETED"
+            domain_outcome = "SUCCEEDED"
+            run_id = "run_fake"
+            occurrence_id = "occ_fake"
+            result_file = None
+            notification_status = "NOT_REQUIRED"
+            reason_code = "OK"
+            reason_text = "fake"
+
+        def dispatch(trigger: dict[str, Any]):
+            seen.append(trigger)
+            return _FakeResult()
+
+        code, out = _capture_wake_up(
+            "morning",
+            source="openclaw",
+            now=_fixed_clock(datetime(2026, 9, 8, 4, 30, 0, tzinfo=timezone.utc)),
+            dispatch_by_workflow={"morning-editorial": dispatch, "daily-analytics": dispatch},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0]["triggered_at"], "2026-09-08T04:30:00Z")
+        self.assertIn("TRIGGERED_AT=2026-09-08T04:30:00Z", out)
+
+    def test_aware_non_utc_normalized_to_utc(self):
+        seen: list[dict[str, Any]] = []
+
+        class _FakeResult:
+            application_execution = "COMPLETED"
+            domain_outcome = "SUCCEEDED"
+            run_id = "run_fake"
+            occurrence_id = "occ_fake"
+            result_file = None
+            notification_status = "NOT_REQUIRED"
+            reason_code = "OK"
+            reason_text = "fake"
+
+        def dispatch(trigger: dict[str, Any]):
+            seen.append(trigger)
+            return _FakeResult()
+
+        baku = timezone(timedelta(hours=4))
+        code, _out = _capture_wake_up(
+            "morning",
+            source="openclaw",
+            now=_fixed_clock(datetime(2026, 9, 8, 8, 30, 0, tzinfo=baku)),
+            dispatch_by_workflow={"morning-editorial": dispatch, "daily-analytics": dispatch},
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(seen[0]["triggered_at"], "2026-09-08T04:30:00Z")
+        self.assertEqual(seen[0]["scheduled_for"], "2026-09-08T04:30:00Z")
+
+    def _assert_clock_rejected(self, clock_value: object) -> str:
+        provider_calls: list[int] = []
+        notifier_calls: list[int] = []
+
+        def exploding_provider() -> None:
+            provider_calls.append(1)
+            raise AssertionError("provider must not run for invalid clock")
+
+        def exploding_notifier(_r: dict[str, Any]) -> dict[str, Any]:
+            notifier_calls.append(1)
+            raise AssertionError("notifier must not run for invalid clock")
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            def dispatch_morning(trigger: dict[str, Any]):
+                return run_morning_workflow(
+                    trigger,
+                    invoke_provider=exploding_provider,
+                    notifier=exploding_notifier,
+                    artifact_root=root / "artifacts",
+                    output_root=root / "run-outcomes",
+                    sleep=lambda _s: None,
+                )
+
+            code, out = _capture_wake_up(
+                "morning",
+                source="openclaw",
+                now=lambda: clock_value,  # type: ignore[return-value,arg-type]
+                dispatch_by_workflow={
+                    "morning-editorial": dispatch_morning,
+                    "daily-analytics": dispatch_morning,
+                },
+            )
+            self.assertNotEqual(code, 0)
+            self.assertIn("STATUS=WAKEUP_REJECTED", out)
+            self.assertIn(f"REASON_CODE={WAKEUP.REASON_CLOCK_INVALID}", out)
+            self.assertNotIn("STATUS=DUE", out)
+            self.assertEqual(provider_calls, [])
+            self.assertEqual(notifier_calls, [])
+            self.assertFalse((root / "run-outcomes").exists())
+        return out
+
+    def test_naive_datetime_rejected(self):
+        out = self._assert_clock_rejected(datetime(2026, 9, 8, 4, 30, 0))
+        self.assertNotIn("2026-09-08", out)
+
+    def test_string_none_object_clock_rejected(self):
+        for bad in ("2026-09-08T04:30:00Z", None, object(), 12345):
+            with self.subTest(clock=repr(bad)):
+                out = self._assert_clock_rejected(bad)
+                self.assertNotIn(repr(bad), out)
+
+    def test_naive_clock_rejection_has_zero_workflow_side_effects(self):
+        self._assert_clock_rejected(datetime(2026, 9, 8, 4, 30, 0))
+
+    def test_host_timezone_cannot_affect_aware_normalization(self):
+        """Aware instants normalize identically regardless of ZoneInfo labels.
+
+        Proves host-local interpretation is not used: two distinct aware
+        offsets that encode the same absolute instant yield one triggered_at.
+        """
+        seen: list[str] = []
+
+        class _FakeResult:
+            application_execution = "COMPLETED"
+            domain_outcome = "SUCCEEDED"
+            run_id = "run_fake"
+            occurrence_id = "occ_fake"
+            result_file = None
+            notification_status = "NOT_REQUIRED"
+            reason_code = "OK"
+            reason_text = "fake"
+
+        def dispatch(trigger: dict[str, Any]):
+            seen.append(trigger["triggered_at"])
+            return _FakeResult()
+
+        fixed = {"morning-editorial": dispatch, "daily-analytics": dispatch}
+        utc_code, _ = _capture_wake_up(
+            "morning",
+            source="openclaw",
+            now=_fixed_clock(datetime(2026, 9, 8, 4, 30, 0, tzinfo=timezone.utc)),
+            dispatch_by_workflow=fixed,
+        )
+        tokyo = ZoneInfo("Asia/Tokyo")
+        tokyo_code, _ = _capture_wake_up(
+            "morning",
+            source="openclaw",
+            # 13:30 JST == 04:30 UTC
+            now=_fixed_clock(datetime(2026, 9, 8, 13, 30, 0, tzinfo=tokyo)),
+            dispatch_by_workflow=fixed,
+        )
+        self.assertEqual(utc_code, 0)
+        self.assertEqual(tokyo_code, 0)
+        self.assertEqual(seen, ["2026-09-08T04:30:00Z", "2026-09-08T04:30:00Z"])
+
+    def test_operator_output_does_not_echo_clock_object(self):
+        class WeirdClock:
+            def __repr__(self) -> str:
+                return "LEAKED_CLOCK_REPR\x00"
+
+        out = self._assert_clock_rejected(WeirdClock())
+        self.assertNotIn("LEAKED_CLOCK_REPR", out)
+        self.assertNotIn("\x00", out)
 
 
 if __name__ == "__main__":

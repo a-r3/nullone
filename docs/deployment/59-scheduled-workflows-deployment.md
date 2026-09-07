@@ -630,10 +630,46 @@ nullone-scheduled-wakeup.py analytics --source openclaw
 
 No `scheduled_for` argument, no per-occurrence trigger file, no OpenClaw
 per-run UUID, no job-run metadata, no dynamic env interpolation -- the
-process needs only the adapter `--source` string and the system clock
-(`triggered_at = current UTC clock`, injected/testable internally, never a
-CLI flag). Exit-code contract:
+process needs only the reviewed adapter `--source` string and a
+timezone-aware system clock (`triggered_at` derived from the injected
+clock after UTC normalization; never a CLI flag).
 
+### Authority vs current M0 executable (source namespaces)
+
+```text
+authority = generic (multi-adapter; source participates in #65 occurrence_id)
+current production wake-up CLI = reviewed-source allowlist (exactly openclaw)
+```
+
+`resolve_scheduled_occurrence(..., source=...)` remains scheduler-independent:
+the pure-authority contract still permits alternate namespaces such as
+`systemd-timer` for the same slot (same `scheduled_for`, different
+`occurrence_id`). The **current M0 production wake-up executable** does not
+expose that genericity as an arbitrary CLI string. It pins
+`M0_WAKEUP_SOURCES = frozenset({"openclaw"})` and fails closed with
+`STATUS=WAKEUP_REJECTED` / `REASON_CODE=WAKEUP_SOURCE_UNSUPPORTED` before
+occurrence resolution and before any workflow/provider/notifier/#27 call
+when `--source` is anything else (including typos, padding, empty string,
+or a hypothetical future adapter name). Expanding the allowlist requires an
+explicit reviewed code/config change. There is no `.strip()` /
+case-fold fallback that turns malformed input into `openclaw`.
+
+### Strict clock contract on the wake-up edge
+
+The injected clock must return a timezone-aware `datetime` (`tzinfo`
+present and `utcoffset()` not `None`). Aware non-UTC values are normalized
+deterministically to UTC. Naive datetimes and non-datetime returns fail
+closed with `STATUS=WAKEUP_REJECTED` / `REASON_CODE=WAKEUP_CLOCK_INVALID`
+(non-zero exit; zero dispatch/provider/notifier/#27). The edge never
+interprets a naive clock via host-local timezone and never assumes UTC for
+naive values. Operator rejection output uses stable reason codes only -- it
+does not echo arbitrary source strings or clock/object reprs.
+
+Exit-code contract:
+
+- Infrastructure rejection (`WAKEUP_SOURCE_UNSUPPORTED` /
+  `WAKEUP_CLOCK_INVALID` / authority reject): non-zero. No workflow side
+  effect.
 - `NO_DUE_OCCURRENCE`: exit 0. No provider call, no notifier call, no #27
   result fabricated.
 - `DUE` + `application_execution=="COMPLETED"`: exit 0, regardless of
@@ -703,10 +739,11 @@ placeholder of any kind -- both commands below are fully static:
 ### Morning Editorial (DESIRED / NOT DEPLOYED)
 
 ```bash
-openclaw automations create "30 8 * * *" --tz "Asia/Baku" \
+openclaw automations create "30 8 * * *" \
   --name "nullone-morning-editorial-wakeup" \
   --command "python3 <repo>/workspace/social/ops/scripts/nullone-scheduled-wakeup.py morning --source openclaw" \
-  --command-cwd "<repo>"
+  --command-cwd "<repo>" \
+  --tz "Asia/Baku"
 ```
 
 Would replace the current `agentTurn` payload
@@ -715,15 +752,17 @@ Unlike the superseded normalized-occurrence design above, this exact
 command **can** be activated once #37 reviews it: it requires no
 scheduler-supplied `scheduled_for` at all, since
 `nullone-scheduled-wakeup.py` resolves the exact due slot itself. It is not
-created/edited/enabled by this change.
+created/edited/enabled by this change. The positional cron argument form
+above is the reviewed OpenClaw 2026.8.2 shape retained here.
 
 ### Daily Analytics (DESIRED / NOT DEPLOYED)
 
 ```bash
-openclaw automations create "20 3 * * *" --tz "Asia/Baku" \
+openclaw automations create "20 3 * * *" \
   --name "nullone-daily-analytics-wakeup" \
   --command "python3 <repo>/workspace/social/ops/scripts/nullone-scheduled-wakeup.py analytics --source openclaw" \
-  --command-cwd "<repo>"
+  --command-cwd "<repo>" \
+  --tz "Asia/Baku"
 ```
 
 Requires #61 to complete `build_production_analytics_provider` before
@@ -751,18 +790,29 @@ before activation, not a runtime check this module adds.
 
 ### Cutover safety
 
+Current M0 executable permits only:
+
+```text
+source=openclaw
+```
+
+A future adapter namespace (for example `systemd-timer`) requires an
+explicit reviewed implementation/change to `M0_WAKEUP_SOURCES` (or a
+dedicated reviewed adapter edge). The allowlist reduces accidental misuse
+of the production wake-up CLI; it does **not** redefine #65 `source`
+semantics at the generic authority/contract layer.
+
 Because the accepted #65 contract intentionally namespaces `occurrence_id`
 identity by `source` (see "Alternate scheduler example" in
-`docs/contracts/scheduler-invocation-v1.md`), **do not run two different
-adapter `source` namespaces for the same workflow/slot during a scheduler
-cutover** -- e.g. both an `openclaw` wake-up job and a hypothetical
-`systemd-timer` wake-up simultaneously enabled for Morning Editorial would
-each independently resolve the same `scheduled_for` but mint a different,
-non-colliding `occurrence_id`, so #28's own per-occurrence lock would not
-prevent two independent runs. A controlled adapter cutover (retiring one
-`source` before/while enabling another) must occur at a reviewed safe
-schedule boundary under #37; this document does not implement a cutover
-here.
+`docs/contracts/scheduler-invocation-v1.md`), **never concurrently activate
+two adapter namespaces for one workflow/slot** -- e.g. both an `openclaw`
+wake-up job and a hypothetical `systemd-timer` wake-up simultaneously
+enabled for Morning Editorial would each independently resolve the same
+`scheduled_for` but mint a different, non-colliding `occurrence_id`, so
+#28's own per-occurrence lock would not prevent two independent runs. A
+controlled adapter cutover (retiring one `source` before/while enabling
+another) must occur at a reviewed safe schedule boundary under #37; this
+document does not implement a cutover or a systemd adapter here.
 
 ## Current live limitations
 
