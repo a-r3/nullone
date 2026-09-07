@@ -694,12 +694,20 @@ What the PR adds, layered per the #65 architecture:
   `nullone_story_pipeline.py`/`nullone_main_draft_pipeline.py`, so neither
   #33 nor #36 core file needed to change;
 - `nullone_telegram_review_delivery_adapter.py` — the one reusable
-  Telegram/OpenClaw infrastructure adapter implementing that port. Reads
+  Telegram/OpenClaw infrastructure adapter implementing that port, pinned to
+  OpenClaw `v2026.8.2` commit
+  `0965053fe6b9341776df147a6934b7485c60b5ca`. It validates every
+  transport-bound media path is workspace-contained, regular, and matches its
+  preview SHA-256 before any transport; sends Story/Feed media once or every
+  Carousel item sequentially in exact payload order; then sends exactly one
+  approval card using the producer-owned `presentation` via
+  `--presentation` (never the unsupported `--buttons`). Every send requires a
+  top-level non-empty camelCase `messageId`; partial delivery, wrong-case
+  `message_id`, failure, or timeout is non-SENT with no retry or cleanup.
+  Successful aggregate proof retains ordered `media_message_ids` and one
+  `approval_message_id`. The adapter reads
   `social/ops/private/telegram-owner-id` at call time only, never logs or
-  echoes it, has no fallback target, and fails closed
-  (`OWNER_TARGET_MISSING`/`TIMEOUT`/`FAILED`/`MALFORMED_RESPONSE`) rather
-  than claiming `SENT` without exact transport proof (a parsed
-  `message_id`);
+  echoes it, and has no fallback target;
 - `nullone_story_workflow.py` — `StoryWorkflow` itself: validates the
   trigger against the shared scheduler-invocation module pinned to
   `workflow_id == "story"`, reads authoritative state through the existing
@@ -726,9 +734,11 @@ Tests added: `tests/test_story_workflow.py` (trigger boundary, no-action
 side-effect-freedom, the full candidate-selection matrix, replay/
 concurrency reusing #33's existing per-request lock — no second lock
 system), `tests/test_review_delivery.py` (both preview schemas via one
-shared delivery instance run through the real #33/#36 pipelines, owner-
-target secrecy, every transport failure mode, callback-value/public-
-wording preservation), and `tests/test_story_workflow_capability_negative.py`
+shared delivery instance run through the real #33/#36 pipelines, exact
+OpenClaw v2026.8.2 fixture/argv/JSON proof contract, Story/Feed/Carousel media
+ordering, media integrity, owner-target secrecy, partial-delivery and every
+transport failure mode, exact callback binding, and public-wording
+preservation), and `tests/test_story_workflow_capability_negative.py`
 (static proof the application layer has zero subprocess/OpenClaw/Zernio-
 tool/publisher-import capability, checked against code with docstrings/
 comments stripped so the architecture boundary can still be documented in

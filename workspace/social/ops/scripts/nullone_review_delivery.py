@@ -27,6 +27,7 @@ is required for them to accept it.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 STORY_PREVIEW_SCHEMA = "nullone.story-preview.v1"
@@ -39,7 +40,9 @@ REQUIRED_BRAND = "NullOne"
 # Legacy internal callback namespace -- preserved unchanged. Never rename;
 # see docs/architecture/nullone-application-runtime.md and
 # agents/approval/AGENTS.md, which key off these exact prefixes.
-ALLOWED_CALLBACK_PREFIXES = ("texbrif:approve:", "texbrif:reject:", "texbrif:revise:")
+CALLBACK_ACTIONS = ("approve", "reject", "revise")
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 SUCCESS_STATUS = "SENT"
 
@@ -65,13 +68,10 @@ class ReviewDelivery(Protocol):
 def validate_preview_payload(payload: Any) -> dict[str, Any]:
     """Shared shape validation for either supported preview schema.
 
-    Deliberately narrow: it checks only the invariants a ReviewDelivery
-    transport itself must rely on (schema, public brand wording, a non-
-    empty review_post_id, non-empty outbound text, and a well-formed
-    buttons block whose callback `value`s use the unchanged legacy
-    `texbrif:` namespace) -- it does not re-validate editorial content,
-    media, or manifest/request identity, which remain the producing
-    pipeline's exclusive responsibility.
+    Deliberately narrow: it checks only the transport-bound preview object,
+    including schema-specific media references and the exact approval
+    callback set. It does not re-validate editorial content or manifest /
+    request identity, which remain the producing pipeline's responsibility.
     """
 
     if not isinstance(payload, dict):
@@ -95,6 +95,17 @@ def validate_preview_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(text, str) or not text.strip():
         raise ReviewDeliveryError("preview payload missing non-empty text")
 
+    media = payload.get("media")
+    if schema == STORY_PREVIEW_SCHEMA:
+        if not isinstance(media, dict):
+            raise ReviewDeliveryError("Story preview payload media must be an object")
+        _validate_media_entry(media)
+    else:
+        if not isinstance(media, list) or not media:
+            raise ReviewDeliveryError("main preview payload media must be a non-empty list")
+        for item in media:
+            _validate_media_entry(item)
+
     presentation = payload.get("presentation")
     if not isinstance(presentation, dict):
         raise ReviewDeliveryError("preview payload missing presentation")
@@ -103,15 +114,18 @@ def validate_preview_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(blocks, list) or not blocks:
         raise ReviewDeliveryError("preview payload presentation has no blocks")
 
-    buttons = None
+    buttons: list[Any] = []
     for block in blocks:
         if isinstance(block, dict) and block.get("type") == "buttons":
-            buttons = block.get("buttons")
-            break
+            block_buttons = block.get("buttons")
+            if not isinstance(block_buttons, list) or not block_buttons:
+                raise ReviewDeliveryError("preview payload buttons block is empty")
+            buttons.extend(block_buttons)
 
-    if not isinstance(buttons, list) or not buttons:
+    if not buttons:
         raise ReviewDeliveryError("preview payload has no buttons block")
 
+    callback_values: list[str] = []
     for button in buttons:
         if not isinstance(button, dict):
             raise ReviewDeliveryError("preview payload button is not an object")
@@ -119,17 +133,46 @@ def validate_preview_payload(payload: Any) -> dict[str, Any]:
         value = button.get("value")
         if not isinstance(label, str) or not label.strip():
             raise ReviewDeliveryError("preview payload button missing label")
-        if not isinstance(value, str) or not value.startswith(ALLOWED_CALLBACK_PREFIXES):
-            raise ReviewDeliveryError(
-                "preview payload button value must use the legacy texbrif: "
-                f"callback namespace, got {value!r}"
-            )
-        if review_post_id not in value:
-            raise ReviewDeliveryError(
-                "preview payload button value does not carry this review_post_id"
-            )
+        if not isinstance(value, str):
+            raise ReviewDeliveryError("preview payload button missing callback value")
+        callback_values.append(value)
+
+    expected_callbacks = [
+        f"texbrif:{action}:{review_post_id}" for action in CALLBACK_ACTIONS
+    ]
+    if len(callback_values) != len(expected_callbacks) or sorted(callback_values) != sorted(
+        expected_callbacks
+    ):
+        raise ReviewDeliveryError(
+            "preview payload must contain exactly one approve, reject, and revise "
+            "callback bound to this review_post_id"
+        )
 
     return payload
+
+
+def _validate_media_entry(media: Any) -> None:
+    if not isinstance(media, dict):
+        raise ReviewDeliveryError("preview payload media entry must be an object")
+
+    local_path = media.get("local_path")
+    if not isinstance(local_path, str) or not local_path.strip():
+        raise ReviewDeliveryError("preview payload media entry missing local_path")
+
+    sha256 = media.get("sha256")
+    if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+        raise ReviewDeliveryError("preview payload media entry has invalid sha256")
+
+    for dimension in ("width", "height"):
+        value = media.get(dimension)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ReviewDeliveryError(
+                f"preview payload media entry has invalid {dimension}"
+            )
+
+    content_type = media.get("content_type")
+    if not isinstance(content_type, str) or not content_type.strip():
+        raise ReviewDeliveryError("preview payload media entry missing content_type")
 
 
 class FakeReviewDelivery:
@@ -176,6 +219,13 @@ def self_test() -> int:
         "schema": STORY_PREVIEW_SCHEMA,
         "brand": "NullOne",
         "review_post_id": "review-1",
+        "media": {
+            "local_path": "social/drafts/story.png",
+            "sha256": "a" * 64,
+            "width": 1080,
+            "height": 1920,
+            "content_type": "image/png",
+        },
         "text": "preview text",
         "presentation": {
             "blocks": [
@@ -190,7 +240,11 @@ def self_test() -> int:
             ]
         },
     }
-    main_payload = dict(story_payload, schema=MAIN_PREVIEW_SCHEMA)
+    main_payload = dict(
+        story_payload,
+        schema=MAIN_PREVIEW_SCHEMA,
+        media=[story_payload["media"]],
+    )
 
     validate_preview_payload(story_payload)
     validate_preview_payload(main_payload)

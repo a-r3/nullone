@@ -26,6 +26,43 @@ remains:
 
 `LIVE_SCHEDULED_PATH_UNPROVEN` — deferred to #37.
 
+## Reviewed OpenClaw transport contract (pinned, not executed)
+
+The ReviewDelivery infrastructure adapter is pinned narrowly to OpenClaw
+`v2026.8.2`, commit
+`0965053fe6b9341776df147a6934b7485c60b5ca`. The reviewed upstream sources
+are `src/cli/program/message/register.send.ts` and
+`src/commands/message.ts` at that commit. They establish that `message send`
+supports `--media` and `--presentation`, has no `--buttons` option, and emits
+a top-level camelCase `messageId` when it has usable send identity.
+
+One logical preview delivery therefore uses this exact proof sequence:
+
+```text
+ordered media send(s), one --media path per call
+→ exact non-empty messageId proof for every media call
+→ one --message plus exact producer-owned --presentation approval card
+→ exact non-empty messageId proof for the approval card
+→ SENT
+```
+
+Story and Feed each require one media proof followed by one approval-card
+proof. Carousel sends every `payload.media[]` entry sequentially in its exact
+payload order, then sends exactly one approval card. Any failure, timeout, or
+missing/blank/wrong-case proof stops immediately and makes the logical result
+non-SENT; there is no retry or cleanup of already-sent messages.
+
+Before reading the owner target or invoking OpenClaw, the adapter validates the
+whole transport-bound media bundle: schema-specific shape, workspace-contained
+resolved regular files, and exact SHA-256 equality. It never uses presigned
+URLs or regenerates media. Approval callbacks must be exactly one each of
+`texbrif:approve:<REVIEW_POST_ID>`, `texbrif:reject:<REVIEW_POST_ID>`, and
+`texbrif:revise:<REVIEW_POST_ID>`.
+
+This pin is an offline implementation contract, not live Telegram proof. The
+deployment status remains **PROPOSED / NOT APPLIED** and
+`LIVE_SCHEDULED_PATH_UNPROVEN` remains unchanged.
+
 ## Proposed (desired, not current) deployment shape
 
 ```text
