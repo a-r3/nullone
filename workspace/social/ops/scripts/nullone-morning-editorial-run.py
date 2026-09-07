@@ -2,70 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from nullone_bridge_common import BridgeError, WORKSPACE
+from nullone_bridge_common import BridgeError
+from nullone_claude_editorial_provider import default_invoke_provider as _default_invoke_provider
 from nullone_editorial_runtime import (
-    PROVIDER_CALL_TIMEOUT_SECONDS,
-    REACHABILITY_PATTERN,
     ProviderUnreachableError,
     run_morning_editorial,
 )
 
 HERE = Path(__file__).resolve().parent
-PROMPT_PATH = WORKSPACE / "social/ops/prompts/morning-editorial.md"
-
-
-def _default_invoke_provider() -> None:
-    """Invoke the real Morning Editorial planning cycle.
-
-    Not exercised by any test in this repository: tests inject a fake
-    `invoke_provider` into `run_morning_editorial` instead. Production
-    wiring of this default path has not been deployed.
-    """
-
-    prompt = PROMPT_PATH.read_text(encoding="utf-8")
-
-    try:
-        cp = subprocess.run(
-            [
-                "claude",
-                "-p",
-                prompt,
-                "--model",
-                "sonnet",
-                "--permission-mode",
-                "dontAsk",
-                "--allowedTools",
-                "Read,Write,WebSearch,WebFetch",
-            ],
-            cwd=WORKSPACE,
-            text=True,
-            capture_output=True,
-            timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise ProviderUnreachableError(
-            "Claude invocation timed out"
-        ) from e
-    except FileNotFoundError as e:
-        raise BridgeError("claude binary not found") from e
-
-    if cp.returncode != 0:
-        combined = f"{cp.stdout}\n{cp.stderr}"
-
-        if REACHABILITY_PATTERN.search(combined):
-            raise ProviderUnreachableError(
-                "Claude invocation failed: provider unreachable"
-            )
-
-        raise BridgeError(
-            f"Claude invocation failed (exit={cp.returncode})"
-        )
 
 
 def execute(occurrence_id: str, board_date: str | None) -> int:

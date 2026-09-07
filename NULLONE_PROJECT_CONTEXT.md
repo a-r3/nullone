@@ -42,7 +42,14 @@ end-to-end M0 integration is not complete. Repository-level
 `BreakingWorkflow` implementation is complete: #63 is CLOSED/COMPLETED and
 PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`.
 No production activation occurred. The remaining M0 repository blockers are
-exactly #59 and #61.
+exactly #59 and #61. A repository-level #59 implementation
+(`MorningWorkflow`/`AnalyticsWorkflow`, the OpenClaw scheduler edge, and the
+`nullone-scheduled-run.py` CLI) is submitted for review on branch
+`feature/n59-scheduled-workflows`; #59 remains OPEN until merged. #61
+remains fully unimplemented (its AnalyticsProvider secret-wiring seam is
+established by #59 but deliberately left as a fail-closed
+`PROVIDER_SECRET_WIRING_PENDING_61` placeholder). No production/OpenClaw
+job/Zernio/Telegram/Claude action occurred while implementing #59.
 
 1. Implement #59 and #61 independently and merge them through normal review.
 2. Rerun the strictly read-only #37 preflight only after #59 and #61 are
@@ -92,7 +99,7 @@ Relevant issues:
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
 - #37 controlled production activation/validation — OPEN; its historical 2026-09-07 read-only preflight returned `BLOCKED`; it is not `READY`, and deployment remains prohibited while #59 and #61 remain open and until a repeated strictly read-only preflight returns `READY_FOR_CONTROLLED_DEPLOYMENT`
-- #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only
+- #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only. Repository-level implementation submitted for review on branch `feature/n59-scheduled-workflows` (see `docs/deployment/59-scheduled-workflows-deployment.md`): `nullone_morning_workflow.py`/`nullone_analytics_workflow.py` reload and validate the exact persisted #27 result before invoking the unmodified #30 `notify_if_required`, and the new `nullone-scheduled-run.py` CLI separates scheduler/application exit status from domain health (exit 0 even for `BLOCKED`/`FAILED`/actionable `UNKNOWN`, provided a valid #27 result was established). Daily Analytics production activation additionally requires #61 (`PROVIDER_SECRET_WIRING_PENDING_61` fail-closed placeholder until then). The OpenClaw trigger edge itself is `CONFIRMED BLOCKED` (2026-09-07, direct source inspection of the installed OpenClaw 2026.8.2 package): no command-payload job mechanism supplies the intended `scheduled_for` occurrence to the invoked process (`payload.env`/`payload.input`/`payload.argv` are static values captured at job-authoring time; `runAtMs` is never merged in), so `map_openclaw_occurrence` correctly has no live caller yet and this repository does not substitute a heuristic — see `docs/deployment/59-scheduled-workflows-deployment.md`'s "OpenClaw trigger edge: CONFIRMED BLOCKED" section. This is distinct from #37/#61 and is not resolved by either. Not merged; no production/OpenClaw job/Zernio/Telegram/Claude action occurred; OpenClaw job payloads remain `DESIRED / NOT DEPLOYED`.
 - #60 cadence-state backward compatibility — CLOSED/COMPLETED; its merged read-only compatibility implementation supplies the authoritative load behavior reused by #62/#63; no production ledger migration was performed or required (`migration_required: False`)
 - #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
 - #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
@@ -1175,7 +1182,11 @@ rewrite historical production evidence or authorize deployment.
 
 ### Current Git desired-state M0 execution order — after PR #71
 
-1. Implement #59 and #61 independently.
+1. Implement #59 and #61 independently. A repository-level #59
+   implementation is submitted for review on branch
+   `feature/n59-scheduled-workflows` (see
+   `docs/deployment/59-scheduled-workflows-deployment.md`); #59 remains
+   OPEN until merged. #61 remains OPEN and unimplemented.
 2. Review and merge #59 and #61 through normal change control.
 3. Repeat the strictly read-only #37 preflight.
 4. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled

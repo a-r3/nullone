@@ -665,6 +665,163 @@ class SchedulerOwnershipRoutingTests(unittest.TestCase):
             self.assertEqual(len(transport.messages), 1)
 
 
+class ExplicitSchedulerOwnershipOverrideTests(unittest.TestCase):
+    """`scheduler_native_failure_owned` (issue #59 integration fix): an
+    explicit override for the scheduler-native-alert ownership routing
+    decision, narrowly scoped to routing only -- never to actionability.
+
+    This fixes a genuine no-alert gap: the new #59 scheduler CLI contract
+    correctly exits 0 for a completed application orchestration even when
+    the domain outcome is FAILED, but #28's persisted Morning failure
+    record still carries the legacy `scheduler_status="error"` field. Left
+    alone, that legacy field would make this module defer to a native
+    OpenClaw `failureAlert` that will never fire (because the #59 CLI
+    process itself succeeds) -- silently swallowing the alert. The #59
+    production notifier now passes `scheduler_native_failure_owned=False`
+    explicitly to say "this application invocation completed; the legacy
+    scheduler_status must not suppress the domain alert.\""""
+
+    def test_omitted_parameter_preserves_legacy_deferral_exactly(self):
+        # No caller passing scheduler_native_failure_owned (the default,
+        # None) must observe any behavior change at all.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                scheduler_status="error",
+            )
+
+            outcome = notify_if_required(
+                result, transport=NeverCallTransport(), output_root=root
+            )
+
+            self.assertEqual(outcome["status"], "NOT_REQUIRED")
+            self.assertEqual(outcome.get("policy"), NOTIFICATION_DEFERRED_POLICY)
+            self.assertFalse(list(root.rglob("*")))
+
+    def test_explicit_false_overrides_legacy_scheduler_error_status(self):
+        # This is the exact #28 Morning-failure shape (scheduler_status
+        # "error", domain FAILED) that #59's application CLI now
+        # completes and exits 0 for; the domain alert must fire once.
+        with tempfile.TemporaryDirectory() as td:
+            transport = RecordingTransport()
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                reason_code="PROVIDER_UNREACHABLE",
+                reason_text="Provider/runtime API was not reachable.",
+                scheduler_status="error",
+            )
+
+            outcome = notify_if_required(
+                result,
+                transport=transport,
+                output_root=Path(td),
+                scheduler_native_failure_owned=False,
+            )
+
+            self.assertEqual(outcome["status"], "SENT")
+            self.assertEqual(len(transport.messages), 1)
+
+    def test_explicit_false_replay_sends_only_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            transport = RecordingTransport()
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                reason_code="PROVIDER_UNREACHABLE",
+                reason_text="Provider/runtime API was not reachable.",
+                scheduler_status="error",
+            )
+
+            first = notify_if_required(
+                result,
+                transport=transport,
+                output_root=Path(td),
+                scheduler_native_failure_owned=False,
+            )
+            second = notify_if_required(
+                result,
+                transport=transport,
+                output_root=Path(td),
+                scheduler_native_failure_owned=False,
+            )
+
+            self.assertEqual(first["status"], "SENT")
+            self.assertEqual(second["status"], "ALREADY_SENT")
+            self.assertEqual(len(transport.messages), 1)
+
+    def test_explicit_true_defers_even_when_scheduler_status_says_succeeded(self):
+        # A caller that has independently confirmed native ownership
+        # (True) is honored even if the persisted scheduler_status field
+        # itself does not say error/failed -- proving this is a genuine
+        # override, not merely a re-derivation of the legacy field.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = _blocked_result(
+                domain_outcome="FAILED", scheduler_status="succeeded"
+            )
+
+            outcome = notify_if_required(
+                result,
+                transport=NeverCallTransport(),
+                output_root=root,
+                scheduler_native_failure_owned=True,
+            )
+
+            self.assertEqual(outcome["status"], "NOT_REQUIRED")
+            self.assertEqual(outcome.get("policy"), NOTIFICATION_DEFERRED_POLICY)
+            self.assertFalse(list(root.rglob("*")))
+
+    def test_explicit_false_does_not_change_daily_analytics_shape(self):
+        # Daily Analytics already persists scheduler_status="succeeded"
+        # for its own BLOCKED/FAILED results; explicit False must not
+        # change that already-correct behavior.
+        with tempfile.TemporaryDirectory() as td:
+            transport = RecordingTransport()
+            result = _blocked_result(
+                domain_outcome="BLOCKED",
+                workflow_id="daily-analytics",
+                scheduler_status="succeeded",
+            )
+
+            first = notify_if_required(
+                result,
+                transport=transport,
+                output_root=Path(td),
+                scheduler_native_failure_owned=False,
+            )
+            second = notify_if_required(
+                result,
+                transport=transport,
+                output_root=Path(td),
+                scheduler_native_failure_owned=False,
+            )
+
+            self.assertEqual(first["status"], "SENT")
+            self.assertEqual(second["status"], "ALREADY_SENT")
+            self.assertEqual(len(transport.messages), 1)
+
+    def test_explicit_value_never_mutates_or_rewrites_the_persisted_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = _blocked_result(
+                domain_outcome="FAILED",
+                workflow_id="morning-editorial",
+                scheduler_status="error",
+            )
+            before = copy.deepcopy(result)
+
+            notify_if_required(
+                result,
+                transport=RecordingTransport(),
+                output_root=Path(td),
+                scheduler_native_failure_owned=False,
+            )
+
+            self.assertEqual(result, before)
+
+
 class PathContainmentTests(unittest.TestCase):
     def test_traversal_workflow_id_is_rejected_before_transport(self):
         with tempfile.TemporaryDirectory() as td:

@@ -26,6 +26,7 @@ from nullone_editorial_runtime import (  # noqa: E402
     validate_occurrence_policy,
     worst_case_occurrence_seconds,
 )
+import nullone_claude_editorial_provider as claude_editorial_provider  # noqa: E402
 
 
 def _load_script(name: str, filename: str):
@@ -327,7 +328,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             captured["kwargs"] = kwargs
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with patch.object(runner.subprocess, "run", side_effect=fake_run):
+        with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
             runner._default_invoke_provider()
 
         self.assertEqual(

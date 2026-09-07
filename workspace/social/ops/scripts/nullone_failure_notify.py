@@ -477,9 +477,37 @@ def notify_if_required(
     non_actionable_unknown_reason_codes: (
         frozenset[str]
     ) = NON_ACTIONABLE_UNKNOWN_REASON_CODES,
+    scheduler_native_failure_owned: bool | None = None,
 ) -> dict[str, Any]:
     """Send at most one automatic Telegram alert for one stable failure
     identity (`run_id:reason_code`, reusing #27's `health_decision`).
+
+    `scheduler_native_failure_owned` is an explicit, narrow ownership
+    override for the scheduler-native-alert routing decision (issue #59
+    integration fix). It never changes *actionability* -- that remains
+    `domain_outcome`-only via `is_actionable()` -- only which surface
+    (this module vs. OpenClaw's own native `failureAlert`) is responsible
+    for speaking:
+
+    - `None` (default): preserve this module's original, legacy behavior
+      exactly -- ownership is derived from the persisted record's own
+      `scheduler_status` via `_is_scheduler_native_execution_failure()`.
+      Every existing caller that does not pass this parameter is
+      unaffected.
+    - `True`: the caller explicitly asserts this occurrence genuinely
+      failed at scheduler execution level, so OpenClaw's native
+      `failureAlert` owns it; this module stays quiet regardless of what
+      `scheduler_status` happens to contain.
+    - `False`: the caller explicitly asserts scheduler/application
+      execution itself completed (e.g. the #59 `nullone-scheduled-run.py`
+      CLI, which will itself exit 0 for this occurrence) -- a legacy
+      persisted `scheduler_status="error"`/`"failed"` value must NOT
+      suppress the domain alert merely because it looks scheduler-native.
+      Normal actionability-based alerting applies.
+
+    The persisted `result` is never mutated and no copy with a rewritten
+    `scheduler_status` is ever constructed; this parameter only steers
+    which routing branch this call takes.
 
     This does not claim provider-side exactly-once Telegram delivery:
     only that NullOne consumes at most one automatic local notification
@@ -529,7 +557,13 @@ def notify_if_required(
     ):
         return {"status": "NOT_REQUIRED"}
 
-    if _is_scheduler_native_execution_failure(result):
+    native_owned = (
+        _is_scheduler_native_execution_failure(result)
+        if scheduler_native_failure_owned is None
+        else scheduler_native_failure_owned
+    )
+
+    if native_owned:
         return {
             "status": "NOT_REQUIRED",
             "policy": NOTIFICATION_DEFERRED_POLICY,
