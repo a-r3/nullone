@@ -8,45 +8,33 @@ are correct against the canonical serialization rule defined in
 invoke a scheduler adapter, does not import OpenClaw, and performs no
 subprocess or network access. Implementing an adapter is #59/#61/#62/#63's
 job, not this contract-validation test's.
+
+Shape/derivation validation itself is delegated to the shared
+`nullone_scheduler_invocation` value module (#62) rather than duplicated
+here a second time; this file owns only the fixture-file assertions.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/scheduler_invocation_v1_examples.json"
 DOC = ROOT / "docs/contracts/scheduler-invocation-v1.md"
+SCRIPTS = ROOT / "workspace/social/ops/scripts"
+sys.path.insert(0, str(SCRIPTS))
 
-SCHEMA = "nullone.scheduler-invocation.v1"
-CONTRACT_VERSION = "1.0.0"
-
-REQUIRED_FIELDS = frozenset(
-    {
-        "schema",
-        "contract_version",
-        "workflow_id",
-        "source",
-        "external_occurrence_id",
-        "scheduled_for",
-        "triggered_at",
-        "occurrence_id",
-    }
+from nullone_scheduler_invocation import (  # noqa: E402
+    ALLOWED_WORKFLOW_IDS,
+    CONTRACT_VERSION,
+    SCHEMA,
+    STABLE_FIELDS,
+    ContractError,
+    compute_occurrence_id,
+    validate_payload,
 )
-
-ALLOWED_WORKFLOW_IDS = {
-    "morning-editorial",
-    "daily-analytics",
-    "story",
-    "breaking",
-}
-
-TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-OCCURRENCE_ID_RE = re.compile(r"^occ_[0-9a-f]{24}$")
-
-STABLE_FIELDS = ("workflow_id", "source", "external_occurrence_id", "scheduled_for")
 
 REQUIRED_INVALID_REASONS = {
     "missing_required_field",
@@ -64,69 +52,6 @@ FORBIDDEN_LITERAL_PATTERNS = [
     re.compile(r"bearer\s+[A-Za-z0-9._~+/=-]+", re.I),
     re.compile(r"oauth[_-]?(token|secret)\s*[:=]", re.I),
 ]
-
-
-class ContractError(ValueError):
-    pass
-
-
-def compute_occurrence_id(
-    workflow_id: str, source: str, external_occurrence_id: str, scheduled_for: str
-) -> str:
-    canonical = json.dumps(
-        [SCHEMA, workflow_id, source, external_occurrence_id, scheduled_for],
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    digest = hashlib.sha256(canonical).hexdigest()[:24]
-    return f"occ_{digest}"
-
-
-def validate_payload(payload: dict) -> None:
-    """Pure contract-shape validation only. No adapter, no I/O, no network."""
-
-    fields = set(payload)
-    if fields != REQUIRED_FIELDS:
-        missing = REQUIRED_FIELDS - fields
-        extra = fields - REQUIRED_FIELDS
-        if missing:
-            raise ContractError(f"missing required field(s): {sorted(missing)}")
-        raise ContractError(f"unknown field(s): {sorted(extra)}")
-
-    if payload["schema"] != SCHEMA:
-        raise ContractError("schema mismatch")
-    if payload["contract_version"] != CONTRACT_VERSION:
-        raise ContractError("contract_version mismatch")
-
-    workflow_id = payload["workflow_id"]
-    if workflow_id not in ALLOWED_WORKFLOW_IDS:
-        raise ContractError(f"unknown workflow_id: {workflow_id!r}")
-
-    source = payload["source"]
-    if not isinstance(source, str) or not source.strip():
-        raise ContractError("source must be non-empty")
-
-    external_occurrence_id = payload["external_occurrence_id"]
-    if not isinstance(external_occurrence_id, str) or not external_occurrence_id.strip():
-        raise ContractError("external_occurrence_id must be non-empty")
-
-    scheduled_for = payload["scheduled_for"]
-    if not isinstance(scheduled_for, str) or not TIMESTAMP_RE.fullmatch(scheduled_for):
-        raise ContractError("scheduled_for must be canonical UTC RFC3339")
-
-    triggered_at = payload["triggered_at"]
-    if not isinstance(triggered_at, str) or not TIMESTAMP_RE.fullmatch(triggered_at):
-        raise ContractError("triggered_at must be canonical UTC RFC3339")
-
-    occurrence_id = payload["occurrence_id"]
-    if not isinstance(occurrence_id, str) or not OCCURRENCE_ID_RE.fullmatch(occurrence_id):
-        raise ContractError("malformed occurrence_id")
-
-    expected = compute_occurrence_id(
-        workflow_id, source, external_occurrence_id, scheduled_for
-    )
-    if occurrence_id != expected:
-        raise ContractError("occurrence_id does not match recomputed identity")
 
 
 def fail(message: str) -> None:

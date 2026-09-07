@@ -1,0 +1,21 @@
+{
+  "source": {
+    "version": "v2026.8.2",
+    "commit": "0965053fe6b9341776df147a6934b7485c60b5ca",
+    "files": [
+      "src/cli/program/message/register.send.ts",
+      "src/commands/message.ts"
+    ]
+  },
+  "send": {
+    "supported_flags": [
+      "--message",
+      "--media",
+      "--presentation",
+      "--delivery",
+      "--json"
+    ],
+    "unsupported_flags": ["--buttons"],
+    "proof_field": "messageId"
+  }
+}

@@ -660,6 +660,109 @@ a future #13 implementation requires needs an explicit reviewed
 migration/ADR. No universal provider/plugin abstraction is introduced in #65
 merely to anticipate #13.
 
+### #62 implementation status — 2026-09-07 (IN PR, NOT MERGED)
+
+Repository-level implementation of #62 (`StoryWorkflow` and shared
+review-delivery adapter) exists on branch
+`feature/n62-story-workflow-review-delivery`, opened as a pull request.
+**#62 remains OPEN.** This entry records repo-level implementation status
+only; it is not a completion record and must not be read as one until the
+PR is reviewed and merged.
+
+What the PR adds, layered per the #65 architecture:
+
+- `nullone_scheduler_invocation.py` — the shared executable
+  `nullone.scheduler-invocation.v1` value/validation module the #65
+  contract document said to add "if there is no shared executable
+  scheduler-invocation validator yet" (there was none); the existing
+  fixture test (`tests/test_scheduler_invocation_contract_fixture.py`) now
+  imports it instead of duplicating the rule a second time;
+- `nullone_story_candidate_provider.py` — the narrow injected
+  `StoryCandidateProvider` boundary and deterministic selection rule
+  (zero → `CANDIDATE_UNAVAILABLE`, exactly one eligible → proceed,
+  multiple with no accepted ordering → `CANDIDATE_AMBIGUOUS`, all invalid
+  → `CANDIDATE_INVALID`). No heuristic Markdown parsing of
+  `candidate-queue.md`/`topic-ledger.jsonl` was added — repository
+  inspection found no existing structured, authoritative candidate source
+  to read, and inventing a ranking heuristic to fill that gap was
+  explicitly out of scope;
+- `nullone_review_delivery.py` — the shared `ReviewDelivery` port
+  (`.send(payload) -> dict`), a cross-schema payload validator accepting
+  both `nullone.story-preview.v1` and `nullone.main-preview.v1` unchanged,
+  and fakes for tests. Its method name/shape is structurally identical to
+  the existing local `TelegramPreviewSender` protocols already defined in
+  `nullone_story_pipeline.py`/`nullone_main_draft_pipeline.py`, so neither
+  #33 nor #36 core file needed to change;
+- `nullone_telegram_review_delivery_adapter.py` — the one reusable
+  Telegram/OpenClaw infrastructure adapter implementing that port, pinned to
+  OpenClaw `v2026.8.2` commit
+  `0965053fe6b9341776df147a6934b7485c60b5ca`. It validates every
+  transport-bound media path is workspace-contained, regular, and matches its
+  preview SHA-256 before any transport; sends Story/Feed media once or every
+  Carousel item sequentially in exact payload order; then sends exactly one
+  approval card using the producer-owned `presentation` via
+  `--presentation` (never the unsupported `--buttons`). Every send requires a
+  top-level non-empty camelCase `messageId`; partial delivery, wrong-case
+  `message_id`, failure, or timeout is non-SENT with no retry or cleanup.
+  Successful aggregate proof retains ordered `media_message_ids` and one
+  `approval_message_id`. The adapter reads
+  `social/ops/private/telegram-owner-id` at call time only, never logs or
+  echoes it, and has no fallback target;
+- `nullone_story_workflow.py` — `StoryWorkflow` itself: validates the
+  trigger against the shared scheduler-invocation module pinned to
+  `workflow_id == "story"`, reads authoritative state through the existing
+  #32 cadence state adapter, evaluates the existing #32 controller
+  unchanged, and only on an exact `PREPARE_STORY`/`STORY_GAP`/
+  `CANDIDATE_SEARCH_AND_PREPARE` result calls the candidate provider and
+  then #33's own `run_story_pipeline()` unchanged. Cadence arithmetic,
+  Story rendering, request/version identity, supersession, manifest
+  construction, verification, and the one-attempt review-draft guard are
+  all reused verbatim, never reimplemented.
+
+Candidate-availability consistency (goal-doc section 9): `StoryWorkflow`
+never derives `candidate_availability.story_quality_candidate_available`
+by speculatively calling the candidate provider — that signal is accepted
+as the same externally-computed opaque input the #31 cadence contract
+already documents. This keeps every `NO_ACTION`/`PREPARE_MAIN_CANDIDATE`/
+malformed-state path genuinely free of any candidate-provider call
+(verified by test), and makes the consistency check meaningful: if
+cadence says a Story candidate is available but the injected provider
+then returns none, `StoryWorkflow` returns a truthful
+`CANDIDATE_UNAVAILABLE` rather than fabricating content.
+
+Tests added: `tests/test_story_workflow.py` (trigger boundary, no-action
+side-effect-freedom, the full candidate-selection matrix, replay/
+concurrency reusing #33's existing per-request lock — no second lock
+system), `tests/test_review_delivery.py` (both preview schemas via one
+shared delivery instance run through the real #33/#36 pipelines, exact
+OpenClaw v2026.8.2 fixture/argv/JSON proof contract, Story/Feed/Carousel media
+ordering, media integrity, owner-target secrecy, partial-delivery and every
+transport failure mode, exact callback binding, and public-wording
+preservation), and `tests/test_story_workflow_capability_negative.py`
+(static proof the application layer has zero subprocess/OpenClaw/Zernio-
+tool/publisher-import capability, checked against code with docstrings/
+comments stripped so the architecture boundary can still be documented in
+prose without tripping its own capability check). `python3
+tests/run_offline.py` remains green with all of the above registered.
+
+Deployment/integration mapping (OpenClaw occurrence → adapter
+normalization → `nullone.scheduler-invocation.v1` → `StoryWorkflow`) is
+documented, not applied, in
+`docs/deployment/62-story-workflow-deployment.md`. No Story-specific live
+OpenClaw job exists in production and none was added by this PR; the
+confirmed #37 preflight fact that the scheduled-session Zernio bootstrap
+remains unproven for the MCP-backed draft bridge is restated there as
+`LIVE_SCHEDULED_PATH_UNPROVEN`, deferred to #37 — this PR does not and
+cannot prove live behavior offline. No production file, OpenClaw
+config/job, cron entry, Zernio call, or Telegram send occurred while
+building or testing #62.
+
+**#63 (`BreakingWorkflow`) remains blocked** on #62 merging through normal
+review, per the #65 dependency order; #63 was not started by this work.
+No production activation occurred or is authorized by this entry; the
+repeated read-only #37 preflight remains the only path to
+`READY_FOR_CONTROLLED_DEPLOYMENT`.
+
 ### Verified #34 completion — 2026-09-06
 
 Issue #34 `Define breaking severity, deduplication and immediate-draft

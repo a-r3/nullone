@@ -17,6 +17,9 @@ COMMANDS = [
     [sys.executable, "tests/test_cadence_state_adapter.py"],
     [sys.executable, "tests/test_story_pipeline.py"],
     [sys.executable, "tests/test_story_supersession.py"],
+    [sys.executable, "tests/test_review_delivery.py"],
+    [sys.executable, "tests/test_story_workflow.py"],
+    [sys.executable, "tests/test_story_workflow_capability_negative.py"],
     [sys.executable, "tests/test_breaking_router.py"],
     [sys.executable, "tests/test_main_draft_pipeline.py"],
     [sys.executable, "tests/test_breaking_dispatch.py"],
@@ -79,6 +82,31 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-failure-notify-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_scheduler_invocation.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_review_delivery.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_telegram_review_delivery_adapter.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_story_candidate_provider.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_story_workflow.py",
         "self-test",
     ],
 ]
