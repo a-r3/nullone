@@ -564,6 +564,57 @@ modify `NULLONE_PROJECT_CONTEXT.md`.
   document's.
 - `python3 tests/run_offline.py` must remain green.
 
+## Historical publish-ledger compatibility note (issue #60)
+
+This is a compatibility-reader note, not a change to #31's accepted
+policy above: the format-accounting tables, targets, spacing, and
+evaluation order are all unchanged. It documents how
+`nullone_cadence_state_adapter.py` reads `publish-ledger.jsonl` rows
+written before this repository required every row to carry `format`.
+
+- **Native format**: a row whose own `format` field is already one of
+  the known formats (`FEED`/`CAROUSEL`/`STORY`) is read exactly as
+  before this note; nothing about its behavior changed.
+- **Deterministic recovered format**: a row missing (or carrying an
+  unrecognized) `format` may be recovered read-time from authoritative
+  linkage already present in loaded manifest state, in this evidence
+  hierarchy: (1) exact `manifest_id` match to one loaded manifest with a
+  known format, then (2) exact `live_zernio_post_id` match to one loaded
+  manifest with a known format. Recovery succeeds only when the evidence
+  resolves to exactly one format; format is never inferred from title,
+  topic, time, or row order. The on-disk ledger row is never rewritten —
+  the recovered format is a read-time value the adapter derives and
+  reports alongside its source, never merged indistinguishably into the
+  row as if it had always been native.
+- **Unresolved format**: missing, conflicting, or ambiguous evidence
+  (including one identifier matching manifests of more than one format)
+  leaves a row's format `UNKNOWN`. An `UNKNOWN`-format row is excluded
+  from both the main and Story buckets — it is never guessed into
+  either.
+- **Decision-relevant vs. decision-irrelevant uncertainty**: an
+  `UNKNOWN`-format row only matters if it could still change today's
+  counters or the current anti-burst spacing decision, i.e. its
+  `result == PUBLISHED` and either its Asia/Baku calendar date is today,
+  or it may still fall inside the configured main/Story spacing window
+  measured from `now`. A row that is provably older than both is
+  decision-irrelevant: it cannot change today's count or the current
+  spacing decision, so it does not block a normal read and remains
+  visible only as a compatibility diagnostic. A non-`PUBLISHED` row
+  never participates in this accounting at all, so its missing format is
+  always diagnostic-only.
+- **Fail-safe request assembly**: when an unresolved row is
+  decision-relevant, `collect_format_loads()` (and therefore
+  `assemble_cadence_request()`) raises `CadenceStateError` before the
+  pure controller ever evaluates a request — it never hands the
+  controller an apparently-complete state that could manufacture a false
+  `PREPARE_MAIN_CANDIDATE` or `PREPARE_STORY`, and it never silently
+  treats the ambiguous row as zero either.
+- **No historical ledger mutation**: this is a read-only compatibility
+  layer. `analyze_ledger_compatibility()` provides a non-mutating,
+  non-raising-for-format-uncertainty audit (native/recovered/unknown row
+  counts and per-row references) for operators; no production ledger
+  migration is performed or required (`migration_required: False`).
+
 ## Exit rule for issue #31
 
 Issue #31 can close when:
