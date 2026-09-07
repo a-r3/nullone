@@ -40,11 +40,11 @@ Operational workstreams remain ahead of large migration/product work:
 Component-level repo engineering for #27–#36 is complete. Deployable
 end-to-end M0 integration is not complete.
 
-1. Review and accept #65 while #60 and #66 proceed independently.
-2. Implement #59 and #61 after #65; implement #62 after #65 + #60; then
-   implement #63 after #62. Each dependency uses normal Git/PR review.
-3. Rerun the strictly read-only #37 preflight only after #65, #59, #61, #62,
-   #63 and #66 are accepted.
+1. Implement #63 now that #65, #60 and #62 are merged/closed; keep its
+   repository implementation under normal Git/PR review.
+2. Implement #59 and #61 independently; do not couple their scope to #63.
+3. Rerun the strictly read-only #37 preflight only after #59, #61 and #63
+   are accepted (the earlier #65/#60/#62/#66 dependencies are complete).
 4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
    controlled deployment under #37.
 5. Observe natural production behavior; do not manufacture live proof.
@@ -64,7 +64,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational component issues #27, #28, #29, #30, #31, #32, #33, #34, #35 and #36 are CLOSED/COMPLETED; application-runtime architecture issue #65, integration dependencies #59–#63, the narrow legacy-publication-instruction blocker #66, and parent deployment issue #37 remain OPEN; #6 remains OPEN in M1 (its narrow M0-relevant subset is tracked by #66) and #13 remains OPEN in M3, generalizing #65's boundary without blocking it
+- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, and the narrow legacy-publication-instruction blocker #66 are CLOSED/COMPLETED; integration issues #59, #61 and #63 plus parent deployment issue #37 remain OPEN; #6 remains OPEN in M1 and #13 remains OPEN in M3
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -83,14 +83,14 @@ Relevant issues:
 - #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
-- #37 controlled production activation/validation — OPEN; its 2026-09-07 read-only preflight returned `BLOCKED`, so deployment remains prohibited while #65, #59–#63 and #66 are open
+- #37 controlled production activation/validation — OPEN; its 2026-09-07 read-only preflight returned `BLOCKED`, so deployment remains prohibited while #59, #61 and #63 remain open
 - #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only
-- #60 cadence-state backward compatibility — OPEN; makes historical publish-ledger rows safe for #32 without ad hoc production edits or guessed formats; repo-level read-only compatibility implementation drafted in PR #69 (branch `fix/n60-cadence-ledger-compat`, not yet merged) — deterministic manifest_id/live_zernio_post_id format recovery (identifier indices preserve every format seen per identifier, never last-write-wins, so a duplicate manifest_id cannot be silently resolved by file order), decision-relevant unresolved rows fail closed via `CadenceStateError` before controller evaluation, unresolved/UNKNOWN-format rows are excluded from published-ID reconciliation so they can never suppress a pending manifest or manufacture a false gap, `analyze_ledger_compatibility()` audit surface, `nullone_cadence_controller.py` unmodified, no production ledger migration performed or required (`migration_required: False`); not yet reviewed/merged, so #60 stays OPEN and #62/#37 remain correctly blocked until it merges
+- #60 cadence-state backward compatibility — CLOSED/COMPLETED; its merged read-only compatibility implementation supplies the authoritative load behavior reused by #62/#63; no production ledger migration was performed or required (`migration_required: False`)
 - #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
-- #62 `StoryWorkflow` and shared review-delivery adapter — OPEN; depends on #65 + #60 and owns the NullOne cadence-to-Story application workflow, `DraftProvider`, reusable `ReviewDelivery`, and scheduled-path Zernio proof
-- #63 `BreakingWorkflow` orchestration — OPEN; depends on #65 + #62 (and indirectly #60) and owns the NullOne Radar-candidate-to-#35-to-#36 application workflow; OpenClaw Breaking Radar is only the current trigger adapter
-- #65 NullOne Application Runtime architecture — OPEN; contract-first M0 decision establishing NullOne workflow ownership and OpenClaw/provider integrations as replaceable adapters; blocks #59, #61, #62 and #63, but not #60; generalized (not superseded) by future M3 issue #13, which does not block #65
-- #66 remove reachable legacy publication instructions/capabilities — OPEN; narrow M0-relevant subset of #6 (see below); blocks #37; independent of #59/#60/#61/#62/#63
+- #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
+- #63 `BreakingWorkflow` orchestration — OPEN; dependency on merged #62 is satisfied; repository implementation is in the `feature/n63-breaking-workflow` review branch/PR #71, hardened to preserve the exact #34/#36 verification vocabulary, defer optional-main preparation until after Story review delivery succeeds, derive candidate-level Radar occurrences, and emit contract-safe #27 mappings; no production activation or live Breaking proof
+- #65 NullOne Application Runtime architecture — CLOSED/COMPLETED; the accepted contract establishes NullOne workflow ownership and replaceable provider adapters
+- #66 remove reachable legacy publication instructions/capabilities — CLOSED/COMPLETED; no production activation was implied by repository completion
 
 ### Verified #5 completion — 2026-09-05 18:32–18:34
 PR #39 `Add isolated behavioral regression tests to CI` was verified with local authenticated `gh` and, after the repository became public, independently visible through the GitHub connector.
@@ -660,14 +660,13 @@ a future #13 implementation requires needs an explicit reviewed
 migration/ADR. No universal provider/plugin abstraction is introduced in #65
 merely to anticipate #13.
 
-### #62 implementation status — 2026-09-07 (IN PR, NOT MERGED)
+### Verified #62 completion — 2026-09-07
 
-Repository-level implementation of #62 (`StoryWorkflow` and shared
-review-delivery adapter) exists on branch
-`feature/n62-story-workflow-review-delivery`, opened as a pull request.
-**#62 remains OPEN.** This entry records repo-level implementation status
-only; it is not a completion record and must not be read as one until the
-PR is reviewed and merged.
+PR #70 (`Implement StoryWorkflow and shared review delivery`) squash-merged
+to `main` as `8d6d9844f0c494e3a813180fb7e83e87f713e745`, and #62 closed as
+`CLOSED/COMPLETED` through that merge. The merged implementation remains
+repository state only; it is not production activation or live provider
+proof.
 
 What the PR adds, layered per the #65 architecture:
 
@@ -757,11 +756,33 @@ cannot prove live behavior offline. No production file, OpenClaw
 config/job, cron entry, Zernio call, or Telegram send occurred while
 building or testing #62.
 
-**#63 (`BreakingWorkflow`) remains blocked** on #62 merging through normal
-review, per the #65 dependency order; #63 was not started by this work.
-No production activation occurred or is authorized by this entry; the
-repeated read-only #37 preflight remains the only path to
-`READY_FOR_CONTROLLED_DEPLOYMENT`.
+The #62 dependency for #63 is satisfied. Live scheduled-session Zernio and
+Telegram behavior remains unproven; `LIVE_SCHEDULED_PATH_UNPROVEN` is not a
+PASS and remains deferred to #37.
+
+### #63 implementation status — 2026-09-07 (IN PR, NOT MERGED)
+
+Repository-level `BreakingWorkflow` implementation is in the
+`feature/n63-breaking-workflow` review branch/PR. It accepts the shared
+normalized scheduler invocation plus strict machine-readable Radar handoff,
+recomputes #35 identity from fresh authoritative state, evaluates and strictly
+validates #36 routing, derives breaking Story/main maxima from authoritative
+published-plus-pending loads, and delegates durable Story-first execution to
+the unchanged #36 dispatcher. Story/main review drafts reuse the merged #62
+DraftProvider and ReviewDelivery boundaries.
+
+**#63 remains OPEN until its PR is reviewed and merged.** No production
+activation occurred. The current legacy Radar remains `DELTA_MONITORING_ONLY`
+and Markdown-only; its strict machine-readable handoff is `DESIRED / NOT
+DEPLOYED`. That desired edge maps one raw Radar scan plus each `candidate_id`
+into a distinct stable Breaking occurrence. The strict input accepts exactly
+`UNVERIFIED | PARTIAL | PASS | BLOCKED` and rejects `FAIL`. Optional-main
+preparation occurs only after Story reaches exact review-delivery `SENT`, so
+main dependency/candidate failures preserve durable Story success. Non-success
+#27 mapping text is normalized to one line and at most 240 characters while
+full diagnostics remain in application/audit state. Natural Breaking proof and
+the scheduled Zernio bootstrap remain
+`UNPROVEN_LIVE / DEFERRED_TO_#37` and `LIVE_SCHEDULED_PATH_UNPROVEN`.
 
 ### Verified #34 completion — 2026-09-06
 
@@ -1030,9 +1051,9 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 - Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
 - `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
 
-Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The later 2026-09-07 #37 read-only preflight identified previously uncaptured deployable-integration prerequisites, now tracked by #59–#63, and #65 makes the required NullOne-owned application/runtime boundary explicit; #37 remains open and deployment remains prohibited until those dependencies are reviewed/merged and preflight is rerun. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The later 2026-09-07 #37 read-only preflight identified deployable-integration prerequisites #59–#63; #60 and #62 are now merged/closed, while #59, #61 and #63 remain before a repeated preflight. #65's accepted NullOne-owned application/runtime boundary is also merged. #37 remains open and deployment remains prohibited until the remaining dependencies are reviewed/merged and preflight is rerun. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order (updated after the 2026-09-07 #37 preflight and consistency-hardening pass): #31 (cadence contract), #32 (cadence controller), #33 (Story draft pipeline), #34 (breaking policy), #35 (breaking identity/dedup), and #36 (breaking draft routing) are all accepted and merged — see their verified-completion sections above. Deployable end-to-end M0 integration is incomplete. The current sequence is: review #65 while #60 and #66 proceed; implement #59/#61 after #65, #62 after #65 + #60, and #63 after #62; rerun the strictly read-only #37 preflight only after #65/#59/#61/#62/#63/#66 are accepted; only on `READY_FOR_CONTROLLED_DEPLOYMENT`, deploy under #37; then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order (updated after #62 merged): #31–#36, #65, #60, #62 and #66 are accepted and merged. Deployable end-to-end M0 integration remains incomplete. Implement #63 through review now that its dependencies are satisfied; #59 and #61 remain independent open work. Rerun the strictly read-only #37 preflight only after #59/#61/#63 are accepted; only on `READY_FOR_CONTROLLED_DEPLOYMENT`, deploy under #37 and then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -1139,11 +1160,11 @@ rewrite historical production evidence or authorize deployment.
 
 ### Current M0 execution order
 
-1. Review #65 while #60 and #66 proceed independently.
-2. Implement #59 and #61 after #65; implement #62 after #65 + #60; then
-   implement #63 after #62, all through normal Git/PR review.
-3. Rerun the strictly read-only #37 preflight only after #65, #59, #61, #62,
-   #63 and #66 are accepted.
+1. Complete #63 through normal Git/PR review; #65/#60/#62 dependencies are
+   already accepted.
+2. Implement #59 and #61 independently; neither is started by #63 work.
+3. Rerun the strictly read-only #37 preflight only after #59, #61 and #63
+   are accepted.
 4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
    controlled deployment under #37.
 5. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
