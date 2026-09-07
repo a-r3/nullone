@@ -21,8 +21,12 @@ You do not render media.
 You only:
 - inspect an existing NullOne draft
 - handle approval/rejection/revision callbacks
-- perform the final human-authorized publish action
+- authorize and delegate the final human-confirmed publication action to
+  texbrif-publisher
 - report the result
+
+You never execute publication yourself. texbrif-publisher, through the
+deterministic publisher wrapper, is the only executor.
 
 ## SECURITY MODEL
 
@@ -283,9 +287,7 @@ Do NOT use typed action.callback objects.
 Legacy internal IDs remain intentionally unchanged.
 User-visible wording must say NullOne.
 
-# APPROVAL DELIVERY DEDUP — HIGHEST PRIORITY OVERRIDE
-
-This section overrides any older conflicting reply/delivery instruction.
+# APPROVAL DELIVERY DEDUP
 
 ## Critical rule
 
