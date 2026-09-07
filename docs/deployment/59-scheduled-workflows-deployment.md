@@ -1,0 +1,362 @@
+# MorningWorkflow / AnalyticsWorkflow deployment mapping (#59)
+
+Status: **PROPOSED / NOT APPLIED**
+
+This document records the repository-level mapping only. No production
+OpenClaw job, Claude invocation, Zernio connector, Telegram delivery,
+scheduler, secret, or publication state was changed while implementing #59.
+Current live Morning Editorial and Daily Analytics OpenClaw automations
+remain the legacy prompt-only `agentTurn` jobs described below; neither was
+read-edited-or-mutated by this change.
+
+## Application flow
+
+```text
+OpenClaw scheduler edge (nullone_openclaw_scheduler_adapter.py)
+  -> nullone.scheduler-invocation.v1
+  -> MorningWorkflow / AnalyticsWorkflow (nullone_morning_workflow.py /
+     nullone_analytics_workflow.py)
+  -> existing #28 / #29 domain runtime
+  -> exact persisted #27 result (reloaded from disk and validated)
+  -> #30 notify_if_required() domain-notification decision
+  -> typed MorningWorkflowResult / AnalyticsWorkflowResult
+```
+
+`MorningWorkflow`/`AnalyticsWorkflow` accept only `workflow_id ==
+"morning-editorial"` / `"daily-analytics"` respectively (via
+`nullone_scheduler_invocation.accept_workflow_trigger`), never invoke
+`openclaw`, never know Telegram/Zernio transport details, never know cron
+syntax or OpenClaw job UUIDs, and never publish, approve, schedule, or
+create Zernio drafts. The Claude CLI invocation and the Telegram/OpenClaw
+notification transport are both supplied as injected dependencies
+(`invoke_provider`, `notifier`); see
+`tests/test_scheduled_workflows_capability_negative.py` for the executable
+proof.
+
+## OpenClaw scheduler edge: confirmed read-only evidence
+
+`nullone_openclaw_scheduler_adapter.py` owns 100% of the OpenClaw-specific
+vocabulary at the trigger edge. It was built from real, read-only
+inspection of the installed OpenClaw 2026.8.2 CLI and the live Gateway on
+2026-09-07 -- `openclaw cron list/get/runs --json`. No job was created,
+edited, enabled, disabled, removed, or run.
+
+Confirmed facts:
+
+- Both live jobs are legacy prompt-only `agentTurn` automations:
+  `texbrif-morning-editorial` (id `0666d47b-aceb-4a4d-960a-b4888f2066ed`,
+  `schedule.expr="30 8 * * *"`, `schedule.tz="Asia/Baku"`) and
+  `texbrif-daily-analytics` (id `8e94064c-7e52-4ac5-a167-f3526f9f20c7`,
+  `schedule.expr="20 3 * * *"`, `schedule.tz="Asia/Baku"`). Neither invokes
+  this repository's application workflows today; this matches the #37
+  preflight's confirmed durable fact "Morning Editorial and Daily
+  Analytics: legacy job payloads still active."
+- A job's stable identity is its own UUID `id` field. This adapter uses
+  only that field, never a job's display name or prompt text, as the
+  stable "source job identity" input.
+- `openclaw cron runs --id <id> --json` proves a per-attempt `sessionKey`
+  (`agent:<agentId>:cron:<jobId>:run:<uuid>`) embeds a DIFFERENT UUID
+  between a failed attempt and its later successful retry for the *same*
+  logical scheduled occurrence: the real 2026-09-05 09:07 `ENOTFOUND`
+  failure and the real 2026-09-06 08:30 success for
+  `texbrif-morning-editorial` are two separate run records with two
+  different `run:<uuid>` suffixes. That per-attempt id is therefore never
+  used as occurrence identity -- exactly why
+  `docs/contracts/scheduler-invocation-v1.md` derives `occurrence_id` from
+  `(workflow_id, source, external_occurrence_id, scheduled_for)` rather
+  than trusting any source-supplied per-run id.
+- Each run record's own `runAtMs`/`runAtIso` is that attempt's actual start
+  instant, which can lag the job's cron target when a prior attempt failed
+  (confirmed: the failed 2026-09-05 attempt's `runAtIso` was `09:07:13`,
+  not the job's `08:30` cron target). Current wall-clock time is therefore
+  never used as occurrence identity by this adapter.
+
+**Confirmed gap, documented rather than guessed around**: `openclaw cron
+add/edit --help`'s documented `--command*` flags (the job type #37 would
+use to invoke `nullone-scheduled-run.py` directly, replacing the current
+prompt-only `agentTurn` payload) do not show an environment variable that
+reliably carries the *intended* cron-tick instant to a command-payload job,
+as distinct from wall-clock execution time. Before #37 activates a real
+`--command` job pointed at this repository's CLI, the exact wiring that
+supplies `scheduled_for` (the OpenClaw edge caller's responsibility, not
+`nullone_openclaw_scheduler_adapter.py`'s) must be confirmed against the
+live Gateway's actual command-job invocation environment at that time --
+never guessed from this document.
+
+`nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id,
+openclaw_job_id, scheduled_for, triggered_at)` is a pure function (no I/O,
+no subprocess, no network) deriving `external_occurrence_id =
+f"openclaw-job-{openclaw_job_id}-at-{scheduled_for}"` and computing
+`occurrence_id` via the existing contract rule. It fails closed
+(`SchedulerInvocationError`) if `scheduled_for` is missing/blank rather
+than substituting the current time.
+
+## MorningWorkflow
+
+`nullone_morning_workflow.run_morning_workflow(trigger, *,
+invoke_provider, notifier=None, run_editorial=run_morning_editorial,
+artifact_root=WORKSPACE, output_root=<#28 run-outcome root>,
+sleep=time.sleep, timezone_name="Asia/Baku") -> MorningWorkflowResult`.
+
+1. Validates the trigger (`accept_workflow_trigger(..., workflow_id=
+   "morning-editorial")`); a rejected trigger never reaches the runtime.
+2. Derives `board_date` from `scheduled_for` converted to Asia/Baku
+   (`nullone_scheduled_workflow_support.derive_local_date`) -- never by
+   slicing the opaque `occ_<hex>` `occurrence_id`.
+3. Calls the existing #28 `run_morning_editorial` exactly once logically
+   per normalized occurrence (its own `fcntl.flock` + persisted-result
+   check already make re-entry/replay/concurrency safe; MorningWorkflow
+   adds no competing lock or retry layer).
+4. Computes `expected_run_id = make_run_id("morning-editorial",
+   occurrence_id)` and reloads the exact persisted file from
+   `result_path(output_root, expected_run_id)` -- never trusting the
+   in-memory return, stdout, or exit code alone.
+5. Validates full #27 structure (`validate_result_structure`) and proves
+   `workflow_id`/`occurrence_id`/`run_id` match exactly; any mismatch or
+   unreadable/malformed file fails closed
+   (`RESULT_MISSING_OR_CORRUPT`/`RESULT_INVALID`/`RESULT_IDENTITY_MISMATCH`)
+   without repairing the file.
+6. Reconciles the in-memory return against the persisted record on
+   `run_id`/`workflow_id`/`occurrence_id`/`domain_outcome`; disagreement is
+   `RESULT_RECONCILIATION_REQUIRED`.
+7. Only then calls the injected `notifier(persisted_result)` at most once
+   (never `notify_if_required` or `OpenClawTelegramTransport` directly --
+   see "Notification composition" below); a notifier exception (unsafe/
+   corrupt on-disk notification state) is `NOTIFICATION_STATE_UNSAFE` and
+   never reruns Morning or rewrites the #27 result.
+
+The Claude CLI invocation itself was extracted, behavior-identical, from
+`nullone-morning-editorial-run.py`'s previous in-file
+`_default_invoke_provider` into `nullone_claude_editorial_provider
+.default_invoke_provider` -- same model, timeout, tool allowlist, and
+provider-failure classification -- so the legacy CLI wrapper and
+`nullone-scheduled-run.py` share exactly one implementation.
+`MorningWorkflow` never imports it; only the two CLI/runner layers do.
+
+## AnalyticsWorkflow
+
+`nullone_analytics_workflow.run_analytics_workflow(trigger, *,
+provider_factory, notifier=None, run_analytics=run_daily_analytics,
+artifact_root=WORKSPACE, output_root=<#29 run-outcome root>,
+timezone_name="Asia/Baku") -> AnalyticsWorkflowResult`.
+
+Mirrors MorningWorkflow's validate -> derive-date -> execute -> reload ->
+prove -> reconcile -> notify sequence, with `analytics_date` in place of
+`board_date` and the existing #29 `run_daily_analytics` in place of #28.
+
+### AnalyticsProvider boundary (#61 seam)
+
+`provider_factory: Callable[[], AnalyticsProvider]` is passed through
+unchanged as `run_daily_analytics`'s existing `build_connector` parameter
+-- the exact narrow read-only surface `nullone_zernio_analytics_adapter`
+already defines (account, follower history, account insights, post
+analytics). `AnalyticsWorkflow` never reads the production analytics
+credential environment variable, never touches systemd, and never
+constructs a Zernio connector itself (enforced by
+`tests/test_scheduled_workflows_capability_negative.py`'s
+`test_no_analytics_secret_env_var_name`).
+
+The production factory boundary lives in
+`nullone_analytics_provider_factory.py` (infrastructure, not application
+layer), wired in only by `nullone-scheduled-run.py`. Per #59's scope
+boundary against #61, `build_production_analytics_provider()` is a
+fail-closed placeholder:
+
+```text
+PROVIDER_SECRET_WIRING_PENDING_61
+```
+
+It never reads any secret, environment variable, or credential file, and
+never calls Zernio -- verified by
+`test_factory_placeholder_raises_without_reading_environment`, which
+injects the real secret env var name into the process environment and
+asserts it is never read and never leaked into the raised error text.
+Because this placeholder's exception is not one of #29's typed connector
+errors, `run_daily_analytics` does not catch it: it propagates through
+`AnalyticsWorkflow` uncaught and is reported as
+`application_execution=RUNTIME_CRASHED` (never faked into a domain
+`BLOCKED` #27 result, and never a real Zernio bootstrap attempt).
+Completing `build_production_analytics_provider` to construct a real
+`ZernioReadOnlyAnalyticsConnector` behind a securely-injected credential is
+issue #61's job; `AnalyticsWorkflow` and its tests do not need to change
+when it does.
+
+## Exact persisted #27 result is authoritative
+
+Both workflows compute `expected_run_id` themselves and reload
+`result_path(output_root, expected_run_id)` from disk after runtime
+execution/re-entry -- never trusting stdout, CLI exit code, or the
+in-memory return alone. `validate_result_structure` (the existing #27
+validator) is reused unmodified. Required fail-closed mismatch cases,
+never silently repaired:
+
+| Condition | `reason_code` |
+| --- | --- |
+| Missing file / OS error / not valid JSON / not a JSON object | `RESULT_MISSING_OR_CORRUPT` |
+| Valid JSON but fails #27 structural validation (wrong schema, unexpected fields, invalid health/outcome relationship, etc.) | `RESULT_INVALID` |
+| Structurally valid but `workflow_id`/`occurrence_id`/`run_id` does not match this occurrence | `RESULT_IDENTITY_MISMATCH` |
+| Persisted record valid and matching, but the in-memory runtime return disagrees with it on `run_id`/`workflow_id`/`occurrence_id`/`domain_outcome` | `RESULT_RECONCILIATION_REQUIRED` (`reconciliation_required=True`) |
+
+## Critical scheduler-vs-domain separation
+
+Per `docs/architecture/nullone-application-runtime.md`'s "Critical
+scheduler-vs-domain rule": `application_execution` (`"COMPLETED"` /
+`"FAILED"`) reflects only whether orchestration itself safely established/
+validated the occurrence, result, and notification state -- **never** the
+domain outcome. A `domain_outcome` of `BLOCKED`, `FAILED`, or actionable
+`UNKNOWN` is still `application_execution="COMPLETED"`, because the
+application successfully executed/re-entered the domain runtime, found and
+validated the exact persisted #27 result, and evaluated the #30
+notification decision.
+
+`application_execution="FAILED"` is reserved for: an invalid normalized
+trigger (`TRIGGER_REJECTED`), an unparseable `scheduled_for`
+(`SCHEDULED_FOR_INVALID`), the domain runtime raising before establishing
+any result (`RUNTIME_CRASHED` -- this is also how the #61 provider-secret
+placeholder surfaces), a missing/corrupt/mismatched persisted result (the
+table above), an unreconciled in-memory/persisted disagreement, or the
+injected `notifier` raising (`NOTIFICATION_STATE_UNSAFE` -- a #30-level
+unsafe/corrupt on-disk notification-record state, distinct from #30's own
+normal typed `FAILED`/`UNKNOWN` transport outcomes, which are reported
+truthfully via `notification_status` with `application_execution` still
+`"COMPLETED"`: #30 already durably records those without this layer's
+help, and a transport ambiguity is not an orchestration-establishment
+failure).
+
+This module deliberately does NOT use the legacy CLI convention
+(`domain_outcome != SUCCEEDED -> process exit 1`) that
+`nullone-morning-editorial-run.py`/`nullone-daily-analytics-run.py` still
+use for their own unrelated CLI contract; those wrappers are unchanged by
+#59.
+
+## `nullone-scheduled-run.py` CLI exit semantics
+
+```text
+nullone-scheduled-run.py morning --trigger-file <path>
+nullone-scheduled-run.py analytics --trigger-file <path>
+```
+
+- **Exit 0**: `application_execution == "COMPLETED"` -- a valid occurrence
+  was fully orchestrated and a valid authoritative #27 result exists,
+  regardless of whether `domain_outcome` is `SUCCEEDED`, `BLOCKED`,
+  `FAILED`, or actionable `UNKNOWN`.
+- **Non-zero**: `application_execution == "FAILED"` -- orchestration itself
+  could not safely establish/validate the occurrence/result/notification
+  state.
+
+`tests/test_scheduled_run_cli.py` carries the mandatory regression: a
+persisted Daily Analytics `domain_outcome=BLOCKED` /
+`scheduler_status=succeeded` result yields exit 0 with the #30 notifier
+evaluated, while a corrupt/missing persisted result yields non-zero.
+Production wiring uses `nullone_claude_editorial_provider
+.default_invoke_provider` and `nullone_analytics_provider_factory
+.build_production_analytics_provider` as the two provider defaults, and
+`notify_if_required(..., transport=OpenClawTelegramTransport())` as the
+notifier -- the only place this CLI (not `MorningWorkflow`/
+`AnalyticsWorkflow`) knows OpenClaw/Telegram is the transport.
+
+## Notification composition (#30)
+
+Both workflows call an injected `notifier: Callable[[dict], dict] | None`
+with the exact persisted #27 record, at most once per call, and never
+reimplement actionability, failure identity, the sanitizer, the Telegram
+message, or notification-attempt state -- all of that remains
+`nullone_failure_notify.notify_if_required`'s existing, unmodified job.
+Production wiring binds `notifier` to:
+
+```python
+lambda result: notify_if_required(result, transport=OpenClawTelegramTransport())
+```
+
+in `nullone-scheduled-run.py` only; neither workflow module imports
+`OpenClawTelegramTransport` (enforced by
+`test_no_openclaw_import_or_cli_invocation`'s `OpenClawTelegramTransport`
+check).
+
+- **Healthy results stay quiet**: `domain_outcome=SUCCEEDED` (including
+  `empty_success=NO_DATA`/`NO_ACTION`) reaches `notify_if_required`, which
+  returns `NOT_REQUIRED` and sends nothing -- the workflow still reports
+  this truthfully via `notification_status`.
+- **Actionable domain results notify once**: `BLOCKED`/`FAILED`/actionable
+  `UNKNOWN` (with `scheduler_status` not itself scheduler-native) reach
+  `SENT` on first delivery, `ALREADY_SENT`/`ALREADY_FAILED`/
+  `ALREADY_UNKNOWN` on exact replay -- #30's own durable, locked
+  idempotence is authoritative; no second attempt counter is added here.
+- **Scheduler-native failure ownership preserved unchanged**: when the
+  persisted record's own `scheduler_status` is `error`/`failed`
+  (case-insensitive) -- which is exactly what #28's bounded-retry
+  exhaustion currently persists for Morning Editorial -- `notify_if_
+  required` already defers (`NOT_REQUIRED`,
+  `policy=SCHEDULER_NATIVE_FAILURE_ALERT`) rather than sending a duplicate
+  alert alongside OpenClaw's own native `failureAlert`. Neither workflow
+  module contains any special-case logic for this; it flows through
+  unchanged #28/#30 behavior.
+- **Notifier failure/timeout is never auto-retried**: a `notify_if_
+  required` transport timeout (`UNKNOWN`) or definite failure (`FAILED`)
+  is a normal, non-exception, durably-recorded #30 return -- reported
+  truthfully via `notification_status` with `application_execution`
+  staying `"COMPLETED"`, since #30 itself already fails closed against a
+  second automatic send attempt on re-entry. Only a genuinely unsafe/
+  corrupt on-disk notification state (`notify_if_required` raising
+  `NotifierError`) is treated as an application-level orchestration
+  failure (`NOTIFICATION_STATE_UNSAFE`) -- see "Critical scheduler-vs-
+  domain separation" above for the reasoning.
+
+As required by #37's own preflight notification requirement
+(`docs/deployment/37-preflight-notification-requirements.md`), the
+OpenClaw native `failureAlert` must be configured for both automations as
+part of controlled #37 activation -- **not activated by #59**. This
+document does not repeat or supersede that requirement; it only confirms
+#59's notifier composition already assumes and preserves it.
+
+## OpenClaw job payloads: DESIRED / NOT DEPLOYED
+
+The following describes the intended #37 activation shape only. No job
+below has been created, edited, enabled, or disabled by #59.
+
+### Morning Editorial (DESIRED / NOT DEPLOYED)
+
+```text
+normalized OpenClaw occurrence (job id 0666d47b-..., scheduled_for)
+  -> nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id="morning-editorial", ...)
+  -> nullone-scheduled-run.py morning --trigger-file <normalized trigger>
+  -> MorningWorkflow -> #28 -> #27 -> #30
+```
+
+Would replace the current `agentTurn` payload
+(`"Read social/ops/prompts/morning-editorial.md and execute it exactly."`)
+with a `--command`/`--command-argv` job invoking this repository's CLI.
+Exact `--command-env`/argv wiring for `scheduled_for` remains open pending
+the confirmed gap above.
+
+### Daily Analytics (DESIRED / NOT DEPLOYED)
+
+```text
+normalized OpenClaw occurrence (job id 8e94064c-..., scheduled_for)
+  -> nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id="daily-analytics", ...)
+  -> nullone-scheduled-run.py analytics --trigger-file <normalized trigger>
+  -> AnalyticsWorkflow -> #61 AnalyticsProvider wiring -> #29 -> #27 -> #30
+```
+
+Requires #61 to complete `build_production_analytics_provider` before
+activation can produce anything other than
+`PROVIDER_SECRET_WIRING_PENDING_61`.
+
+Both desired jobs: exit 0 means orchestration completed regardless of
+domain outcome (never inferred as domain success); exit non-zero is
+reserved for a genuine orchestration-establishment failure; native
+`failureAlert` (once configured under #37, not here) owns the
+scheduler-execution-failure surface, never duplicated by #30.
+
+## Current live limitations
+
+Both live OpenClaw automations remain the legacy prompt-only `agentTurn`
+jobs confirmed above; neither invokes `MorningWorkflow`/
+`AnalyticsWorkflow`/`nullone-scheduled-run.py`. No Story-specific live job
+exists either (unrelated to #59). `ZERNIO_ANALYTICS_API_TOKEN` remains
+absent from the production environment (issue #61, unimplemented by
+design here). Daily production activation of Daily Analytics requires
+**#59 + #61**; Morning Editorial's production activation additionally
+requires the #37 job-payload migration above. Natural live scheduled proof
+of either workflow remains `UNPROVEN_LIVE / DEFERRED_TO_#37`; no synthetic
+production event may be used to manufacture it.
