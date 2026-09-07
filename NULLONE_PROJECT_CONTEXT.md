@@ -38,16 +38,24 @@ No blind autonomous publishing.
 Operational workstreams remain ahead of large migration/product work:
 
 Component-level repo engineering for #27–#36 is complete. Deployable
-end-to-end M0 integration is not complete.
+end-to-end M0 integration is not complete. Repository-level
+`BreakingWorkflow` implementation is complete: #63 is CLOSED/COMPLETED and
+PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`.
+No production activation occurred. The remaining M0 repository blockers are
+exactly #59 and #61.
 
-1. Implement #63 now that #65, #60 and #62 are merged/closed; keep its
-   repository implementation under normal Git/PR review.
-2. Implement #59 and #61 independently; do not couple their scope to #63.
-3. Rerun the strictly read-only #37 preflight only after #59, #61 and #63
-   are accepted (the earlier #65/#60/#62/#66 dependencies are complete).
-4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
+1. Implement #59 and #61 independently and merge them through normal review.
+2. Rerun the strictly read-only #37 preflight only after #59 and #61 are
+   accepted (the earlier #65/#60/#62/#63/#66 dependencies are complete).
+3. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
    controlled deployment under #37.
-5. Observe natural production behavior; do not manufacture live proof.
+4. Observe natural production behavior; do not manufacture live proof.
+
+Required order:
+
+`#59 + #61 → review/merge → repeat strictly read-only #37 preflight → only READY_FOR_CONTROLLED_DEPLOYMENT permits deployment`
+
+No ad-hoc deployment is permitted.
 
 Existing M1/M2/M3 remain intact.
 
@@ -64,7 +72,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, and the narrow legacy-publication-instruction blocker #66 are CLOSED/COMPLETED; integration issues #59, #61 and #63 plus parent deployment issue #37 remain OPEN; #6 remains OPEN in M1 and #13 remains OPEN in M3
+- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, BreakingWorkflow orchestration #63, and the narrow legacy-publication-instruction blocker #66 are CLOSED/COMPLETED; the remaining M0 repository blockers are exactly #59 and #61, while parent deployment issue #37 remains OPEN; #6 remains OPEN in M1 and #13 remains OPEN in M3
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -83,12 +91,12 @@ Relevant issues:
 - #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
-- #37 controlled production activation/validation — OPEN; its 2026-09-07 read-only preflight returned `BLOCKED`, so deployment remains prohibited while #59, #61 and #63 remain open
+- #37 controlled production activation/validation — OPEN; its historical 2026-09-07 read-only preflight returned `BLOCKED`; it is not `READY`, and deployment remains prohibited while #59 and #61 remain open and until a repeated strictly read-only preflight returns `READY_FOR_CONTROLLED_DEPLOYMENT`
 - #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only
 - #60 cadence-state backward compatibility — CLOSED/COMPLETED; its merged read-only compatibility implementation supplies the authoritative load behavior reused by #62/#63; no production ledger migration was performed or required (`migration_required: False`)
 - #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
 - #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
-- #63 `BreakingWorkflow` orchestration — OPEN; dependency on merged #62 is satisfied; repository implementation is in the `feature/n63-breaking-workflow` review branch/PR #71, hardened to preserve the exact #34/#36 verification vocabulary, defer optional-main preparation until after Story review delivery succeeds, derive candidate-level Radar occurrences, and emit contract-safe #27 mappings; no production activation or live Breaking proof
+- #63 `BreakingWorkflow` orchestration — CLOSED/COMPLETED; PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`; repository-level implementation is complete and preserves the exact #34/#36 verification vocabulary, defers optional-main preparation until after Story review delivery succeeds, derives candidate-level Radar occurrences, and emits contract-safe #27 mappings; no production activation occurred, strict Radar handoff remains `DESIRED / NOT DEPLOYED`, natural Breaking live proof remains `UNPROVEN_LIVE / DEFERRED_TO_#37`, and the scheduled Zernio path remains `LIVE_SCHEDULED_PATH_UNPROVEN`
 - #65 NullOne Application Runtime architecture — CLOSED/COMPLETED; the accepted contract establishes NullOne workflow ownership and replaceable provider adapters
 - #66 remove reachable legacy publication instructions/capabilities — CLOSED/COMPLETED; no production activation was implied by repository completion
 
@@ -485,7 +493,12 @@ performs controlled activation:
 - no real #36 Telegram/Zernio breaking cycle has occurred;
 - #37 remains the explicit deployment/preflight/live-validation boundary.
 
-### #37 preflight — 2026-09-07
+### Historical #37 preflight state — 2026-09-07
+
+This section records production evidence at the time of the preflight. It is
+not rewritten to imply that #63 was complete then. Current Git desired state
+is recorded in the current execution priority, GitHub planning/engineering
+state, and verified-completion sections.
 
 Verdict: `BLOCKED`. The preflight was strictly read-only against canonical
 desired Git SHA `0d68aebc3d83cc528398ca0e3348b7306db6ffe4`. No production
@@ -760,10 +773,12 @@ The #62 dependency for #63 is satisfied. Live scheduled-session Zernio and
 Telegram behavior remains unproven; `LIVE_SCHEDULED_PATH_UNPROVEN` is not a
 PASS and remains deferred to #37.
 
-### #63 implementation status — 2026-09-07 (IN PR, NOT MERGED)
+### Verified #63 completion — 2026-09-07
 
-Repository-level `BreakingWorkflow` implementation is in the
-`feature/n63-breaking-workflow` review branch/PR. It accepts the shared
+Issue #63 is CLOSED/COMPLETED. PR #71 `Implement BreakingWorkflow
+orchestration` squash-merged to `main` as
+`34b35cba7bea0c366096bfbfd5d7141743c87189`. Repository-level
+`BreakingWorkflow` implementation is complete. It accepts the shared
 normalized scheduler invocation plus strict machine-readable Radar handoff,
 recomputes #35 identity from fresh authoritative state, evaluates and strictly
 validates #36 routing, derives breaking Story/main maxima from authoritative
@@ -771,18 +786,18 @@ published-plus-pending loads, and delegates durable Story-first execution to
 the unchanged #36 dispatcher. Story/main review drafts reuse the merged #62
 DraftProvider and ReviewDelivery boundaries.
 
-**#63 remains OPEN until its PR is reviewed and merged.** No production
-activation occurred. The current legacy Radar remains `DELTA_MONITORING_ONLY`
-and Markdown-only; its strict machine-readable handoff is `DESIRED / NOT
-DEPLOYED`. That desired edge maps one raw Radar scan plus each `candidate_id`
-into a distinct stable Breaking occurrence. The strict input accepts exactly
-`UNVERIFIED | PARTIAL | PASS | BLOCKED` and rejects `FAIL`. Optional-main
-preparation occurs only after Story reaches exact review-delivery `SENT`, so
-main dependency/candidate failures preserve durable Story success. Non-success
-#27 mapping text is normalized to one line and at most 240 characters while
-full diagnostics remain in application/audit state. Natural Breaking proof and
-the scheduled Zernio bootstrap remain
-`UNPROVEN_LIVE / DEFERRED_TO_#37` and `LIVE_SCHEDULED_PATH_UNPROVEN`.
+This is repository completion only; no production activation occurred. The
+current legacy Radar remains `DELTA_MONITORING_ONLY` and Markdown-only; its
+strict machine-readable handoff remains `DESIRED / NOT DEPLOYED`. That desired
+edge maps one raw Radar scan plus each `candidate_id` into a distinct stable
+Breaking occurrence. The strict input accepts exactly `UNVERIFIED | PARTIAL |
+PASS | BLOCKED` and rejects `FAIL`. Optional-main preparation occurs only after
+Story reaches exact review-delivery `SENT`, so main dependency/candidate
+failures preserve durable Story success. Non-success #27 mapping text is
+normalized to one line and at most 240 characters while full diagnostics
+remain in application/audit state. Natural Breaking live proof remains
+`UNPROVEN_LIVE / DEFERRED_TO_#37`; the scheduled Zernio path remains
+`LIVE_SCHEDULED_PATH_UNPROVEN`.
 
 ### Verified #34 completion — 2026-09-06
 
@@ -1158,15 +1173,13 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current M0 execution order
+### Current Git desired-state M0 execution order — after PR #71
 
-1. Complete #63 through normal Git/PR review; #65/#60/#62 dependencies are
-   already accepted.
-2. Implement #59 and #61 independently; neither is started by #63 work.
-3. Rerun the strictly read-only #37 preflight only after #59, #61 and #63
-   are accepted.
-4. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
-   controlled deployment under #37.
+1. Implement #59 and #61 independently.
+2. Review and merge #59 and #61 through normal change control.
+3. Repeat the strictly read-only #37 preflight.
+4. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
+   deployment under #37; no ad-hoc deployment is permitted.
 5. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
 
 #37 remains OPEN under its unchanged acceptance criteria. Once its
