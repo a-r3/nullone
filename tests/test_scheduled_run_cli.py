@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "workspace/social/ops/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import nullone_scheduled_run_dispatch as dispatch  # noqa: E402
 from nullone_analytics_workflow import run_analytics_workflow  # noqa: E402
 from nullone_editorial_runtime import ProviderUnreachableError  # noqa: E402
 from nullone_failure_notify import notify_if_required  # noqa: E402
@@ -223,8 +224,11 @@ class NotifierAtMostOnceTests(unittest.TestCase):
 
 class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
     """Proves the pre-hardening no-alert gap is fixed end to end through
-    the real production notifier binding (`cli._production_notifier`),
-    which is the exact wiring `nullone-scheduled-run.py morning` uses.
+    the real production notifier binding
+    (`nullone_scheduled_run_dispatch.production_notifier`), which is the
+    exact wiring both `nullone-scheduled-run.py morning` and
+    `nullone-scheduled-wakeup.py morning` use (#59 remaining-scope section
+    16 extracted this wiring into a module shared by both entrypoints).
 
     Before this fix: a persistent real #28 Morning provider failure
     persists `scheduler_status="error"`/`domain_outcome="FAILED"`; the new
@@ -241,12 +245,12 @@ class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
     def _isolated_notify_if_required(output_root):
         """A stand-in for `nullone_failure_notify.notify_if_required` that
         forwards every call unchanged except pinning `output_root` to an
-        isolated temp directory -- `cli._production_notifier` itself never
-        exposes an `output_root` override (correctly: production always
-        uses the real default), so a test exercising it verbatim must
-        instead isolate storage by patching the name `cli.notify_if_required`
-        resolves at call time, not by passing extra arguments through
-        `_production_notifier`."""
+        isolated temp directory -- `dispatch.production_notifier` itself
+        never exposes an `output_root` override (correctly: production
+        always uses the real default), so a test exercising it verbatim
+        must instead isolate storage by patching the name
+        `dispatch.notify_if_required` resolves at call time, not by
+        passing extra arguments through `production_notifier`."""
 
         def _wrapped(result, *, transport, scheduler_native_failure_owned=None, **kwargs):
             return notify_if_required(
@@ -288,12 +292,12 @@ class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
 
             isolated_notify = self._isolated_notify_if_required(root / "notifications")
 
-            with mock.patch.object(cli, "OpenClawTelegramTransport", return_value=FakeTransport()), \
-                 mock.patch.object(cli, "notify_if_required", isolated_notify):
+            with mock.patch.object(dispatch, "OpenClawTelegramTransport", return_value=FakeTransport()), \
+                 mock.patch.object(dispatch, "notify_if_required", isolated_notify):
                 first = run_morning_workflow(
                     trigger,
                     invoke_provider=always_unreachable,
-                    notifier=cli._production_notifier,
+                    notifier=dispatch.production_notifier,
                     artifact_root=root / "artifacts",
                     output_root=root / "run-outcomes",
                     sleep=lambda _s: None,
@@ -314,14 +318,14 @@ class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
 
             # Exact replay: provider not called again, no second alert,
             # still exit 0.
-            with mock.patch.object(cli, "OpenClawTelegramTransport", return_value=FakeTransport()), \
-                 mock.patch.object(cli, "notify_if_required", isolated_notify):
+            with mock.patch.object(dispatch, "OpenClawTelegramTransport", return_value=FakeTransport()), \
+                 mock.patch.object(dispatch, "notify_if_required", isolated_notify):
                 second = run_morning_workflow(
                     trigger,
                     invoke_provider=lambda: (_ for _ in ()).throw(
                         AssertionError("provider must not run again on replay")
                     ),
-                    notifier=cli._production_notifier,
+                    notifier=dispatch.production_notifier,
                     artifact_root=root / "artifacts",
                     output_root=root / "run-outcomes",
                     sleep=lambda _s: None,
@@ -352,12 +356,12 @@ class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
             trigger = make_trigger(external_occurrence_id="cli-daily-blocked-unchanged")
             isolated_notify = self._isolated_notify_if_required(root / "notifications")
 
-            with mock.patch.object(cli, "OpenClawTelegramTransport", return_value=FakeTransport()), \
-                 mock.patch.object(cli, "notify_if_required", isolated_notify):
+            with mock.patch.object(dispatch, "OpenClawTelegramTransport", return_value=FakeTransport()), \
+                 mock.patch.object(dispatch, "notify_if_required", isolated_notify):
                 first = run_analytics_workflow(
                     trigger,
                     provider_factory=unauthorized_factory,
-                    notifier=cli._production_notifier,
+                    notifier=dispatch.production_notifier,
                     artifact_root=root / "artifacts",
                     output_root=root / "run-outcomes",
                 )
@@ -366,7 +370,7 @@ class MorningNativeAlertOwnershipHardeningTests(unittest.TestCase):
                     provider_factory=lambda: (_ for _ in ()).throw(
                         AssertionError("provider must not run again on replay")
                     ),
-                    notifier=cli._production_notifier,
+                    notifier=dispatch.production_notifier,
                     artifact_root=root / "artifacts",
                     output_root=root / "run-outcomes",
                 )

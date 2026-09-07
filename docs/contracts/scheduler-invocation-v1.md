@@ -260,15 +260,34 @@ run_id         = make_run_id(workflow_id, occurrence_id)
 
 ### Current OpenClaw example (placeholders only)
 
+Clarification (#59 remaining scope, 2026-09-07): direct read-only source
+inspection of the installed OpenClaw 2026.8.2 package confirmed that a
+scheduled command-payload job's process does **not** receive OpenClaw's own
+scheduled instant through any argv/env/stdin channel (see
+`docs/deployment/59-scheduled-workflows-deployment.md`'s "OpenClaw trigger
+edge: CONFIRMED BLOCKED"). This schema and its `occurrence_id` derivation
+rule are unchanged by that finding -- every field below is still exactly
+what this contract requires -- but the diagram is corrected so it does not
+imply OpenClaw's process directly observes "OpenClaw's scheduled instant."
+For OpenClaw 2026.8.2 specifically, the edge adapter is a static wake-up
+only; a NullOne-owned scheduled-occurrence authority (#59) resolves the
+exact `scheduled_for` before this contract's payload is constructed:
+
 ```text
-OpenClaw scheduler occurrence
-        |  (OpenClaw-internal job id, schedule config -- not shown)
+OpenClaw --command job fires (wake-up only, no scheduled instant supplied)
         v
-OpenClaw edge adapter
-        |  maps: OpenClaw job -> workflow_id
-        |        "openclaw"  -> source
-        |        OpenClaw's own occurrence marker -> external_occurrence_id (opaque)
-        |        OpenClaw's scheduled instant -> scheduled_for (normalized to UTC RFC 3339)
+OpenClaw edge adapter (wake-up only)
+        |  supplies: "openclaw" -> source
+        |            wall-clock observation time -> triggered_at
+        v
+NullOne Scheduled Occurrence Authority (#59)
+        |  resolves the exact NullOne-owned scheduled_for for this
+        |  workflow/source/triggered_at (see
+        |  docs/deployment/59-scheduled-workflows-deployment.md)
+        |  maps: NullOne workflow identity -> workflow_id
+        |        "openclaw"  -> source (unchanged; still the adapter namespace)
+        |        schedule_id + resolved scheduled_for -> external_occurrence_id (opaque)
+        |        resolved local schedule slot -> scheduled_for (normalized to UTC RFC 3339)
         |        wall-clock observation time -> triggered_at
         |        computes occurrence_id per the rule above
         v
@@ -277,8 +296,13 @@ nullone.scheduler-invocation.v1
 NullOne Application Runtime
 ```
 
-Concrete placeholder payload (no private job IDs, no production cron
-payload):
+A future scheduler mechanism that genuinely does supply an exact intended
+`scheduled_for` up front (not OpenClaw 2026.8.2's command-payload surface)
+could still populate this same schema directly via
+`nullone_openclaw_scheduler_adapter.map_openclaw_occurrence` or an
+equivalent adapter -- that pure mapping function is unaffected by this
+clarification. Concrete placeholder payload (no private job IDs, no
+production cron payload):
 
 ```json
 {

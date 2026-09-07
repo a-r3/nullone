@@ -53,6 +53,8 @@ APPLICATION_MODULES = (
     "nullone_morning_workflow.py",
     "nullone_analytics_workflow.py",
     "nullone_scheduled_workflow_support.py",
+    "nullone_schedule_registry.py",
+    "nullone_scheduled_occurrence_authority.py",
 )
 
 # Infrastructure adapters -- legitimately shell out / document the pending
@@ -65,6 +67,8 @@ INFRASTRUCTURE_ADAPTER_MODULES = (
     "nullone_analytics_provider_factory.py",
     "nullone_openclaw_scheduler_adapter.py",
     "nullone-scheduled-run.py",
+    "nullone_scheduled_run_dispatch.py",
+    "nullone-scheduled-wakeup.py",
 )
 
 # Real Zernio MCP tool/endpoint names (concrete capability, never
@@ -194,6 +198,8 @@ class NoPublisherOrApprovalCapabilityAnywhereTests(unittest.TestCase):
     def test_no_module_imports_publisher_at_runtime(self):
         import nullone_analytics_workflow  # noqa: F401
         import nullone_morning_workflow  # noqa: F401
+        import nullone_schedule_registry  # noqa: F401
+        import nullone_scheduled_occurrence_authority  # noqa: F401
         import nullone_scheduled_workflow_support  # noqa: F401
 
         module_names = set(sys.modules.keys())
@@ -245,6 +251,74 @@ class NoScheduleFrameworkTests(unittest.TestCase):
                 source,
                 msg=f"OpenClaw scheduler edge adapter must never reference {forbidden!r}",
             )
+
+
+# Modules the #59 remaining-scope occurrence-authority work introduced.
+# Neither may hold any persistence/database/queue capability of its own --
+# #28/#29's existing per-occurrence lock and persisted #27 result already
+# make replay/concurrency safe once these compute a `scheduled_for`; see
+# each module's own docstring "non-goals" section.
+OCCURRENCE_AUTHORITY_MODULES = (
+    "nullone_schedule_registry.py",
+    "nullone_scheduled_occurrence_authority.py",
+)
+
+FORBIDDEN_PERSISTENCE_TOKENS = (
+    "sqlite3",
+    "psycopg2",
+    "pymongo",
+    "redis",
+    "CREATE TABLE",
+    "INSERT INTO",
+    "fcntl",
+    "shelve",
+    "pickle",
+)
+
+
+class NoNewSchedulerLedgerOrStateTests(unittest.TestCase):
+    """Regression for #59 remaining-scope section 33/9: the M0 schedule
+    registry and occurrence authority are repo-owned desired-state
+    code/config, not a new mutable runtime persistence layer -- proven
+    both by absence of any persistence-capability token and by these
+    modules never opening a file at all."""
+
+    def test_no_persistence_capability_tokens(self):
+        for filename in OCCURRENCE_AUTHORITY_MODULES:
+            source = code_only((SCRIPTS / filename).read_text(encoding="utf-8"))
+            for forbidden in FORBIDDEN_PERSISTENCE_TOKENS:
+                self.assertNotIn(
+                    forbidden,
+                    source,
+                    msg=f"{filename} must never reference {forbidden!r} -- no new scheduler ledger",
+                )
+
+    def test_no_filesystem_open_capability(self):
+        for filename in OCCURRENCE_AUTHORITY_MODULES:
+            source = code_only((SCRIPTS / filename).read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "open(",
+                source,
+                msg=f"{filename} must have zero file I/O capability -- pure function/config only",
+            )
+
+    def test_no_subprocess_or_network(self):
+        for filename in OCCURRENCE_AUTHORITY_MODULES:
+            source = code_only((SCRIPTS / filename).read_text(encoding="utf-8"))
+            for forbidden in ("subprocess", "socket", "requests.", "urllib", "http.client"):
+                self.assertNotIn(forbidden, source, msg=f"{filename} must never reference {forbidden!r}")
+
+    def test_occurrence_authority_is_a_pure_function_of_its_own_arguments(self):
+        """Deterministic replay proof at the static-capability level: the
+        resolver takes no ambient/ledger state, only its own keyword
+        arguments and the immutable schedule registry."""
+
+        import inspect
+
+        import nullone_scheduled_occurrence_authority as authority
+
+        signature = inspect.signature(authority.resolve_scheduled_occurrence)
+        self.assertEqual(set(signature.parameters), {"workflow_id", "source", "triggered_at"})
 
 
 if __name__ == "__main__":

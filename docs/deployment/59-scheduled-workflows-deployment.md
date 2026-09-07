@@ -496,38 +496,273 @@ document does not repeat or supersede that requirement; it only confirms
 #59's notifier composition already assumes and preserves it, and closes
 the specific gap the two would otherwise have interacted to create.
 
+## Superseded design note: normalized-occurrence OpenClaw job payload
+
+An earlier revision of this document proposed a `--command`/`--command-argv`
+job that would receive an already-normalized occurrence (job id +
+`scheduled_for`) and hand it straight to
+`nullone_openclaw_scheduler_adapter.map_openclaw_occurrence` /
+`nullone-scheduled-run.py --trigger-file`. That design is **rejected**: it
+assumed OpenClaw could supply the intended `scheduled_for` to the
+command-payload process, which "OpenClaw trigger edge: CONFIRMED BLOCKED"
+above directly disproves for the installed OpenClaw 2026.8.2 package. It is
+recorded here only so a reader does not rediscover and re-propose the same
+disproven shape; the "NullOne Scheduled Occurrence Authority" section below
+is the accepted replacement. `map_openclaw_occurrence` and
+`nullone-scheduled-run.py --trigger-file` are not deleted -- see "Status of
+`map_openclaw_occurrence` and the exact-trigger-file CLI" below for why both
+remain valid, non-production-path code.
+
+## NullOne Scheduled Occurrence Authority (#59 remaining scope)
+
+Per the architecture decision recorded in `NULLONE_PROJECT_CONTEXT.md`
+("OpenClaw trigger-edge architecture decision"): OpenClaw (or any future
+external scheduler) is a **wake-up adapter only**. NullOne itself owns the
+exact scheduled slot and computes `scheduled_for` deterministically from its
+own repo-owned schedule config, not from anything the external trigger
+supplies beyond "wake up now."
+
+```text
+OpenClaw --command job (or any other future scheduler adapter)
+  -> WAKE-UP ONLY (nullone-scheduled-wakeup.py <workflow> --source <adapter>)
+  -> nullone_scheduled_occurrence_authority.resolve_scheduled_occurrence
+       (workflow_id, source, triggered_at=<observed UTC wake instant>)
+  -> DUE: exact nullone.scheduler-invocation.v1, validated
+     | NO_DUE_OCCURRENCE: no payload, no side effect
+  -> nullone_scheduled_run_dispatch (shared with the exact-trigger-file CLI)
+  -> MorningWorkflow / AnalyticsWorkflow -> #28/#29 -> #27 -> #30
+```
+
+### M0 schedule registry (`nullone_schedule_registry.py`)
+
+Exactly two immutable, reviewed `ScheduleSpec` entries -- not a
+cron-parsing engine, not a user-configurable store:
+
+| `workflow_id` | `schedule_id` | `timezone_name` | `local_time` |
+| --- | --- | --- | --- |
+| `morning-editorial` | `morning-editorial.daily.v1` | `Asia/Baku` | `08:30:00` |
+| `daily-analytics` | `daily-analytics.daily.v1` | `Asia/Baku` | `03:20:00` |
+
+These match the two live jobs' own `schedule.expr`/`schedule.tz`
+(`"30 8 * * *"` / `"20 3 * * *"`, both `Asia/Baku`) recorded above under
+"OpenClaw scheduler edge: confirmed read-only evidence" -- NullOne's own
+registry intentionally mirrors the currently reviewed/live cadence, it does
+not invent a different one. A future schedule semantic change requires a
+new `schedule_id` revision (e.g. `.v2`), never silent mutation of `.v1`'s
+meaning, because `schedule_id` is part of `occurrence_id`'s stable identity
+input (see below).
+
+### Due-slot resolution algorithm (`nullone_scheduled_occurrence_authority.py`)
+
+`resolve_scheduled_occurrence(*, workflow_id, source, triggered_at)` is a
+pure function (no I/O, no persistence, no ledger):
+
+1. Load the exact `ScheduleSpec` for `workflow_id` (fails closed if
+   unsupported).
+2. Convert `triggered_at` (canonical UTC) to the schedule's own
+   `timezone_name`.
+3. Take that observation's local calendar date.
+4. Construct *that same local date's* configured `local_time` as the
+   candidate scheduled instant.
+5. If the observation is strictly before that instant: `NO_DUE_OCCURRENCE`.
+   **Never** falls back to a previous local date's slot -- an early wake is
+   simply early, not a signal to backfill a missed prior occurrence. This is
+   an explicit NullOne schedule policy, not a heuristic; historical
+   catch-up/backfill is out of M0 scope (deferred to #37 if ever needed).
+6. Otherwise: today's slot is `DUE`. Convert it to canonical UTC
+   `scheduled_for`, derive `external_occurrence_id =
+   "<schedule_id>@<scheduled_for>"` (opaque, deterministic, contains no
+   `triggered_at`/wall-clock/session data), compute `occurrence_id` via the
+   existing #65 contract rule
+   (`nullone_scheduler_invocation.compute_occurrence_id`, not duplicated),
+   and return the resulting `nullone.scheduler-invocation.v1` payload
+   already run through `validate_payload()` before any workflow sees it.
+
+Because `scheduled_for`/`external_occurrence_id`/`occurrence_id` are
+derived only from the resolved schedule slot -- never from `triggered_at`
+-- any number of same-day calls (a natural wake, a delayed wake, a manual
+replay) resolve to the identical occurrence identity; only `triggered_at`
+and the diagnostic `lateness_seconds` differ between them. `triggered_at`
+is used *only* as the observation instant that decides DUE vs. NO_DUE (and
+as observational metadata in the emitted payload, per the existing #65
+contract) -- it is never substituted into `scheduled_for`,
+`external_occurrence_id`, or `occurrence_id` directly.
+
+`lateness_seconds` (`triggered_at - scheduled_for`, on a `DUE` result) is
+diagnostic only. M0 invents no automatic "too late, skip it" blocker;
+timeliness policy/observation belongs to #37 unless the repository already
+has an accepted threshold (it does not, as of this change).
+
+### Worked proofs
+
+Morning Editorial (`Asia/Baku`, UTC+4 year-round, no DST):
+
+| `triggered_at` (UTC) | Result | `scheduled_for` |
+| --- | --- | --- |
+| `2026-09-08T04:29:59Z` | `NO_DUE_OCCURRENCE` | -- |
+| `2026-09-08T04:30:00Z` | `DUE` | `2026-09-08T04:30:00Z` |
+| `2026-09-08T05:07:00Z` (09:07 local -- the real observed #28 delayed-start case cited above) | `DUE`, same occurrence as `04:30:00Z` | `2026-09-08T04:30:00Z` |
+| `2026-09-08T14:00:00Z` (manual replay) | `DUE`, same occurrence | `2026-09-08T04:30:00Z` |
+| `2026-09-09T03:00:00Z` (next day, before slot) | `NO_DUE_OCCURRENCE` -- **not** a backfill of the prior day | -- |
+| `2026-09-09T04:30:00Z` | `DUE`, a **new**, distinct occurrence | `2026-09-09T04:30:00Z` |
+
+Daily Analytics UTC/Baku boundary (03:20 `Asia/Baku` crosses the UTC
+calendar date backwards):
+
+| `triggered_at` (UTC) | Result | `scheduled_for` | local scheduled date |
+| --- | --- | --- | --- |
+| `2026-09-08T23:19:59Z` | `NO_DUE_OCCURRENCE` | -- | -- |
+| `2026-09-08T23:20:00Z` | `DUE` | `2026-09-08T23:20:00Z` | `2026-09-09` |
+
+Cross-source identity divergence (the accepted #65 contract's own intent,
+not weakened here): `source="openclaw"` and a hypothetical
+`source="systemd-timer"` resolving the exact same slot produce the same
+`scheduled_for` but a **different** `occurrence_id`, because `source`
+participates in the existing `occurrence_id` derivation. This repository
+does not force cross-adapter ID equality.
+
+## `nullone-scheduled-wakeup.py` -- the static wake-up edge
+
+```text
+nullone-scheduled-wakeup.py morning --source openclaw
+nullone-scheduled-wakeup.py analytics --source openclaw
+```
+
+No `scheduled_for` argument, no per-occurrence trigger file, no OpenClaw
+per-run UUID, no job-run metadata, no dynamic env interpolation -- the
+process needs only the reviewed adapter `--source` string and a
+timezone-aware system clock (`triggered_at` derived from the injected
+clock after UTC normalization; never a CLI flag).
+
+### Authority vs current M0 executable (source namespaces)
+
+```text
+authority = generic (multi-adapter; source participates in #65 occurrence_id)
+current production wake-up CLI = reviewed-source allowlist (exactly openclaw)
+```
+
+`resolve_scheduled_occurrence(..., source=...)` remains scheduler-independent:
+the pure-authority contract still permits alternate namespaces such as
+`systemd-timer` for the same slot (same `scheduled_for`, different
+`occurrence_id`). The **current M0 production wake-up executable** does not
+expose that genericity as an arbitrary CLI string. It pins
+`M0_WAKEUP_SOURCES = frozenset({"openclaw"})` and fails closed with
+`STATUS=WAKEUP_REJECTED` / `REASON_CODE=WAKEUP_SOURCE_UNSUPPORTED` before
+occurrence resolution and before any workflow/provider/notifier/#27 call
+when `--source` is anything else (including typos, padding, empty string,
+or a hypothetical future adapter name). Expanding the allowlist requires an
+explicit reviewed code/config change. There is no `.strip()` /
+case-fold fallback that turns malformed input into `openclaw`.
+
+### Strict clock contract on the wake-up edge
+
+The injected clock must return a timezone-aware `datetime` (`tzinfo`
+present and `utcoffset()` not `None`). Aware non-UTC values are normalized
+deterministically to UTC. Naive datetimes and non-datetime returns fail
+closed with `STATUS=WAKEUP_REJECTED` / `REASON_CODE=WAKEUP_CLOCK_INVALID`
+(non-zero exit; zero dispatch/provider/notifier/#27). The edge never
+interprets a naive clock via host-local timezone and never assumes UTC for
+naive values. Operator rejection output uses stable reason codes only -- it
+does not echo arbitrary source strings or clock/object reprs.
+
+Exit-code contract:
+
+- Infrastructure rejection (`WAKEUP_SOURCE_UNSUPPORTED` /
+  `WAKEUP_CLOCK_INVALID` / authority reject): non-zero. No workflow side
+  effect.
+- `NO_DUE_OCCURRENCE`: exit 0. No provider call, no notifier call, no #27
+  result fabricated.
+- `DUE` + `application_execution=="COMPLETED"`: exit 0, regardless of
+  domain health -- identical to `nullone-scheduled-run.py`'s existing
+  scheduler-vs-domain rule.
+- `DUE` + `application_execution=="FAILED"`: non-zero. No new retry layer.
+
+It shares `nullone_scheduled_run_dispatch.py`'s `run_morning_trigger`/
+`run_analytics_trigger` production wiring with `nullone-scheduled-run.py`
+(extracted from that CLI's own previous in-file wiring so neither
+duplicates it) -- both entrypoints therefore invoke `MorningWorkflow`/
+`AnalyticsWorkflow` with the identical production Claude CLI provider,
+`AnalyticsProvider` factory, and OpenClaw/Telegram notifier binding.
+
+### Manual OpenClaw runs
+
+Because a manual `openclaw automations run <job-id>` force-run goes through
+the identical `runCronCommandJob` path as a scheduled run (see "OpenClaw
+scheduler edge" above), a manual wake-up through this exact same static
+command cannot mint a novel arbitrary occurrence:
+
+- **Manual run before today's slot** -> `NO_DUE_OCCURRENCE`, identical to a
+  natural early wake.
+- **Manual run after today's slot** -> resolves to the exact same occurrence
+  as today's scheduled/replayed wake (same `scheduled_for`/
+  `external_occurrence_id`/`occurrence_id`); #28/#29's own persisted-result
+  idempotence prevents any duplicate side effect.
+
+### Repeated and concurrent wake-ups
+
+Repeated same-day wake-ups (08:30, 09:07, 10:15, ...) resolve to the same
+occurrence identity and replay through #28/#29's own existing persisted-
+result/lock semantics: the provider is not repeated after a completed
+result, and the notifier does not resend beyond #30's own at-most-once
+guarantee. Concurrent wake-ups resolving the same slot rely on that exact
+same existing runtime lock -- this module adds no second lock or replay
+cache of its own (`tests/test_scheduled_wakeup_cli.py
+::ConcurrentWakeUpsRunOneLogicalCycleTests` proves one logical provider
+cycle and one persisted result across four concurrent calls).
+
+## Status of `map_openclaw_occurrence` and the exact-trigger-file CLI
+
+`nullone_openclaw_scheduler_adapter.map_openclaw_occurrence` remains a
+valid, tested, pure mapping function -- **reference/legacy exact-receipt
+mapper**, not the OpenClaw 2026.8.2 production path. It is not deleted:
+it stays correct for any future caller that genuinely already possesses an
+exact `scheduled_for` from some other reviewed source (e.g. a one-shot
+manual backfill tool, or a future scheduler mechanism that does supply the
+instant directly), and its own self-test/fixture coverage is unaffected by
+this change. `nullone-scheduled-run.py --trigger-file` similarly remains
+valid for any caller that already holds a normalized
+`nullone.scheduler-invocation.v1` trigger file; it is not the production
+OpenClaw path either, and `nullone-scheduled-wakeup.py` is the one this
+document recommends for #37 activation.
+
 ## OpenClaw job payloads: DESIRED / NOT DEPLOYED
 
 The following describes the intended #37 activation shape only. No job
-below has been created, edited, enabled, or disabled by #59.
+below has been created, edited, enabled, or disabled by #59. Exact
+OpenClaw 2026.8.2 `automations create` syntax (`docs/automation/cron-jobs.md`
+"Command payloads": `--command <shell>` stores `argv: ["sh", "-lc",
+<shell>]`; schedule flags `--cron`/`--tz` documented under "Recurring
+schedules"), verified against the installed 2026.8.2 package on
+2026-09-07, no secrets/private job IDs, no dynamic `scheduled_for`
+placeholder of any kind -- both commands below are fully static:
 
 ### Morning Editorial (DESIRED / NOT DEPLOYED)
 
-```text
-normalized OpenClaw occurrence (job id 0666d47b-..., scheduled_for)
-  -> nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id="morning-editorial", ...)
-  -> nullone-scheduled-run.py morning --trigger-file <normalized trigger>
-  -> MorningWorkflow -> #28 -> #27 -> #30
+```bash
+openclaw automations create "30 8 * * *" \
+  --name "nullone-morning-editorial-wakeup" \
+  --command "python3 <repo>/workspace/social/ops/scripts/nullone-scheduled-wakeup.py morning --source openclaw" \
+  --command-cwd "<repo>" \
+  --tz "Asia/Baku"
 ```
 
 Would replace the current `agentTurn` payload
-(`"Read social/ops/prompts/morning-editorial.md and execute it exactly."`)
-with a `--command`/`--command-argv` job invoking this repository's CLI.
-**This exact shape cannot be activated today**: per "OpenClaw trigger edge:
-CONFIRMED BLOCKED" above, no OpenClaw 2026.8.2 command-payload mechanism
-supplies `scheduled_for` to the invoked process, and this repository
-deliberately does not substitute a heuristic for it. This is a distinct
-architecture gap from #37's own scope (live job-payload migration/
-activation presupposes a working wiring already exists) and is not
-resolved by #37 alone.
+(`"Read social/ops/prompts/morning-editorial.md and execute it exactly."`).
+Unlike the superseded normalized-occurrence design above, this exact
+command **can** be activated once #37 reviews it: it requires no
+scheduler-supplied `scheduled_for` at all, since
+`nullone-scheduled-wakeup.py` resolves the exact due slot itself. It is not
+created/edited/enabled by this change. The positional cron argument form
+above is the reviewed OpenClaw 2026.8.2 shape retained here.
 
 ### Daily Analytics (DESIRED / NOT DEPLOYED)
 
-```text
-normalized OpenClaw occurrence (job id 8e94064c-..., scheduled_for)
-  -> nullone_openclaw_scheduler_adapter.map_openclaw_occurrence(workflow_id="daily-analytics", ...)
-  -> nullone-scheduled-run.py analytics --trigger-file <normalized trigger>
-  -> AnalyticsWorkflow -> #61 AnalyticsProvider wiring -> #29 -> #27 -> #30
+```bash
+openclaw automations create "20 3 * * *" \
+  --name "nullone-daily-analytics-wakeup" \
+  --command "python3 <repo>/workspace/social/ops/scripts/nullone-scheduled-wakeup.py analytics --source openclaw" \
+  --command-cwd "<repo>" \
+  --tz "Asia/Baku"
 ```
 
 Requires #61 to complete `build_production_analytics_provider` before
@@ -535,10 +770,49 @@ activation can produce anything other than
 `PROVIDER_SECRET_WIRING_PENDING_61`.
 
 Both desired jobs: exit 0 means orchestration completed regardless of
-domain outcome (never inferred as domain success); exit non-zero is
-reserved for a genuine orchestration-establishment failure; native
-`failureAlert` (once configured under #37, not here) owns the
-scheduler-execution-failure surface, never duplicated by #30.
+domain outcome (never inferred as domain success), or that there was
+simply no due occurrence yet (also exit 0); exit non-zero is reserved for
+a genuine orchestration-establishment failure; native `failureAlert` (once
+configured under #37, not here) owns the scheduler-execution-failure
+surface, never duplicated by #30.
+
+The OpenClaw `--cron`/`--tz` values above (`"30 8 * * *"`/`"20 3 * * *"`,
+both `Asia/Baku`) intentionally match `nullone_schedule_registry.py`'s own
+`ScheduleSpec` values exactly -- but the external cron exists **only** to
+wake the process near that slot; NullOne's own registry remains
+authoritative for the exact `scheduled_for` it computes. A mismatch between
+the external cron and the NullOne registry (e.g. someone edits one without
+the other) would not corrupt occurrence identity -- the authority always
+computes the exact configured NullOne slot for whatever calendar date it is
+woken on -- but it could cause a very early or very late first wake-up on a
+given day; #37's own preflight is the place to detect such a mismatch
+before activation, not a runtime check this module adds.
+
+### Cutover safety
+
+Current M0 executable permits only:
+
+```text
+source=openclaw
+```
+
+A future adapter namespace (for example `systemd-timer`) requires an
+explicit reviewed implementation/change to `M0_WAKEUP_SOURCES` (or a
+dedicated reviewed adapter edge). The allowlist reduces accidental misuse
+of the production wake-up CLI; it does **not** redefine #65 `source`
+semantics at the generic authority/contract layer.
+
+Because the accepted #65 contract intentionally namespaces `occurrence_id`
+identity by `source` (see "Alternate scheduler example" in
+`docs/contracts/scheduler-invocation-v1.md`), **never concurrently activate
+two adapter namespaces for one workflow/slot** -- e.g. both an `openclaw`
+wake-up job and a hypothetical `systemd-timer` wake-up simultaneously
+enabled for Morning Editorial would each independently resolve the same
+`scheduled_for` but mint a different, non-colliding `occurrence_id`, so
+#28's own per-occurrence lock would not prevent two independent runs. A
+controlled adapter cutover (retiring one `source` before/while enabling
+another) must occur at a reviewed safe schedule boundary under #37; this
+document does not implement a cutover or a systemd adapter here.
 
 ## Current live limitations
 
