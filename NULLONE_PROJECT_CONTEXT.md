@@ -42,16 +42,28 @@ end-to-end M0 integration is not complete. Repository-level
 `BreakingWorkflow` implementation is complete: #63 is CLOSED/COMPLETED and
 PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`.
 No production activation occurred. The remaining M0 repository blockers are
-exactly #59 and #61. A repository-level #59 implementation
-(`MorningWorkflow`/`AnalyticsWorkflow`, the OpenClaw scheduler edge, and the
-`nullone-scheduled-run.py` CLI) is submitted for review on branch
-`feature/n59-scheduled-workflows`; #59 remains OPEN until merged. #61
+exactly #59 and #61. A repository-level #59 **foundation**
+(`MorningWorkflow`/`AnalyticsWorkflow`, the OpenClaw pure occurrence-mapping
+function, and the `nullone-scheduled-run.py` CLI) is merged: PR #73
+squash-merged as `cec185f9a62c2055175454f06d3d5c54596bba23`. This merge is
+**partial and deliberately did not close #59**: #59 remains OPEN because
+the OpenClaw exact-occurrence trigger edge is `CONFIRMED BLOCKED` (direct
+2026-09-07 source inspection of the installed OpenClaw 2026.8.2 package
+proved command-payload jobs never receive the intended scheduled
+occurrence through argv/env/stdin — see "OpenClaw trigger-edge
+architecture decision" below and
+`docs/deployment/59-scheduled-workflows-deployment.md`). #61
 remains fully unimplemented (its AnalyticsProvider secret-wiring seam is
-established by #59 but deliberately left as a fail-closed
-`PROVIDER_SECRET_WIRING_PENDING_61` placeholder). No production/OpenClaw
-job/Zernio/Telegram/Claude action occurred while implementing #59.
+established by the merged #59 foundation but deliberately left as a
+fail-closed `PROVIDER_SECRET_WIRING_PENDING_61` placeholder). No
+production/OpenClaw job/Zernio/Telegram/Claude action occurred while
+implementing or merging #59's foundation.
 
-1. Implement #59 and #61 independently and merge them through normal review.
+1. #59's repository foundation is merged (PR #73); its remaining scope is
+   a separately reviewed OpenClaw-trigger-edge replacement architecture
+   (see "OpenClaw trigger-edge architecture decision" below) — not yet
+   started. Implement and merge that remaining #59 scope, and implement
+   and merge #61, independently, each through normal review.
 2. Rerun the strictly read-only #37 preflight only after #59 and #61 are
    accepted (the earlier #65/#60/#62/#63/#66 dependencies are complete).
 3. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
@@ -60,7 +72,7 @@ job/Zernio/Telegram/Claude action occurred while implementing #59.
 
 Required order:
 
-`#59 + #61 → review/merge → repeat strictly read-only #37 preflight → only READY_FOR_CONTROLLED_DEPLOYMENT permits deployment`
+`#59 (remaining trigger-edge scope) + #61 → review/merge → repeat strictly read-only #37 preflight → only READY_FOR_CONTROLLED_DEPLOYMENT permits deployment`
 
 No ad-hoc deployment is permitted.
 
@@ -68,6 +80,42 @@ Existing M1/M2/M3 remain intact.
 
 New operational milestone:
 `M0 — Production operations are healthy and timely`
+
+## OpenClaw trigger-edge architecture decision (#59, 2026-09-07)
+
+`nullone_openclaw_scheduler_adapter.map_openclaw_occurrence` (merged by PR
+#73) is a pure, fail-closed mapping function only; it has no live caller.
+Direct, read-only source inspection of the installed OpenClaw **2026.8.2**
+package (`dist/server-cron-DtqkVgKM.js`'s `runCronCommandJob`,
+`dist/cron-cli-DqFGSvBK.js`'s `parseCronCommandEnv`, and
+`docs/automation/cron-jobs.md`) confirmed that a scheduled command-payload
+job's process receives only static, job-authored `argv`/`env`/`input`
+(captured once at `automations create`/`edit` time); the scheduler's own
+`runAtMs` is tracked solely for its own diagnostics and is never merged
+into that process. A manual force-run goes through the identical code
+path. Full citation trail: `docs/deployment/59-scheduled-workflows-
+deployment.md`'s "OpenClaw trigger edge: CONFIRMED BLOCKED" section.
+
+```text
+#59_OPENCLAW_TRIGGER_EDGE = BLOCKED
+reason = EXACT_INTENDED_SCHEDULED_OCCURRENCE_NOT_EXPOSED_TO_COMMAND_PAYLOAD
+```
+
+**Current explicit architecture decision, recorded here for continuity:**
+
+> OpenClaw must not be treated as authoritative source of `scheduled_for`
+> for Morning/Daily in OpenClaw 2026.8.2.
+>
+> The next #59 design must make the external scheduler a wake-up adapter
+> while NullOne owns deterministic scheduled-occurrence authority, unless
+> another exact reviewed scheduler mechanism is proven first.
+
+This is a major architecture continuity decision, not yet implemented. No
+schedule ledger, occurrence-claim state, systemd adapter, cron-inference
+mechanism, new OpenClaw payload, or wake-up dispatcher exists in this
+repository as of this entry; that replacement architecture is explicitly
+deferred to a separate, later, separately reviewed task. Do not infer that
+any such implementation exists from this decision record alone.
 
 ## GitHub planning / engineering state
 Repository: `a-r3/nullone`
@@ -99,7 +147,7 @@ Relevant issues:
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
 - #37 controlled production activation/validation — OPEN; its historical 2026-09-07 read-only preflight returned `BLOCKED`; it is not `READY`, and deployment remains prohibited while #59 and #61 remain open and until a repeated strictly read-only preflight returns `READY_FOR_CONTROLLED_DEPLOYMENT`
-- #59 NullOne scheduled workflow orchestration — OPEN; depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only. Repository-level implementation submitted for review on branch `feature/n59-scheduled-workflows` (see `docs/deployment/59-scheduled-workflows-deployment.md`): `nullone_morning_workflow.py`/`nullone_analytics_workflow.py` reload and validate the exact persisted #27 result before invoking the unmodified #30 `notify_if_required`, and the new `nullone-scheduled-run.py` CLI separates scheduler/application exit status from domain health (exit 0 even for `BLOCKED`/`FAILED`/actionable `UNKNOWN`, provided a valid #27 result was established). Daily Analytics production activation additionally requires #61 (`PROVIDER_SECRET_WIRING_PENDING_61` fail-closed placeholder until then). The OpenClaw trigger edge itself is `CONFIRMED BLOCKED` (2026-09-07, direct source inspection of the installed OpenClaw 2026.8.2 package): no command-payload job mechanism supplies the intended `scheduled_for` occurrence to the invoked process (`payload.env`/`payload.input`/`payload.argv` are static values captured at job-authoring time; `runAtMs` is never merged in), so `map_openclaw_occurrence` correctly has no live caller yet and this repository does not substitute a heuristic — see `docs/deployment/59-scheduled-workflows-deployment.md`'s "OpenClaw trigger edge: CONFIRMED BLOCKED" section. This is distinct from #37/#61 and is not resolved by either. Not merged; no production/OpenClaw job/Zernio/Telegram/Claude action occurred; OpenClaw job payloads remain `DESIRED / NOT DEPLOYED`.
+- #59 NullOne scheduled workflow orchestration — **OPEN** (repository foundation merged, issue deliberately left open); depends on #65 and binds normalized scheduler invocations to `MorningWorkflow`/`AnalyticsWorkflow`, existing runtimes, persisted #27 outcomes and #30 domain notification; OpenClaw is the first trigger adapter only. Repository-level foundation merged via PR #73, squash SHA `cec185f9a62c2055175454f06d3d5c54596bba23` (see `docs/deployment/59-scheduled-workflows-deployment.md`): `nullone_morning_workflow.py`/`nullone_analytics_workflow.py` reload and validate the exact persisted #27 result before invoking the unmodified #30 `notify_if_required`, and the new `nullone-scheduled-run.py` CLI separates scheduler/application exit status from domain health (exit 0 even for `BLOCKED`/`FAILED`/actionable `UNKNOWN`, provided a valid #27 result was established). Daily Analytics production activation additionally requires #61 (`PROVIDER_SECRET_WIRING_PENDING_61` fail-closed placeholder until then). The OpenClaw trigger edge itself is `CONFIRMED BLOCKED` (2026-09-07, direct source inspection of the installed OpenClaw 2026.8.2 package): no command-payload job mechanism supplies the intended `scheduled_for` occurrence to the invoked process (`payload.env`/`payload.input`/`payload.argv` are static values captured at job-authoring time; `runAtMs` is never merged in), so `map_openclaw_occurrence` correctly has no live caller yet and this repository does not substitute a heuristic — see `docs/deployment/59-scheduled-workflows-deployment.md`'s "OpenClaw trigger edge: CONFIRMED BLOCKED" section and this document's "OpenClaw trigger-edge architecture decision" section above. This is distinct from #37/#61 and is not resolved by either. #59 stays open specifically for the remaining OpenClaw-trigger-edge replacement architecture work (not yet started); no production/OpenClaw job/Zernio/Telegram/Claude action occurred; OpenClaw job payloads remain `DESIRED / NOT DEPLOYED`.
 - #60 cadence-state backward compatibility — CLOSED/COMPLETED; its merged read-only compatibility implementation supplies the authoritative load behavior reused by #62/#63; no production ledger migration was performed or required (`migration_required: False`)
 - #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
 - #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
@@ -1180,14 +1228,18 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current Git desired-state M0 execution order — after PR #71
+### Current Git desired-state M0 execution order — after PR #71 and PR #73
 
-1. Implement #59 and #61 independently. A repository-level #59
-   implementation is submitted for review on branch
-   `feature/n59-scheduled-workflows` (see
-   `docs/deployment/59-scheduled-workflows-deployment.md`); #59 remains
-   OPEN until merged. #61 remains OPEN and unimplemented.
-2. Review and merge #59 and #61 through normal change control.
+1. #59's repository foundation is merged: PR #73 squash-merged as
+   `cec185f9a62c2055175454f06d3d5c54596bba23` (see
+   `docs/deployment/59-scheduled-workflows-deployment.md`). #59 was
+   deliberately kept OPEN by that merge (no closing keyword) because its
+   OpenClaw trigger edge is `CONFIRMED BLOCKED` — see "OpenClaw
+   trigger-edge architecture decision" above. Implement and merge #59's
+   remaining trigger-edge replacement architecture, and implement and
+   merge #61, independently.
+2. Review and merge #59's remaining scope and #61 through normal change
+   control.
 3. Repeat the strictly read-only #37 preflight.
 4. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
    deployment under #37; no ad-hoc deployment is permitted.
