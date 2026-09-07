@@ -122,9 +122,14 @@ The current operational Radar output remains the Markdown research report at
 `social/research/daily/YYYY-MM-DD-breaking-HHMM.md`. That report is not a
 safety-critical application command and must not be heuristically parsed.
 
-A future reviewed OpenClaw Radar job integration must additionally provide one
-exact `nullone.breaking-radar-handoff.v1` envelope containing stable occurrence
-fields and a complete `nullone.breaking-workflow-input.v1` assessment. The
+A future reviewed OpenClaw Radar job integration may produce zero, one, or
+several exact `nullone.breaking-radar-handoff.v1` envelopes from one scheduled
+scan, one envelope per candidate. Each contains the stable raw scan
+`source_occurrence_id`, timestamps, and a complete
+`nullone.breaking-workflow-input.v1` assessment. The edge deterministically
+binds the raw scan identity to `candidate_id`, so every candidate becomes its
+own stable scheduler occurrence without using retry time or mutable assessment
+text. The
 executable field contract and validation live in
 `social/ops/scripts/nullone_breaking_radar_edge.py` and
 `social/ops/scripts/nullone_breaking_workflow_input.py`. The handoff supplies

@@ -7,6 +7,8 @@ capacity, dispatch, draft, and review-delivery semantics remain in NullOne.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -24,7 +26,7 @@ HANDOFF_SCHEMA = "nullone.breaking-radar-handoff.v1"
 HANDOFF_CONTRACT_VERSION = "1.0.0"
 _HANDOFF_FIELDS = frozenset({"schema", "contract_version", "occurrence", "assessment"})
 _OCCURRENCE_FIELDS = frozenset(
-    {"external_occurrence_id", "scheduled_for", "triggered_at"}
+    {"source_occurrence_id", "scheduled_for", "triggered_at"}
 )
 
 
@@ -50,6 +52,28 @@ def _exact_object(value: Any, field: str, fields: frozenset[str]) -> Mapping[str
     return value
 
 
+def compute_candidate_external_occurrence_id(
+    source_occurrence_id: str, candidate_id: str
+) -> str:
+    """Bind one raw Radar scan occurrence to one exact candidate.
+
+    Retry timing and mutable assessment content are deliberately excluded.
+    #35 event/development identity remains a separate downstream decision.
+    """
+
+    if not isinstance(source_occurrence_id, str) or not source_occurrence_id.strip():
+        raise BreakingRadarEdgeError("source_occurrence_id must be a non-empty string")
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise BreakingRadarEdgeError("assessment.candidate_id must be a non-empty string")
+    canonical = json.dumps(
+        [source_occurrence_id, candidate_id],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()[:24]
+    return f"breaking-candidate-{digest}"
+
+
 def normalize_breaking_radar_handoff(value: Any) -> NormalizedBreakingHandoff:
     """Return one validated scheduler invocation plus one validated assessment."""
 
@@ -64,16 +88,20 @@ def normalize_breaking_radar_handoff(value: Any) -> NormalizedBreakingHandoff:
         handoff["occurrence"], "handoff.occurrence", _OCCURRENCE_FIELDS
     )
 
-    trigger = {
-        "schema": INVOCATION_SCHEMA,
-        "contract_version": INVOCATION_CONTRACT_VERSION,
-        "workflow_id": "breaking",
-        "source": "openclaw",
-        "external_occurrence_id": occurrence["external_occurrence_id"],
-        "scheduled_for": occurrence["scheduled_for"],
-        "triggered_at": occurrence["triggered_at"],
-    }
     try:
+        assessment = validate_breaking_workflow_input(handoff["assessment"])
+        external_occurrence_id = compute_candidate_external_occurrence_id(
+            occurrence["source_occurrence_id"], assessment.candidate_id
+        )
+        trigger = {
+            "schema": INVOCATION_SCHEMA,
+            "contract_version": INVOCATION_CONTRACT_VERSION,
+            "workflow_id": "breaking",
+            "source": "openclaw",
+            "external_occurrence_id": external_occurrence_id,
+            "scheduled_for": occurrence["scheduled_for"],
+            "triggered_at": occurrence["triggered_at"],
+        }
         trigger["occurrence_id"] = compute_occurrence_id(
             trigger["workflow_id"],
             trigger["source"],
@@ -81,7 +109,6 @@ def normalize_breaking_radar_handoff(value: Any) -> NormalizedBreakingHandoff:
             trigger["scheduled_for"],
         )
         validate_payload(trigger)
-        validate_breaking_workflow_input(handoff["assessment"])
     except ValueError as exc:
         raise BreakingRadarEdgeError(str(exc)) from exc
 

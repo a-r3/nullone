@@ -21,10 +21,14 @@ OpenClaw/Radar edge
   -> existing DraftProvider + #62 ReviewDelivery
 ```
 
-BreakingWorkflow accepts only `workflow_id == "breaking"`. The edge maps the
-external occurrence through the merged scheduler-invocation contract;
-`triggered_at` is excluded from occurrence identity, so replay of one logical
-Radar occurrence cannot mint a new NullOne occurrence.
+BreakingWorkflow accepts only `workflow_id == "breaking"`. One scheduled Radar
+scan may produce zero, one, or several strict candidate handoffs. The edge
+keeps the raw scan `source_occurrence_id` as parent/source identity and derives
+each candidate-specific scheduler `external_occurrence_id` from only the
+canonical pair `[source_occurrence_id, candidate_id]`. `triggered_at` and
+mutable assessment content are excluded. Thus replay of the same scan/candidate
+keeps one NullOne occurrence, while two candidates from one scan cannot collide
+in scheduler occurrence or #27 run identity.
 
 Breaking is an accelerated trigger into `run_story_pipeline()`. It does not
 manufacture `PREPARE_STORY`, override target-min cadence, disable quiet hours,
@@ -37,7 +41,8 @@ Schema: `nullone.breaking-workflow-input.v1`, contract version `1.0.0`.
 
 The machine-readable assessment carries exact candidate, assessment and state
 references; structured #35 evidence; optional explicit `FollowUpDelta`;
-verification and its exact ordered evidence refs; a verified severity and
+verification (`UNVERIFIED | PARTIAL | PASS | BLOCKED`) and its exact ordered
+evidence refs; a verified severity and
 reason; auditable recent-coverage/freshness findings; Story quality and draft
 dependency findings; and optional exceptional-main structural findings.
 Unknown fields are rejected. Identity and capacity results are deliberately
@@ -52,7 +57,7 @@ The separate edge envelope is
   "schema": "nullone.breaking-radar-handoff.v1",
   "contract_version": "1.0.0",
   "occurrence": {
-    "external_occurrence_id": "<stable external occurrence>",
+    "source_occurrence_id": "<stable raw Radar scan occurrence>",
     "scheduled_for": "<canonical UTC RFC3339>",
     "triggered_at": "<canonical UTC RFC3339>"
   },
@@ -62,7 +67,9 @@ The separate edge envelope is
 
 The abbreviated assessment above is illustrative only; the executable
 validator requires its complete exact field set. No OpenClaw job UUID is an
-application/domain requirement.
+application/domain requirement. `FAIL` is not a verification state and is
+rejected rather than aliased. Non-PASS states require null severity and flow to
+the existing #36 `BLOCKED_UNVERIFIED / EVIDENCE_INSUFFICIENT` gate.
 
 ## Identity, routing, and capacity
 
@@ -107,6 +114,15 @@ Story DRAFT_CREATED + preview_delivery.status == SENT
   -> optional selected FEED/CAROUSEL
 ```
 
+Optional-main dependency checks, candidate acquisition, and exact binding
+validation happen only inside the main runner after the dispatcher has proven
+Story `SUCCEEDED`. Missing provider/verifier, provider failure, zero/multiple
+candidates, or invalid binding therefore preserve Story success and persist
+main as `BLOCKED_BEFORE_ATTEMPT`; they never suppress Story or create a
+main-only fallback. Ordinary replay retries neither the completed Story nor the
+blocked main; only the existing explicit `continue_unattempted_target()` path
+may reconsider a proven before-attempt block.
+
 No main target runs first or as compensation. Exact replay reuses the same set
 and does not repeat completed targets. A different routing decision for the
 same development raises the existing `DraftSetConflict`. Recovered
@@ -126,7 +142,13 @@ existing #27 domain classification. `SUCCEEDED` on an accelerated route means
 only that every requested review draft exists and every required human-review
 preview reports exact `SENT`; it never means Instagram publication.
 
-`run_outcome_mapping()` provides deterministic #27 inputs. Persisting the
+`run_outcome_mapping()` provides deterministic #27 inputs. For non-success it
+collapses all whitespace (including CR/LF) to one line and deterministically
+bounds `reason_text` to 240 characters while the full application diagnostic
+remains on `BreakingWorkflowResult` and the draft-set audit. Representative
+success, blocked, failed, in-flight, runner-error, malformed-state, and
+long-conflict mappings are exercised through the real `assess_run()` contract.
+Persisting the
 exact `nullone.run-outcome.v1` artifact and scheduler health is reserved for
 the future production edge; #63 does not create a competing persistence
 system.

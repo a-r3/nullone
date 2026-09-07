@@ -26,9 +26,12 @@ from nullone_breaking_radar_edge import (  # noqa: E402
     BreakingRadarEdgeError,
     normalize_breaking_radar_handoff,
 )
+from nullone_breaking_workflow_input import BreakingWorkflowInputError  # noqa: E402
+from nullone_run_outcome import assess_run, make_run_id  # noqa: E402
 from nullone_scheduler_invocation import compute_occurrence_id  # noqa: E402
 
 NOW = datetime(2026, 9, 8, 15, 0, tzinfo=ZoneInfo("Asia/Baku"))
+_DEFAULT_MAIN_FINAL_VERIFIER = object()
 
 
 def make_trigger(**overrides):
@@ -196,8 +199,30 @@ class BoundMainProvider:
 
 
 class FailingMainProvider:
+    def __init__(self):
+        self.calls = 0
+
     def get_candidates(self, **_kwargs):
+        self.calls += 1
         raise RuntimeError("synthetic provider failure")
+
+
+class CountingDraftConnector:
+    def __init__(self):
+        self.calls = 0
+
+    def create_review_draft(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("draft connector must not be called")
+
+
+class CountingReviewDelivery:
+    def __init__(self):
+        self.calls = 0
+
+    def send(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("review delivery must not be called")
 
 
 class BreakingWorkflowTestCase(unittest.TestCase):
@@ -228,7 +253,19 @@ class BreakingWorkflowTestCase(unittest.TestCase):
             review_post_id=f"review-{candidate['format'].lower()}",
         )
 
-    def run_workflow(self, assessment=None, *, trigger=None, main_provider=None, **kwargs):
+    def run_workflow(
+        self,
+        assessment=None,
+        *,
+        trigger=None,
+        main_provider=None,
+        main_final_verifier=_DEFAULT_MAIN_FINAL_VERIFIER,
+        draft_connector=None,
+        review_delivery=None,
+        **kwargs,
+    ):
+        if main_final_verifier is _DEFAULT_MAIN_FINAL_VERIFIER:
+            main_final_verifier = object() if main_provider else None
         with patch.object(workflow, "run_story_pipeline", side_effect=self.story_result), patch.object(
             workflow, "run_main_pipeline", side_effect=self.main_result
         ):
@@ -240,13 +277,33 @@ class BreakingWorkflowTestCase(unittest.TestCase):
                 now=NOW,
                 story_writer=object(),
                 story_verifier=object(),
-                draft_connector=object(),
-                review_delivery=object(),
+                draft_connector=draft_connector or object(),
+                review_delivery=review_delivery or object(),
                 dependency_recheck=lambda _stage: True,
                 main_candidate_provider=main_provider,
-                main_final_verifier=object() if main_provider else None,
+                main_final_verifier=main_final_verifier,
                 **kwargs,
             )
+
+    def assert_run_outcome_accepted(self, result):
+        mapped = result.run_outcome_mapping()
+        for relative_path in mapped["required_artifacts"]:
+            path = self.workspace / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+        assessed = assess_run(
+            workflow_id="breaking",
+            occurrence_id=result.occurrence_id,
+            scheduler_status="ok",
+            domain_outcome=mapped["domain_outcome"],
+            artifact_root=self.workspace,
+            required_artifacts=tuple(mapped["required_artifacts"]),
+            reason_code=mapped["reason_code"],
+            reason_text=mapped["reason_text"],
+            empty_success=mapped["empty_success"],
+        )
+        self.assertEqual(assessed["domain_outcome"], mapped["domain_outcome"])
+        return assessed
 
     def write_pending(self, fmt, index):
         manifest = {
@@ -294,10 +351,20 @@ class InputAndTriggerTests(BreakingWorkflowTestCase):
         value["verification"]["evidence_refs"] = []
         self.assert_rejected(value)
 
-    def test_severity_with_non_pass_rejected(self):
+    def test_fail_verification_state_is_rejected(self):
         value = make_assessment()
         value["verification"]["state"] = "FAIL"
+        value["severity_assessment"] = {"classification": None, "reason_text": None}
+        with self.assertRaises(BreakingWorkflowInputError):
+            workflow.validate_breaking_workflow_input(value)
         self.assert_rejected(value)
+
+    def test_non_pass_with_non_null_severity_is_rejected(self):
+        for state in ("UNVERIFIED", "PARTIAL", "BLOCKED"):
+            with self.subTest(state=state):
+                value = make_assessment()
+                value["verification"]["state"] = state
+                self.assert_rejected(value)
 
     def test_malformed_structured_evidence_rejected(self):
         value = make_assessment()
@@ -338,7 +405,7 @@ class EdgeNormalizationTests(unittest.TestCase):
             "schema": "nullone.breaking-radar-handoff.v1",
             "contract_version": "1.0.0",
             "occurrence": {
-                "external_occurrence_id": "radar-cycle-20260908T110000Z",
+                "source_occurrence_id": "radar-cycle-20260908T110000Z",
                 "scheduled_for": "2026-09-08T11:00:00Z",
                 "triggered_at": "2026-09-08T11:00:03Z",
             },
@@ -356,6 +423,45 @@ class EdgeNormalizationTests(unittest.TestCase):
         replay = self.handoff()
         replay["occurrence"]["triggered_at"] = "2026-09-08T11:01:59Z"
         second = normalize_breaking_radar_handoff(replay)
+        self.assertEqual(
+            first.trigger["external_occurrence_id"],
+            second.trigger["external_occurrence_id"],
+        )
+        self.assertEqual(first.trigger["occurrence_id"], second.trigger["occurrence_id"])
+
+    def test_same_scan_two_candidates_have_distinct_occurrences_and_run_ids(self):
+        first = normalize_breaking_radar_handoff(self.handoff())
+        second_handoff = self.handoff()
+        second_handoff["assessment"]["candidate_id"] = "candidate-breaking-2"
+        second = normalize_breaking_radar_handoff(second_handoff)
+        self.assertNotEqual(
+            first.trigger["external_occurrence_id"],
+            second.trigger["external_occurrence_id"],
+        )
+        self.assertNotEqual(first.trigger["occurrence_id"], second.trigger["occurrence_id"])
+        self.assertNotEqual(
+            make_run_id(workflow_id="breaking", occurrence_id=first.trigger["occurrence_id"]),
+            make_run_id(workflow_id="breaking", occurrence_id=second.trigger["occurrence_id"]),
+        )
+
+    def test_same_candidate_different_scan_has_distinct_occurrence(self):
+        first = normalize_breaking_radar_handoff(self.handoff())
+        later = self.handoff()
+        later["occurrence"]["source_occurrence_id"] = "radar-cycle-20260908T113000Z"
+        later["occurrence"]["scheduled_for"] = "2026-09-08T11:30:00Z"
+        second = normalize_breaking_radar_handoff(later)
+        self.assertNotEqual(first.trigger["occurrence_id"], second.trigger["occurrence_id"])
+
+    def test_corrected_assessment_keeps_candidate_occurrence_stable(self):
+        first = normalize_breaking_radar_handoff(self.handoff())
+        corrected = self.handoff()
+        corrected["assessment"]["severity_assessment"]["reason_text"] = (
+            "Corrected but still verified material assessment."
+        )
+        corrected["assessment"]["evidence"][0]["supported_claim"] = (
+            "Corrected supported wording for Synthetic Product 2 in Region A."
+        )
+        second = normalize_breaking_radar_handoff(corrected)
         self.assertEqual(first.trigger["occurrence_id"], second.trigger["occurrence_id"])
 
     def test_edge_rejects_unknown_occurrence_field(self):
@@ -398,6 +504,8 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
         self.assertEqual(result.domain_outcome, "SUCCEEDED")
         self.assertEqual(self.story_calls, 0)
         self.assertEqual(result.run_outcome_mapping()["empty_success"], "NO_ACTION")
+        assessed = self.assert_run_outcome_accepted(result)
+        self.assertEqual(assessed["empty_success"], "NO_ACTION")
 
     def test_material_routes_story_only(self):
         result = self.run_workflow()
@@ -415,14 +523,34 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
         self.assertEqual(result.domain_outcome, "SUCCEEDED")
         self.assertEqual(self.story_calls, 0)
 
-    def test_unverified_is_blocked_without_dispatch(self):
-        assessment = make_assessment(severity=None)
-        assessment["verification"]["state"] = "UNVERIFIED"
-        assessment["severity_assessment"]["reason_text"] = None
-        result = self.run_workflow(assessment)
-        self.assertEqual(result.routing_result["routing_decision"], "BLOCKED_UNVERIFIED")
-        self.assertEqual(result.domain_outcome, "BLOCKED")
-        self.assertEqual(self.story_calls, 0)
+    def test_non_pass_verification_states_reach_existing_router_gate(self):
+        for state in ("UNVERIFIED", "PARTIAL", "BLOCKED"):
+            with self.subTest(state=state):
+                assessment = make_assessment(severity=None)
+                assessment["verification"]["state"] = state
+                draft_connector = CountingDraftConnector()
+                review_delivery = CountingReviewDelivery()
+                result = self.run_workflow(
+                    assessment,
+                    draft_connector=draft_connector,
+                    review_delivery=review_delivery,
+                )
+                self.assertEqual(
+                    result.routing_result["routing_decision"], "BLOCKED_UNVERIFIED"
+                )
+                self.assertEqual(result.routing_result["reason_code"], "EVIDENCE_INSUFFICIENT")
+                self.assertEqual(result.domain_outcome, "BLOCKED")
+                self.assertEqual(self.story_calls, 0)
+                self.assertEqual(self.main_calls, [])
+                self.assertEqual(draft_connector.calls, 0)
+                self.assertEqual(review_delivery.calls, 0)
+                self.assert_run_outcome_accepted(result)
+
+    def test_pass_verification_behavior_is_unchanged(self):
+        result = self.run_workflow()
+        self.assertEqual(result.routing_result["routing_decision"], "IMMEDIATE_STORY_DRAFT")
+        self.assertEqual(result.domain_outcome, "SUCCEEDED")
+        self.assertEqual(self.story_calls, 1)
 
     def test_story_quality_failure_is_blocked_without_dispatch(self):
         assessment = make_assessment()
@@ -430,6 +558,7 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
         result = self.run_workflow(assessment)
         self.assertEqual(result.routing_result["reason_code"], "STORY_QUALITY_BLOCK")
         self.assertEqual(self.story_calls, 0)
+        self.assert_run_outcome_accepted(result)
 
     def test_exceptional_without_main_assessment_is_story_only(self):
         result = self.run_workflow(make_assessment(severity="EXCEPTIONAL_BREAKING"))
@@ -446,6 +575,11 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
             order.append(candidate["format"])
             return FakePipelineResult(manifest_id="manifest-feed")
 
+        class OrderedProvider(BoundMainProvider):
+            def get_candidates(provider_self, **kwargs):
+                order.append("PROVIDER")
+                return super().get_candidates(**kwargs)
+
         with patch.object(workflow, "run_story_pipeline", side_effect=story), patch.object(
             workflow, "run_main_pipeline", side_effect=main
         ):
@@ -454,11 +588,12 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
                 state_root=self.state_root, now=NOW, story_writer=object(),
                 story_verifier=object(), draft_connector=object(), review_delivery=object(),
                 dependency_recheck=lambda _stage: True,
-                main_candidate_provider=BoundMainProvider(fmt="FEED"),
+                main_candidate_provider=OrderedProvider(fmt="FEED"),
                 main_final_verifier=object(),
             )
         self.assertEqual(result.domain_outcome, "SUCCEEDED")
-        self.assertEqual(order, ["STORY", "FEED"])
+        self.assertEqual(order, ["STORY", "PROVIDER", "FEED"])
+        self.assert_run_outcome_accepted(result)
 
     def test_exceptional_carousel_is_story_first_then_carousel(self):
         result = self.run_workflow(
@@ -506,6 +641,7 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
             self.story_calls += 1
             return FakePipelineResult(preview_delivery={"status": "FAILED"})
 
+        provider = BoundMainProvider()
         with patch.object(workflow, "run_story_pipeline", side_effect=failed_story), patch.object(
             workflow, "run_main_pipeline", side_effect=self.main_result
         ):
@@ -514,10 +650,12 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
                 state_root=self.state_root, now=NOW, story_writer=object(),
                 story_verifier=object(), draft_connector=object(), review_delivery=object(),
                 dependency_recheck=lambda _stage: True,
-                main_candidate_provider=BoundMainProvider(), main_final_verifier=object(),
+                main_candidate_provider=provider, main_final_verifier=object(),
             )
         self.assertEqual(result.domain_outcome, "FAILED")
+        self.assertEqual(provider.calls, 0)
         self.assertEqual(self.main_calls, [])
+        self.assert_run_outcome_accepted(result)
 
     def test_runner_exception_is_unknown_and_replay_does_not_retry(self):
         calls = []
@@ -538,6 +676,23 @@ class ClassificationAndDispatchTests(BreakingWorkflowTestCase):
         self.assertTrue(first.reconciliation_required)
         self.assertEqual(second.domain_outcome, "UNKNOWN")
         self.assertEqual(calls, [1])
+        self.assert_run_outcome_accepted(first)
+
+    def test_story_runner_exception_never_invokes_main_provider(self):
+        provider = BoundMainProvider()
+        with patch.object(
+            workflow, "run_story_pipeline", side_effect=RuntimeError("ambiguous story")
+        ), patch.object(workflow, "run_main_pipeline", side_effect=self.main_result):
+            result = workflow.run_breaking_workflow(
+                make_trigger(), exceptional_assessment(), workspace=self.workspace,
+                state_root=self.state_root, now=NOW, story_writer=object(),
+                story_verifier=object(), draft_connector=object(), review_delivery=object(),
+                dependency_recheck=lambda _stage: True,
+                main_candidate_provider=provider, main_final_verifier=object(),
+            )
+        self.assertEqual(result.domain_outcome, "UNKNOWN")
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(self.main_calls, [])
 
 
 class CapacityAndRecheckTests(BreakingWorkflowTestCase):
@@ -577,6 +732,25 @@ class CapacityAndRecheckTests(BreakingWorkflowTestCase):
         self.assertEqual(result.domain_outcome, "BLOCKED")
         self.assertEqual(result.dispatch_result.record["targets"]["STORY"]["reason_code"], "STORY_LOAD_BLOCK")
         self.assertEqual(self.story_calls, 0)
+        self.assert_run_outcome_accepted(result)
+
+    def test_story_load_drift_never_invokes_optional_main_provider(self):
+        empty = {
+            "story_load": {"published_today": 0, "pending": 0, "last_published_at": None},
+            "main_load": {"published_today": 0, "pending": 0, "last_published_at": None},
+        }
+        exhausted = copy.deepcopy(empty)
+        exhausted["story_load"]["pending"] = 1
+        provider = BoundMainProvider()
+        with patch.object(workflow, "collect_format_loads", side_effect=[empty, exhausted]):
+            result = self.run_workflow(
+                exceptional_assessment(),
+                main_provider=provider,
+                cadence_config={"story_target_max_breaking": 1},
+            )
+        self.assertEqual(result.domain_outcome, "BLOCKED")
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(self.main_calls, [])
 
     def test_main_at_max_is_omitted_and_provider_not_called(self):
         self.write_pending("FEED", 1)
@@ -605,17 +779,19 @@ class CapacityAndRecheckTests(BreakingWorkflowTestCase):
         }
         main_exhausted = copy.deepcopy(empty)
         main_exhausted["main_load"]["pending"] = 1
+        provider = BoundMainProvider()
         with patch.object(
             workflow, "collect_format_loads", side_effect=[empty, empty, main_exhausted]
         ):
             result = self.run_workflow(
                 exceptional_assessment(),
-                main_provider=BoundMainProvider(),
+                main_provider=provider,
                 cadence_config={"main_target_max_breaking": 1},
             )
         self.assertEqual(result.domain_outcome, "BLOCKED")
         self.assertEqual(self.story_calls, 1)
         self.assertEqual(self.main_calls, [])
+        self.assertEqual(provider.calls, 0)
 
     def test_missing_dependency_recheck_blocks_before_story(self):
         with patch.object(workflow, "run_story_pipeline", side_effect=self.story_result):
@@ -728,6 +904,7 @@ class IdentityAndProviderBindingTests(BreakingWorkflowTestCase):
         result = self.run_workflow()
         self.assertEqual(result.routing_result["routing_decision"], "SUPPRESS_DUPLICATE")
         self.assertEqual(self.story_calls, 0)
+        self.assert_run_outcome_accepted(result)
 
     def test_explicit_follow_up_without_parent_is_ambiguous(self):
         assessment = make_assessment()
@@ -752,34 +929,76 @@ class IdentityAndProviderBindingTests(BreakingWorkflowTestCase):
         self.assertEqual(result.reason_code, "IDENTITY_STATE_BLOCKED")
         self.assertEqual(result.domain_outcome, "BLOCKED")
         self.assertTrue(result.reconciliation_required)
+        self.assert_run_outcome_accepted(result)
 
-    def test_wrong_main_candidate_id_blocks_all_draft_calls(self):
-        provider = BoundMainProvider(mutate=lambda c: c.update(candidate_id="other"))
+    def test_missing_main_provider_preserves_successful_story(self):
+        result = self.run_workflow(exceptional_assessment())
+        targets = result.dispatch_result.record["targets"]
+        self.assertEqual(targets["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(targets["FEED"]["status"], "BLOCKED_BEFORE_ATTEMPT")
+        self.assertEqual(targets["FEED"]["reason_code"], "MAIN_DRAFT_DEPENDENCY_UNAVAILABLE")
+        self.assertEqual(self.story_calls, 1)
+        self.assertEqual(self.main_calls, [])
+
+    def test_missing_main_verifier_preserves_successful_story(self):
+        provider = BoundMainProvider()
+        result = self.run_workflow(
+            exceptional_assessment(),
+            main_provider=provider,
+            main_final_verifier=None,
+        )
+        targets = result.dispatch_result.record["targets"]
+        self.assertEqual(targets["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(targets["FEED"]["status"], "BLOCKED_BEFORE_ATTEMPT")
+        self.assertEqual(targets["FEED"]["reason_code"], "MAIN_DRAFT_DEPENDENCY_UNAVAILABLE")
+        self.assertEqual(provider.calls, 0)
+
+    def assert_main_binding_block(self, provider, reason_code):
         result = self.run_workflow(exceptional_assessment(), main_provider=provider)
-        self.assertEqual(result.reason_code, "MAIN_CANDIDATE_ID_MISMATCH")
-        self.assertEqual(self.story_calls, 0)
+        targets = result.dispatch_result.record["targets"]
+        self.assertEqual(targets["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(targets["FEED"]["status"], "BLOCKED_BEFORE_ATTEMPT")
+        self.assertEqual(targets["FEED"]["reason_code"], reason_code)
+        self.assertEqual(result.reason_code, reason_code)
+        self.assertEqual(self.story_calls, 1)
+        self.assertEqual(self.main_calls, [])
+        return result
 
-    def test_wrong_main_format_blocks_all_draft_calls(self):
-        result = self.run_workflow(
-            exceptional_assessment(), main_provider=BoundMainProvider(fmt="CAROUSEL")
+    def test_wrong_main_candidate_id_blocks_only_main(self):
+        provider = BoundMainProvider(mutate=lambda c: c.update(candidate_id="other"))
+        self.assert_main_binding_block(provider, "MAIN_CANDIDATE_ID_MISMATCH")
+
+    def test_wrong_main_format_blocks_only_main(self):
+        self.assert_main_binding_block(
+            BoundMainProvider(fmt="CAROUSEL"), "MAIN_CANDIDATE_FORMAT_MISMATCH"
         )
-        self.assertEqual(result.reason_code, "MAIN_CANDIDATE_FORMAT_MISMATCH")
-        self.assertEqual(self.story_calls, 0)
 
-    def test_zero_or_multiple_main_candidates_block(self):
-        for count, code in ((0, "MAIN_CANDIDATE_UNAVAILABLE"), (2, "MAIN_CANDIDATE_AMBIGUOUS")):
-            with self.subTest(count=count):
-                result = self.run_workflow(exceptional_assessment(), main_provider=BoundMainProvider(count=count))
-                self.assertEqual(result.reason_code, code)
-                self.assertEqual(self.story_calls, 0)
+    def test_zero_main_candidates_blocks_only_main(self):
+        self.assert_main_binding_block(BoundMainProvider(count=0), "MAIN_CANDIDATE_UNAVAILABLE")
 
-    def test_main_candidate_provider_failure_is_blocked_before_draft(self):
-        result = self.run_workflow(
-            exceptional_assessment(), main_provider=FailingMainProvider()
-        )
-        self.assertEqual(result.reason_code, "MAIN_CANDIDATE_PROVIDER_FAILED")
-        self.assertEqual(result.domain_outcome, "BLOCKED")
-        self.assertEqual(self.story_calls, 0)
+    def test_multiple_main_candidates_blocks_only_main(self):
+        self.assert_main_binding_block(BoundMainProvider(count=2), "MAIN_CANDIDATE_AMBIGUOUS")
+
+    def test_main_candidate_provider_failure_blocks_only_main(self):
+        provider = FailingMainProvider()
+        self.assert_main_binding_block(provider, "MAIN_CANDIDATE_PROVIDER_FAILED")
+        self.assertEqual(provider.calls, 1)
+
+    def test_main_evidence_mismatch_blocks_only_main(self):
+        provider = BoundMainProvider(mutate=lambda c: c.update(evidence_refs=["other"]))
+        self.assert_main_binding_block(provider, "MAIN_EVIDENCE_BINDING_MISMATCH")
+
+    def test_main_source_mismatch_blocks_only_main(self):
+        provider = BoundMainProvider(mutate=lambda c: c.update(source_attribution="other"))
+        self.assert_main_binding_block(provider, "MAIN_SOURCE_BINDING_MISMATCH")
+
+    def test_main_lineage_mismatch_blocks_only_main(self):
+        provider = BoundMainProvider(mutate=lambda c: c.update(request_lineage="other"))
+        self.assert_main_binding_block(provider, "MAIN_LINEAGE_MISMATCH")
+
+    def test_main_invalid_candidate_blocks_only_main(self):
+        provider = BoundMainProvider(mutate=lambda c: c.pop("caption_text"))
+        self.assert_main_binding_block(provider, "MAIN_CANDIDATE_INVALID")
 
     def test_story_candidate_lineage_is_draft_set_id(self):
         captured = []
@@ -806,6 +1025,25 @@ class IdentityAndProviderBindingTests(BreakingWorkflowTestCase):
         self.assertEqual(self.story_calls, 1)
         self.assertFalse(second.dispatch_result.created)
 
+    def test_replay_after_main_preparation_block_retries_neither_target(self):
+        first_provider = BoundMainProvider(count=0)
+        first = self.run_workflow(exceptional_assessment(), main_provider=first_provider)
+        self.assertEqual(first.dispatch_result.record["targets"]["STORY"]["status"], "SUCCEEDED")
+        self.assertEqual(
+            first.dispatch_result.record["targets"]["FEED"]["status"],
+            "BLOCKED_BEFORE_ATTEMPT",
+        )
+        self.story_calls = 0
+        replay_provider = BoundMainProvider()
+        replay = self.run_workflow(exceptional_assessment(), main_provider=replay_provider)
+        self.assertEqual(self.story_calls, 0)
+        self.assertEqual(replay_provider.calls, 0)
+        self.assertEqual(self.main_calls, [])
+        self.assertEqual(
+            replay.dispatch_result.record["targets"]["FEED"]["status"],
+            "BLOCKED_BEFORE_ATTEMPT",
+        )
+
     def test_changed_routing_for_same_development_is_conflict_not_new_set(self):
         first = self.run_workflow()
         self.story_calls = 0
@@ -816,6 +1054,13 @@ class IdentityAndProviderBindingTests(BreakingWorkflowTestCase):
         self.assertEqual(second.reason_code, "DRAFT_SET_CONFLICT")
         self.assertEqual(second.domain_outcome, "UNKNOWN")
         self.assertEqual(self.story_calls, 0)
+        self.assertGreater(len(second.reason_text), 240)
+        mapped = second.run_outcome_mapping()
+        self.assertLessEqual(len(mapped["reason_text"]), 240)
+        self.assertNotIn("\n", mapped["reason_text"])
+        self.assertNotIn("\r", mapped["reason_text"])
+        assessed = self.assert_run_outcome_accepted(second)
+        self.assertEqual(assessed["domain_outcome"], "UNKNOWN")
 
     def test_story_dispatch_in_flight_reentry_requires_reconciliation(self):
         first = self.run_workflow()
@@ -826,6 +1071,7 @@ class IdentityAndProviderBindingTests(BreakingWorkflowTestCase):
         self.assertEqual(self.story_calls, 0)
         self.assertEqual(replay.domain_outcome, "UNKNOWN")
         self.assertTrue(replay.reconciliation_required)
+        self.assert_run_outcome_accepted(replay)
 
     def test_main_dispatch_in_flight_reentry_does_not_repeat_story_or_main(self):
         provider = BoundMainProvider()
@@ -837,8 +1083,30 @@ class IdentityAndProviderBindingTests(BreakingWorkflowTestCase):
         replay = self.run_workflow(exceptional_assessment(), main_provider=provider)
         self.assertEqual(self.story_calls, 0)
         self.assertEqual(self.main_calls, [])
+        self.assertEqual(provider.calls, 1)
         self.assertEqual(replay.domain_outcome, "UNKNOWN")
         self.assertTrue(replay.reconciliation_required)
+
+    def test_run_outcome_mapping_collapses_newlines_and_bounds_detail(self):
+        result = workflow.BreakingWorkflowResult(
+            occurrence_id=make_trigger()["occurrence_id"],
+            candidate_id="candidate-breaking-1",
+            assessment_ref="assessment:synthetic:1",
+            identity_result=None,
+            routing_result=None,
+            draft_set_id=None,
+            dispatch_result=None,
+            domain_outcome="UNKNOWN",
+            reconciliation_required=True,
+            reason_code="DRAFT_SET_CONFLICT",
+            reason_text=("Detailed conflict\r\nwith reconciliation context " * 20),
+        )
+        self.assertGreater(len(result.reason_text), 240)
+        mapped = result.run_outcome_mapping()
+        self.assertLessEqual(len(mapped["reason_text"]), 240)
+        self.assertNotIn("\n", mapped["reason_text"])
+        self.assertNotIn("\r", mapped["reason_text"])
+        self.assert_run_outcome_accepted(result)
 
     def test_concurrent_replay_creates_at_most_one_story_attempt(self):
         calls = []

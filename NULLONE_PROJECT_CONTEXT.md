@@ -88,7 +88,7 @@ Relevant issues:
 - #60 cadence-state backward compatibility — CLOSED/COMPLETED; its merged read-only compatibility implementation supplies the authoritative load behavior reused by #62/#63; no production ledger migration was performed or required (`migration_required: False`)
 - #61 secure scheduled analytics credential injection — OPEN; depends on #65 and separates the application `AnalyticsProvider`/secret boundary from the current systemd/OpenClaw environment adapter that supplies the non-committed `ZERNIO_ANALYTICS_API_TOKEN`
 - #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
-- #63 `BreakingWorkflow` orchestration — OPEN; dependency on merged #62 is satisfied; repository implementation is in the `feature/n63-breaking-workflow` review branch/PR, with no production activation or live Breaking proof
+- #63 `BreakingWorkflow` orchestration — OPEN; dependency on merged #62 is satisfied; repository implementation is in the `feature/n63-breaking-workflow` review branch/PR #71, hardened to preserve the exact #34/#36 verification vocabulary, defer optional-main preparation until after Story review delivery succeeds, derive candidate-level Radar occurrences, and emit contract-safe #27 mappings; no production activation or live Breaking proof
 - #65 NullOne Application Runtime architecture — CLOSED/COMPLETED; the accepted contract establishes NullOne workflow ownership and replaceable provider adapters
 - #66 remove reachable legacy publication instructions/capabilities — CLOSED/COMPLETED; no production activation was implied by repository completion
 
@@ -774,7 +774,14 @@ DraftProvider and ReviewDelivery boundaries.
 **#63 remains OPEN until its PR is reviewed and merged.** No production
 activation occurred. The current legacy Radar remains `DELTA_MONITORING_ONLY`
 and Markdown-only; its strict machine-readable handoff is `DESIRED / NOT
-DEPLOYED`. Natural Breaking proof and the scheduled Zernio bootstrap remain
+DEPLOYED`. That desired edge maps one raw Radar scan plus each `candidate_id`
+into a distinct stable Breaking occurrence. The strict input accepts exactly
+`UNVERIFIED | PARTIAL | PASS | BLOCKED` and rejects `FAIL`. Optional-main
+preparation occurs only after Story reaches exact review-delivery `SENT`, so
+main dependency/candidate failures preserve durable Story success. Non-success
+#27 mapping text is normalized to one line and at most 240 characters while
+full diagnostics remain in application/audit state. Natural Breaking proof and
+the scheduled Zernio bootstrap remain
 `UNPROVEN_LIVE / DEFERRED_TO_#37` and `LIVE_SCHEDULED_PATH_UNPROVEN`.
 
 ### Verified #34 completion — 2026-09-06

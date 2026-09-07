@@ -19,7 +19,7 @@ from nullone_breaking_identity import CandidateInput, EvidenceItem, FollowUpDelt
 SCHEMA = "nullone.breaking-workflow-input.v1"
 CONTRACT_VERSION = "1.0.0"
 
-VERIFICATION_STATES = frozenset({"PASS", "FAIL", "UNVERIFIED"})
+VERIFICATION_STATES = frozenset({"UNVERIFIED", "PARTIAL", "PASS", "BLOCKED"})
 SEVERITIES = frozenset({"NORMAL", "MATERIAL_BREAKING", "EXCEPTIONAL_BREAKING"})
 CONTENT_TYPES = frozenset({"NEWS", "BREAKING"})
 

@@ -30,7 +30,7 @@ from nullone_breaking_workflow_input import (
 )
 from nullone_cadence_controller import CadenceContractError
 from nullone_cadence_state_adapter import CadenceStateError, collect_format_loads
-from nullone_main_draft_pipeline import run_main_pipeline
+from nullone_main_draft_pipeline import MainPipelineResult, run_main_pipeline
 from nullone_scheduler_invocation import SchedulerInvocationError, accept_workflow_trigger
 from nullone_story_pipeline import StoryCandidateNotEligible, run_story_pipeline, validate_candidate
 
@@ -38,6 +38,18 @@ BREAKING_WORKFLOW_ID = "breaking"
 ACCELERATED_DECISIONS = breaking_dispatch.ACCELERATED_DECISIONS
 
 DependencyRecheck = Callable[[str], bool]
+RUN_OUTCOME_REASON_TEXT_MAX = 240
+
+
+def _run_outcome_reason_text(value: str) -> str:
+    """Return deterministic single-line #27-compatible diagnostic text."""
+
+    normalized = " ".join(value.split())
+    if not normalized:
+        normalized = "Breaking workflow did not complete."
+    if len(normalized) <= RUN_OUTCOME_REASON_TEXT_MAX:
+        return normalized
+    return normalized[: RUN_OUTCOME_REASON_TEXT_MAX - 1].rstrip() + "…"
 
 
 @dataclass
@@ -94,7 +106,11 @@ class BreakingWorkflowResult:
         return {
             "domain_outcome": self.domain_outcome,
             "reason_code": None if self.domain_outcome == "SUCCEEDED" else self.reason_code,
-            "reason_text": None if self.domain_outcome == "SUCCEEDED" else self.reason_text,
+            "reason_text": (
+                None
+                if self.domain_outcome == "SUCCEEDED"
+                else _run_outcome_reason_text(self.reason_text)
+            ),
             "empty_success": "NO_ACTION" if successful_no_action else None,
             "required_artifacts": required_artifacts,
         }
@@ -429,56 +445,6 @@ def run_breaking_workflow(
         )
 
     main_target = next((target for target in routing.draft_targets if target != "STORY"), None)
-    main_candidate: dict[str, Any] | None = None
-    if main_target is not None:
-        if main_candidate_provider is None or main_final_verifier is None:
-            return _result(
-                trigger=trigger,
-                assessment=assessment,
-                identity_result=identity_dict,
-                routing_result=routing_dict,
-                draft_set_id=draft_set_id,
-                domain_outcome="BLOCKED",
-                reason_code="MAIN_DRAFT_DEPENDENCY_UNAVAILABLE",
-                reason_text="Selected main target has no candidate provider/final verifier.",
-            )
-        try:
-            raw_main_candidates = main_candidate_provider.get_candidates(
-                candidate_id=assessment.candidate_id,
-                selected_format=main_target,
-                request_lineage=draft_set_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - provider uncertainty is fail-closed
-            return _result(
-                trigger=trigger,
-                assessment=assessment,
-                identity_result=identity_dict,
-                routing_result=routing_dict,
-                draft_set_id=draft_set_id,
-                domain_outcome="BLOCKED",
-                reason_code="MAIN_CANDIDATE_PROVIDER_FAILED",
-                reason_text=f"Prepared main candidate provider failed ({type(exc).__name__}).",
-            )
-        main_candidate, selection, selection_context = select_bound_main_candidate(
-            raw_main_candidates,
-            candidate_id=assessment.candidate_id,
-            selected_format=main_target,
-            request_lineage=draft_set_id,
-            evidence_refs=assessment.verification.evidence_refs,
-            source_attribution=assessment.source_attribution,
-        )
-        if selection != SELECTION_OK:
-            return _result(
-                trigger=trigger,
-                assessment=assessment,
-                identity_result=identity_dict,
-                routing_result=routing_dict,
-                draft_set_id=draft_set_id,
-                domain_outcome="BLOCKED",
-                reason_code=selection_context["reason_code"],
-                reason_text="Prepared main candidate is unavailable, ambiguous, or not exactly bound.",
-            )
-
     authoritative_recheck = _compose_authoritative_recheck(
         candidate_input=candidate_input,
         workspace=workspace,
@@ -501,8 +467,46 @@ def run_breaking_workflow(
         )
 
     def _main_runner(selected_format: str) -> Any:
+        def _blocked(reason_code: str, reason_text: str) -> MainPipelineResult:
+            return MainPipelineResult(
+                outcome="CANDIDATE_NOT_ELIGIBLE",
+                reason_code=reason_code,
+                reason_text=reason_text,
+            )
+
+        # The dispatcher invokes this closure only after Story has reached
+        # SUCCEEDED (draft created + exact SENT preview proof). Optional-main
+        # preparation therefore cannot suppress an otherwise valid Story.
+        if main_candidate_provider is None or main_final_verifier is None:
+            return _blocked(
+                "MAIN_DRAFT_DEPENDENCY_UNAVAILABLE",
+                "Selected main target has no candidate provider/final verifier.",
+            )
+        try:
+            raw_main_candidates = main_candidate_provider.get_candidates(
+                candidate_id=assessment.candidate_id,
+                selected_format=selected_format,
+                request_lineage=draft_set_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - provider has no review-create capability
+            return _blocked(
+                "MAIN_CANDIDATE_PROVIDER_FAILED",
+                f"Prepared main candidate provider failed ({type(exc).__name__}).",
+            )
+        main_candidate, selection, selection_context = select_bound_main_candidate(
+            raw_main_candidates,
+            candidate_id=assessment.candidate_id,
+            selected_format=selected_format,
+            request_lineage=draft_set_id,
+            evidence_refs=assessment.verification.evidence_refs,
+            source_attribution=assessment.source_attribution,
+        )
+        if selection != SELECTION_OK:
+            return _blocked(
+                selection_context["reason_code"],
+                "Prepared main candidate is unavailable, ambiguous, or not exactly bound.",
+            )
         assert main_candidate is not None
-        assert selected_format == main_candidate["format"]
         return run_main_pipeline(
             main_candidate,
             final_verifier=main_final_verifier,
