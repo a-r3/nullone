@@ -23,6 +23,8 @@ COMMANDS = [
     [sys.executable, "tests/test_breaking_router.py"],
     [sys.executable, "tests/test_main_draft_pipeline.py"],
     [sys.executable, "tests/test_breaking_dispatch.py"],
+    [sys.executable, "tests/test_breaking_workflow.py"],
+    [sys.executable, "tests/test_breaking_workflow_capability_negative.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
     [sys.executable, "tests/test_behavioral_regressions.py"],
     [sys.executable, "tests/test_approval_publication_instruction_safety.py"],

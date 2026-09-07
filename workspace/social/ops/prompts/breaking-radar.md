@@ -113,3 +113,20 @@ Do not search for:
 Those belong to Morning Editorial.
 
 Keep reports compact.
+
+## Desired machine-readable handoff (repository contract; not deployed)
+
+Status: `DESIRED / NOT DEPLOYED`.
+
+The current operational Radar output remains the Markdown research report at
+`social/research/daily/YYYY-MM-DD-breaking-HHMM.md`. That report is not a
+safety-critical application command and must not be heuristically parsed.
+
+A future reviewed OpenClaw Radar job integration must additionally provide one
+exact `nullone.breaking-radar-handoff.v1` envelope containing stable occurrence
+fields and a complete `nullone.breaking-workflow-input.v1` assessment. The
+executable field contract and validation live in
+`social/ops/scripts/nullone_breaking_radar_edge.py` and
+`social/ops/scripts/nullone_breaking_workflow_input.py`. The handoff supplies
+structured evidence and editorial findings only; NullOne remains responsible
+for fresh-state identity, routing, capacity, durable dispatch, and outcomes.
