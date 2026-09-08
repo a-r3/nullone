@@ -984,10 +984,19 @@ class ZernioDraftProvider:
             )
         except DraftConnectorUnavailableError:
             raise
-        except Exception as exc:
-            raise DraftAdapterError(
-                "Zernio media presign request failed"
-            ) from exc
+        except DraftConnectorUnauthorizedError:
+            raise
+        except DraftAdapterError:
+            # Known operational failure at this boundary: the provider
+            # answered with a malformed/unusable body (e.g. non-JSON).
+            # Normalize to the fixed sanitized presign BLOCKED reason so
+            # the CLI edge reports BLOCKED with attempts untouched.
+            raise DraftPresignBlockedError(PRESIGN_FAILED_REASON) from None
+        except Exception:
+            # Programming defects (AssertionError, TypeError from
+            # incorrect internal use, ...) surface; never classified as
+            # provider BLOCKED.
+            raise
 
         if status in (401, 403):
             raise DraftConnectorUnauthorizedError(SECRET_MISSING_REASON)
@@ -1000,12 +1009,10 @@ class ZernioDraftProvider:
         if status != 200:
             raise DraftPresignBlockedError(PRESIGN_FAILED_REASON)
 
-        try:
-            return _validate_presign_response(body)
-        except DraftAdapterError:
-            raise
-        except Exception as exc:
-            raise DraftPresignBlockedError(PRESIGN_FAILED_REASON) from exc
+        # _validate_presign_response raises DraftPresignBlockedError (a
+        # DraftAdapterError) for non-object or unusable envelopes; any other
+        # exception is a programming defect and surfaces unclassified.
+        return _validate_presign_response(body)
 
     def _upload_one(self, *, upload_url: str, item: dict) -> None:
         """Upload exact bytes by PUT to the presigned URL.

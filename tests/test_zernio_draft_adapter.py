@@ -110,6 +110,37 @@ def make_provider(transport=None, **kwargs):
     return adapter.ZernioDraftProvider(transport, **kwargs)
 
 
+class SameRunTransport(FakeTransport):
+    """Scripted fake: presign succeeds with indexed public URLs except at
+    the configured presign-attempt index, which fails. Media validation
+    echoes each requested URL so persisted URLs validate. All calls are
+    recorded exactly like the base fake."""
+
+    def __init__(self, url_prefix, fail_at_presign_index):
+        super().__init__()
+        self.url_prefix = url_prefix
+        self.fail_at_presign_index = fail_at_presign_index
+        self.presign_attempts = 0
+
+    def post(self, path, *, json_body=None, headers=None, idempotency_key=None):
+        self.post_calls.append((path, json_body, headers, idempotency_key))
+        if path == "/media/presign":
+            idx = self.presign_attempts
+            self.presign_attempts += 1
+            if (
+                self.fail_at_presign_index is not None
+                and idx == self.fail_at_presign_index
+            ):
+                return (400, {"error": "synthetic presign failure"})
+            return presign_success(
+                public_url=f"https://cdn.example.com/{self.url_prefix}-{idx}.png",
+                upload_url=f"https://upload.example.com/{self.url_prefix}-{idx}",
+            )
+        if path == "/tools/validate/media":
+            return media_validation_success(url=(json_body or {}).get("url"))
+        return self.post_responses.get(path, self.default_post)
+
+
 def make_manifest(tmp_path, fmt="FEED", media_count=1, content_type="NEWS"):
     """Build a minimal valid manifest in a temp workspace."""
     bridge_common.WORKSPACE = tmp_path
@@ -586,6 +617,226 @@ class PresignUploadTests(unittest.TestCase):
         self.assertEqual(m["review"]["create_attempts"], 0)
         self.assertEqual(m["review"]["state"], "NOT_CREATED")
         self.assertIsNone(m["review"]["zernio_draft_id"])
+
+    def test_partial_presign_same_run_three_success_fourth_fails_and_recovery_reuses(self):
+        """Real Sep-8 partial-progress shape: 8 CAROUSEL items start with NO
+        public_url; items 1-3 presign+upload in ONE invocation, item 4
+        presign fails; a second recovery run reuses the first three."""
+        manifest_path, _ = make_manifest(self.tmp_path, fmt="CAROUSEL", media_count=8)
+        _, m = load_manifest(manifest_path)
+        self.assertTrue(all(item.get("public_url") is None for item in m["media"]))
+
+        first = SameRunTransport(url_prefix="samerun", fail_at_presign_index=3)
+        setup_valid_transport(first, fmt="CAROUSEL")
+        provider = make_provider(first)
+        with self.assertRaises(adapter.DraftPresignBlockedError):
+            provider.create_review_draft(manifest_path)
+
+        # Immediate post-failure proof: exactly 4 presigns, 3 PUTs, 0 creates.
+        presign_attempts = [c for c in first.post_calls if c[0] == "/media/presign"]
+        self.assertEqual(len(presign_attempts), 4)
+        self.assertEqual(len(first.put_calls), 3)
+        self.assertEqual(
+            len([c for c in first.post_calls if c[0] == "/posts"]), 0
+        )
+
+        _, m = load_manifest(manifest_path)
+        expected_first_urls = [
+            f"https://cdn.example.com/samerun-{i}.png" for i in range(3)
+        ]
+        for i in range(3):
+            self.assertEqual(m["media"][i]["public_url"], expected_first_urls[i])
+        for i in range(3, 8):
+            self.assertIsNone(m["media"][i].get("public_url"))
+        self.assertEqual(m["review"]["create_attempts"], 0)
+        self.assertEqual(m["review"]["state"], "NOT_CREATED")
+        self.assertFalse(m["review"]["zernio_draft_id"])
+        raw = manifest_path.read_text(encoding="utf-8")
+        self.assertNotIn("upload.example.com", raw)
+
+        # Second recovery run with a fresh transport and distinct URLs.
+        second = SameRunTransport(url_prefix="recovery", fail_at_presign_index=None)
+        setup_valid_transport(second, fmt="CAROUSEL")
+        second.get_responses["/posts/draft-123"] = readback_success(
+            "draft-123", "CAROUSEL"
+        )
+        provider2 = make_provider(second)
+        provider2.create_review_draft(manifest_path)
+
+        # Only the remaining five items presigned/uploaded in recovery.
+        second_presigns = [c for c in second.post_calls if c[0] == "/media/presign"]
+        self.assertEqual(len(second_presigns), 5)
+        self.assertEqual(len(second.put_calls), 5)
+        # First three were NOT re-presigned: recovery presigned exactly
+        # items 4-8 by filename, in exact manifest order.
+        self.assertEqual(
+            [c[1]["filename"] for c in second_presigns],
+            [f"source-{i}.png" for i in range(3, 8)],
+        )
+        # First three were NOT re-uploaded: no recovery PUT touched a
+        # first-run upload URL.
+        first_upload_urls = {url for url, _, _ in first.put_calls}
+        for url, _data, _headers in second.put_calls:
+            self.assertNotIn(url, first_upload_urls)
+            self.assertTrue(
+                url.startswith("https://upload.example.com/recovery-")
+            )
+
+        _, m = load_manifest(manifest_path)
+        expected_all = expected_first_urls + [
+            f"https://cdn.example.com/recovery-{i}.png" for i in range(5)
+        ]
+        self.assertEqual(
+            [item["public_url"] for item in m["media"]], expected_all
+        )
+        # Exactly one eventual draft create, first-three work never repeated.
+        self.assertEqual(
+            len([c for c in second.post_calls if c[0] == "/posts"]), 1
+        )
+        create_payload = [
+            c for c in second.post_calls if c[0] == "/posts"
+        ][0][1]
+        self.assertEqual(
+            [item["url"] for item in create_payload["mediaItems"]], expected_all
+        )
+        self.assertEqual(m["review"]["create_attempts"], 1)
+        self.assertEqual(m["review"]["state"], "DRAFT_CREATED")
+        self.assertEqual(m["review"]["zernio_draft_id"], "draft-123")
+
+
+# ---------------------------------------------------------------------------
+# Malformed presign normalization tests (malformed provider body -> clean
+# presign BLOCKED at the presign adapter boundary, attempts untouched)
+# ---------------------------------------------------------------------------
+
+
+class PresignMalformedTests(unittest.TestCase):
+    MALFORMED_MARKER = "SYNTHETIC_MALFORMED_BODY_MARKER_9f8c"
+
+    def setUp(self):
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir_ctx.name)
+        self.addCleanup(self._tmpdir_ctx.cleanup)
+        self.bridge = load_bridge()
+
+    def _assert_untouched(self, manifest_path, transport):
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["create_attempts"], 0)
+        self.assertEqual(m["review"]["state"], "NOT_CREATED")
+        self.assertFalse(m["review"]["zernio_draft_id"])
+        self.assertEqual(
+            len([c for c in transport.post_calls if c[0] == "/posts"]), 0
+        )
+        return m
+
+    def test_malformed_json_from_presign_transport_is_clean_blocked(self):
+        manifest_path, _ = make_manifest(self.tmp_path)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        marker = self.MALFORMED_MARKER
+        original_post = transport.post
+
+        def raising_post(path, *, json_body=None, headers=None, idempotency_key=None):
+            if path == "/media/presign":
+                raise adapter.DraftAdapterError(
+                    f"Zernio drafts response was not valid JSON: {marker}"
+                )
+            return original_post(
+                path, json_body=json_body, headers=headers,
+                idempotency_key=idempotency_key,
+            )
+
+        transport.post = raising_post
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftPresignBlockedError) as ctx:
+            provider.create_review_draft(manifest_path)
+        self.assertIs(type(ctx.exception), adapter.DraftPresignBlockedError)
+        self.assertNotIn(marker, str(ctx.exception))
+        self._assert_untouched(manifest_path, transport)
+
+    def test_non_object_json_presign_body_is_clean_blocked(self):
+        manifest_path, _ = make_manifest(self.tmp_path)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        transport.post_responses["/media/presign"] = (
+            200,
+            ["not", "an", "object"],
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftPresignBlockedError) as ctx:
+            provider.create_review_draft(manifest_path)
+        self.assertIs(type(ctx.exception), adapter.DraftPresignBlockedError)
+        self._assert_untouched(manifest_path, transport)
+
+    def test_unusable_presign_envelope_is_clean_blocked(self):
+        manifest_path, _ = make_manifest(self.tmp_path)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        transport.post_responses["/media/presign"] = (
+            200,
+            {"unexpected": "shape"},
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftPresignBlockedError):
+            provider.create_review_draft(manifest_path)
+        self._assert_untouched(manifest_path, transport)
+
+    def test_presign_programming_defect_still_surfaces(self):
+        manifest_path, _ = make_manifest(self.tmp_path)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        original_post = transport.post
+
+        def broken_post(path, *, json_body=None, headers=None, idempotency_key=None):
+            if path == "/media/presign":
+                raise TypeError("synthetic internal misuse")
+            return original_post(
+                path, json_body=json_body, headers=headers,
+                idempotency_key=idempotency_key,
+            )
+
+        transport.post = broken_post
+        provider = make_provider(transport)
+        with self.assertRaises(TypeError):
+            provider.create_review_draft(manifest_path)
+
+    def test_bridge_reports_malformed_presign_as_blocked_without_traceback(self):
+        manifest_path, _ = make_manifest(self.tmp_path)
+        marker = self.MALFORMED_MARKER
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        original_post = transport.post
+
+        def raising_post(path, *, json_body=None, headers=None, idempotency_key=None):
+            if path == "/media/presign":
+                raise adapter.DraftAdapterError(
+                    f"Zernio drafts response was not valid JSON: {marker}"
+                )
+            return original_post(
+                path, json_body=json_body, headers=headers,
+                idempotency_key=idempotency_key,
+            )
+
+        transport.post = raising_post
+
+        class MalformedProvider:
+            def create_review_draft(self, _path):
+                make_provider(transport).create_review_draft(_path)
+
+        with patch.object(
+            self.bridge,
+            "build_production_draft_provider",
+            return_value=MalformedProvider(),
+        ):
+            out = StringIO()
+            with patch("sys.stdout", out):
+                code = self.bridge.execute(str(manifest_path))
+        self.assertEqual(code, 2)
+        output = out.getvalue()
+        self.assertIn("BLOCKED=", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn(marker, output)
+        self._assert_untouched(manifest_path, transport)
 
 
 # ---------------------------------------------------------------------------
