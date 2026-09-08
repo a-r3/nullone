@@ -29,6 +29,7 @@ from nullone_analytics_workflow import run_analytics_workflow  # noqa: E402
 from nullone_editorial_runtime import ProviderUnreachableError  # noqa: E402
 from nullone_failure_notify import notify_if_required  # noqa: E402
 from nullone_morning_workflow import run_morning_workflow  # noqa: E402
+from support.morning_artifacts import write_morning_artifacts  # noqa: E402
 from nullone_run_outcome import assess_run  # noqa: E402
 from nullone_scheduler_invocation import compute_occurrence_id  # noqa: E402
 from nullone_zernio_analytics_adapter import ConnectorUnauthorizedError  # noqa: E402
@@ -422,9 +423,7 @@ class MalformedNotifierLeakRegressionTests(unittest.TestCase):
                 artifact_root = root / "artifacts"
 
                 def succeed():
-                    board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                    board.parent.mkdir(parents=True, exist_ok=True)
-                    board.write_text("# board\n", encoding="utf-8")
+                    write_morning_artifacts(artifact_root, "2026-09-08")
 
                 trigger = make_trigger(
                     workflow_id="morning-editorial",

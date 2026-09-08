@@ -18,6 +18,23 @@ DRAFT_FIRST.
 
 ABSOLUTELY DO NOT PUBLISH OR SCHEDULE.
 
+STORY OWNERSHIP OVERRIDE (highest priority, reviewed #79 decision):
+
+Normal scheduled STORY production is owned exclusively by StoryWorkflow
+(the dedicated Story check windows reading the structured Morning
+Editorial candidate handoff). This Draft Factory cycle:
+
+- produces normal main FEED/CAROUSEL work ONLY;
+- MUST NOT create, render, or send a normal STORY draft;
+- MUST NOT select a STORY candidate from the board, queue, or ledger;
+- MUST delegate any Story opportunity to the StoryWorkflow path
+  (it runs on its own schedule and needs nothing from this cycle).
+
+Breaking-triggered Story work under the reviewed Story-first contract is
+separate and unaffected by this rule. Historical STORY sections below
+remain as reference for that breaking path only and do not authorize
+normal Story production from this cycle.
+
 TASK:
 
 1. Inspect:

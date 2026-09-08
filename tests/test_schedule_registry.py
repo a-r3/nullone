@@ -69,7 +69,11 @@ class ScheduleSpecValidationTests(unittest.TestCase):
 
     def test_unsupported_workflow_rejected_at_construction(self):
         with self.assertRaises(ScheduleRegistryError):
-            ScheduleSpec(**self._valid_kwargs(workflow_id="story"))
+            ScheduleSpec(**self._valid_kwargs(workflow_id="breaking"))
+
+    def test_story_workflow_accepted_at_construction(self):
+        spec = ScheduleSpec(**self._valid_kwargs(workflow_id="story"))
+        self.assertEqual(spec.workflow_id, "story")
 
     def test_invalid_iana_timezone_rejected(self):
         with self.assertRaises(ScheduleRegistryError):

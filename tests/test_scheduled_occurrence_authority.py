@@ -183,7 +183,6 @@ class FailClosedTests(unittest.TestCase):
             {"workflow_id": "morning-editorial", "source": "openclaw", "triggered_at": ""},
             {"workflow_id": "morning-editorial", "source": "openclaw", "triggered_at": "not-a-timestamp"},
             {"workflow_id": "morning-editorial", "source": "openclaw", "triggered_at": "2026-09-08 04:30:00"},
-            {"workflow_id": "story", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
             {"workflow_id": "breaking", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
             {"workflow_id": "unknown-workflow", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
         ]
@@ -196,6 +195,61 @@ class FailClosedTests(unittest.TestCase):
             workflow_id="morning-editorial", source="openclaw", triggered_at="2026-09-08T05:07:00Z"
         )
         self.assertNotEqual(r.triggered_at, r.scheduled_for)
+
+
+class StoryMultiSlotTests(unittest.TestCase):
+    """Story check-window resolution (#79): four reviewed slots, latest-due
+    coalescing, replay stability, distinct slot identity, no backfill."""
+
+    def story(self, at: str, source: str = "openclaw"):
+        return resolve_scheduled_occurrence(
+            workflow_id="story", source=source, triggered_at=at
+        )
+
+    def test_before_first_slot_is_no_due(self):
+        r = self.story("2026-09-08T06:29:59Z")
+        self.assertEqual(r.status, "NO_DUE_OCCURRENCE")
+        self.assertEqual(r.schedule_id, "story.check-1030.v1")
+
+    def test_four_slots_are_distinct_occurrences(self):
+        ids = set()
+        for at, slot in (
+            ("2026-09-08T06:30:00Z", "story.check-1030.v1"),
+            ("2026-09-08T09:30:00Z", "story.check-1330.v1"),
+            ("2026-09-08T14:30:00Z", "story.check-1830.v1"),
+            ("2026-09-08T17:30:00Z", "story.check-2130.v1"),
+        ):
+            r = self.story(at)
+            self.assertEqual(r.status, "DUE")
+            self.assertEqual(r.schedule_id, slot)
+            ids.add(r.scheduler_invocation["occurrence_id"])
+        self.assertEqual(len(ids), 4)
+
+    def test_same_slot_replay_keeps_identity(self):
+        first = self.story("2026-09-08T06:30:00Z")
+        for at in ("2026-09-08T06:45:00Z", "2026-09-08T09:29:59Z"):
+            replay = self.story(at)
+            self.assertEqual(
+                replay.scheduler_invocation["occurrence_id"],
+                first.scheduler_invocation["occurrence_id"],
+            )
+            self.assertEqual(
+                replay.scheduler_invocation["scheduled_for"],
+                first.scheduler_invocation["scheduled_for"],
+            )
+
+    def test_next_day_early_is_no_due_without_backfill(self):
+        r = self.story("2026-09-09T06:00:00Z")
+        self.assertEqual(r.status, "NO_DUE_OCCURRENCE")
+
+    def test_alternate_source_diverges_identity(self):
+        a = self.story("2026-09-08T06:30:00Z", source="openclaw")
+        b = self.story("2026-09-08T06:30:00Z", source="systemd-timer")
+        self.assertEqual(a.scheduled_for, b.scheduled_for)
+        self.assertNotEqual(
+            a.scheduler_invocation["occurrence_id"],
+            b.scheduler_invocation["occurrence_id"],
+        )
 
 
 if __name__ == "__main__":

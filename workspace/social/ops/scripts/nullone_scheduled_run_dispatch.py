@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared production dependency wiring for #59's scheduler-facing entrypoints.
+"""Shared production dependency wiring for #59/#79 scheduler-facing entrypoints.
 
 Extracted (#59 remaining scope, section 16) so both the exact-trigger-file
 CLI (`nullone-scheduled-run.py`) and the wake-up-only CLI
@@ -11,11 +11,17 @@ CLI (`nullone-scheduled-run.py`) and the wake-up-only CLI
     validated Analytics SchedulerInvocation -> AnalyticsWorkflow with the
     production AnalyticsProvider factory and OpenClaw/Telegram notifier
 
+    validated Story SchedulerInvocation -> Story scheduled boundary with
+    the production Haiku writer, deterministic final verifier,
+    MCP-backed DraftConnector (live path still UNPROVEN, owned by #81),
+    and OpenClaw/Telegram ReviewDelivery + notifier (#79)
+
 Neither caller duplicates this wiring; this module knows the same and only
-the same infrastructure adapters `nullone-scheduled-run.py` always has:
-`default_invoke_provider`, `build_production_analytics_provider`, and
-`OpenClawTelegramTransport`, all injected -- never imported by
-`nullone_morning_workflow.py`/`nullone_analytics_workflow.py` themselves.
+the same infrastructure adapters the CLIs always had:
+`default_invoke_provider`, `build_production_analytics_provider`,
+`HaikuStoryWriter`/`numeric_scope_verifier`/`NulloneDraftBridgeConnector`/
+`TelegramReviewDeliveryAdapter`, and `OpenClawTelegramTransport`, all
+injected -- never imported by the application workflow modules themselves.
 """
 from __future__ import annotations
 
@@ -26,6 +32,16 @@ from nullone_analytics_workflow import AnalyticsWorkflowResult, run_analytics_wo
 from nullone_claude_editorial_provider import default_invoke_provider
 from nullone_failure_notify import OpenClawTelegramTransport, notify_if_required
 from nullone_morning_workflow import MorningWorkflowResult, run_morning_workflow
+from nullone_story_pipeline import (
+    HaikuStoryWriter,
+    NulloneDraftBridgeConnector,
+    numeric_scope_verifier,
+)
+from nullone_story_scheduled_workflow import (
+    StoryScheduledResult,
+    run_story_trigger as run_story_scheduled,
+)
+from nullone_telegram_review_delivery_adapter import TelegramReviewDeliveryAdapter
 
 
 def production_notifier(result: dict[str, Any]) -> dict[str, Any]:
@@ -70,5 +86,26 @@ def run_analytics_trigger(trigger: dict[str, Any]) -> AnalyticsWorkflowResult:
     return run_analytics_workflow(
         trigger,
         provider_factory=build_production_analytics_provider,
+        notifier=production_notifier,
+    )
+
+
+def run_story_trigger(trigger: dict[str, Any]) -> StoryScheduledResult:
+    """Validated Story `nullone.scheduler-invocation.v1` -> production Story boundary.
+
+    Wires the reviewed production dependencies: Haiku writer, deterministic
+    numeric-scope final verifier, the existing MCP-backed DraftConnector
+    (whose scheduled-session live path remains UNPROVEN and stays owned by
+    #81 -- this wiring neither proves nor replaces it), and the shared
+    Telegram ReviewDelivery adapter. Story ends at review preview; no
+    publication capability is wired anywhere on this path.
+    """
+
+    return run_story_scheduled(
+        trigger,
+        writer=HaikuStoryWriter(),
+        verifier=numeric_scope_verifier,
+        draft_connector=NulloneDraftBridgeConnector(),
+        review_delivery=TelegramReviewDeliveryAdapter(),
         notifier=production_notifier,
     )

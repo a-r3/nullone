@@ -51,6 +51,15 @@ def self_test() -> int:
                 )
             board.parent.mkdir(parents=True, exist_ok=True)
             board.write_text("# Editorial board\n", encoding="utf-8")
+            handoff = root / "social/research/daily/2026-01-01-editorial-candidates.json"
+            handoff.write_text(
+                '{"schema":"nullone.editorial-candidate-handoff.v1",'
+                '"contract_version":"1.0.0",'
+                '"editorial_date":"2026-01-01",'
+                '"board_path":"social/research/daily/2026-01-01-editorial-board.md",'
+                '"candidates":[]}',
+                encoding="utf-8",
+            )
 
         result = run_morning_editorial(
             occurrence_id="2026-01-01T08:30:00+04:00",

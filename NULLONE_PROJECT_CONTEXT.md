@@ -101,6 +101,23 @@ Safety-relevant unresolved deployment unknown:
 These are distinct from the completed #27–#36/#59/#61 repository components.
 The historical 2026-09-07 preflight record below is unchanged.
 
+### #79 Story production integration — IN PR (not merged, not deployed)
+
+#82 merged at `7a8aea4419ebdb86a0b4825870a179255eaa2f3d`. #79 repository
+implementation is now in PR (OPEN until merge): dedicated Story wake-up
+(`30 10,13,18,21 * * * Asia/Baku`, static
+`nullone-scheduled-wakeup.py story --source openclaw`, DESIRED / NOT
+DEPLOYED); four immutable Story schedule slots (10:30/13:30/18:30/21:30
+Asia/Baku) with latest-due-slot coalescing; structured Morning handoff
+`nullone.editorial-candidate-handoff.v1` per Baku date (Morning writes
+board + handoff, both required for Morning success); real
+`StructuredHandoffStoryProvider` (rank-ordered, consumed-suppressed,
+Markdown-free); exact production entrypoint with persisted #27 Story
+run outcomes; Draft Factory Story exclusivity (desired prompt change,
+not deployed). #79 remains OPEN until merge. #80 remains OPEN / blocked
+by #79. #81 remains OPEN (live DraftProvider proof still unresolved).
+#37 remains OPEN / BLOCKED. No production activation occurred.
+
 1. Repository engineering for #61 is merged (PR #77). Do not start
    production secret provisioning from this context record alone.
 2. 2026-09-08 preflight complete: verdict `BLOCKED` (see above); narrow

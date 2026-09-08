@@ -31,6 +31,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from nullone_analytics_workflow import run_analytics_workflow  # noqa: E402
 from nullone_morning_workflow import run_morning_workflow  # noqa: E402
+from support.morning_artifacts import write_morning_artifacts  # noqa: E402
 
 
 def _load_wakeup_cli():
@@ -110,9 +111,7 @@ class DueWakeInvokesRealWorkflowTests(unittest.TestCase):
 
             def succeed_provider() -> None:
                 provider_calls.append(1)
-                board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                write_morning_artifacts(artifact_root, "2026-09-08")
 
             notifier_calls: list[dict[str, Any]] = []
 
@@ -153,10 +152,7 @@ class RepeatedWakeReplaysNotRerunsTests(unittest.TestCase):
 
             def succeed_provider() -> None:
                 provider_calls.append(1)
-                board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                if not board.is_file():
-                    board.write_text("# Editorial board\n", encoding="utf-8")
+                write_morning_artifacts(artifact_root, "2026-09-08")
 
             notifier_calls: list[str] = []
 
@@ -202,10 +198,7 @@ class ConcurrentWakeUpsRunOneLogicalCycleTests(unittest.TestCase):
             def slow_provider() -> None:
                 with call_lock:
                     provider_calls.append(1)
-                board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                if not board.is_file():
-                    board.write_text("# Editorial board\n", encoding="utf-8")
+                write_morning_artifacts(artifact_root, "2026-09-08")
 
             notify_lock = threading.Lock()
             notifier_calls: list[int] = []

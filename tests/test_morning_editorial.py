@@ -15,6 +15,7 @@ SCRIPTS = ROOT / "workspace/social/ops/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from nullone_run_outcome import make_run_id  # noqa: E402
+from support.morning_artifacts import write_board_only, write_morning_artifacts  # noqa: E402
 from nullone_editorial_runtime import (  # noqa: E402
     MAX_ATTEMPTS,
     OCCURRENCE_FAILURE_BUDGET_SECONDS,
@@ -70,14 +71,14 @@ class UnreachableStub:
 
 
 class ImmediateSuccessStub:
-    def __init__(self, board_path: Path) -> None:
+    def __init__(self, artifact_root: Path, board_date: str) -> None:
         self.calls = 0
-        self.board_path = board_path
+        self.artifact_root = artifact_root
+        self.board_date = board_date
 
     def __call__(self) -> None:
         self.calls += 1
-        self.board_path.parent.mkdir(parents=True, exist_ok=True)
-        self.board_path.write_text("# Editorial board\n", encoding="utf-8")
+        write_morning_artifacts(self.artifact_root, self.board_date)
 
 
 class MorningEditorialRuntimeTests(unittest.TestCase):
@@ -110,17 +111,15 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
     def test_transient_failure_then_success_no_duplicate_mutation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            board = root / "social/research/daily/2026-09-05-editorial-board.md"
             calls: list[int] = []
             mutation_count = {"n": 0}
 
             def straggler_then_visible() -> None:
                 calls.append(1)
                 # Simulates the confirmed pattern: the provider actually
-                # completed the board write, but the call itself was
-                # then reported as an unreachable/timeout failure.
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                # completed the full artifact cycle, but the call itself
+                # was then reported as an unreachable/timeout failure.
+                write_morning_artifacts(root, "2026-09-05")
                 mutation_count["n"] += 1
                 raise ProviderUnreachableError(
                     "API Error: Can't reach the API server — ENOTFOUND"
@@ -157,10 +156,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(failed["domain_outcome"], "FAILED")
 
-            later_board = (
-                root / "social/research/daily/2026-09-06-editorial-board.md"
-            )
-            later_provider = ImmediateSuccessStub(later_board)
+            later_provider = ImmediateSuccessStub(root, "2026-09-06")
 
             healthy = run_morning_editorial(
                 occurrence_id="2026-09-06T08:30:00+04:00",
@@ -348,7 +344,6 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             output_root = root / "run-outcomes"
-            board = root / "social/research/daily/2026-09-07-editorial-board.md"
 
             call_count = {"n": 0}
             count_lock = threading.Lock()
@@ -363,8 +358,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
                     release.wait(timeout=5),
                     "release was never signaled",
                 )
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                write_morning_artifacts(root, "2026-09-07")
 
             results: list[dict | None] = [None, None]
 
@@ -421,12 +415,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
                     release.wait(timeout=5),
                     "release was never signaled",
                 )
-                board = (
-                    root
-                    / "social/research/daily/2026-09-07-editorial-board.md"
-                )
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                write_morning_artifacts(root, "2026-09-07")
 
             holder = threading.Thread(
                 target=lambda: run_morning_editorial(
@@ -445,15 +434,8 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
                 "holder never entered the provider",
             )
 
-            other_board = (
-                root / "social/research/daily/2026-09-08-editorial-board.md"
-            )
-
             def immediate_success() -> None:
-                other_board.parent.mkdir(parents=True, exist_ok=True)
-                other_board.write_text(
-                    "# Editorial board\n", encoding="utf-8"
-                )
+                write_morning_artifacts(root, "2026-09-08")
 
             other_result: list[dict | None] = [None]
 
@@ -484,6 +466,90 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             release.set()
             holder.join(timeout=5)
             self.assertFalse(holder.is_alive())
+
+
+class MorningHandoffContractTests(unittest.TestCase):
+    """Morning Editorial structured-handoff output contract (#79)."""
+
+    def test_board_only_partial_cycle_cannot_succeed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            calls: list[int] = []
+
+            def board_only() -> None:
+                calls.append(1)
+                write_board_only(root, "2026-09-05")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-05T08:30:00+04:00",
+                board_date="2026-09-05",
+                invoke_provider=board_only,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "HANDOFF_INVALID")
+            # Malformed provider output never earns another attempt: the
+            # provider ran exactly once and the missing handoff failed
+            # closed without an unbounded retry loop.
+            self.assertEqual(len(calls), 1)
+
+    def test_malformed_handoff_cannot_masquerade_as_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_board_only(root, "2026-09-05")
+            handoff = root / "social/research/daily/2026-09-05-editorial-candidates.json"
+            handoff.write_text("{not json", encoding="utf-8")
+
+            def must_not_be_called() -> None:
+                raise AssertionError("provider must not be re-invoked")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-05T08:30:00+04:00",
+                board_date="2026-09-05",
+                invoke_provider=must_not_be_called,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "HANDOFF_INVALID")
+
+    def test_valid_empty_handoff_allows_morning_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            def complete_cycle() -> None:
+                write_morning_artifacts(root, "2026-09-05", candidates=())
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-05T08:30:00+04:00",
+                board_date="2026-09-05",
+                invoke_provider=complete_cycle,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "SUCCEEDED")
+
+    def test_completed_source_is_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_morning_artifacts(root, "2026-09-05")
+
+            def must_not_be_called() -> None:
+                raise AssertionError("provider must not rewrite a completed source")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-05T08:30:00+04:00",
+                board_date="2026-09-05",
+                invoke_provider=must_not_be_called,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "SUCCEEDED")
 
 
 if __name__ == "__main__":

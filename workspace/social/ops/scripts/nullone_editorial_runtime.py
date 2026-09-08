@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from nullone_bridge_common import BridgeError, WORKSPACE
+from nullone_editorial_candidate_handoff import (
+    EditorialHandoffError,
+    validate_handoff,
+)
 from nullone_run_outcome import (
     assess_run,
     emit_result_once,
@@ -158,9 +162,42 @@ def board_relative_path(board_date: str) -> str:
     return f"social/research/daily/{board_date}-editorial-board.md"
 
 
+def handoff_relative_path(board_date: str) -> str:
+    """Structured machine-readable candidate handoff for one editorial date (#79).
+
+    Machine-authored directly by the Morning Editorial cycle alongside the
+    board Markdown -- never parsed out of it later. A successful Morning
+    occurrence always produces both artifacts, including an explicitly
+    empty candidate list on a quiet news day (never quota-filled).
+    """
+
+    return f"social/research/daily/{board_date}-editorial-candidates.json"
+
+
 def _artifact_ready(artifact_root: Path, relative: str) -> bool:
     path = (artifact_root / relative).resolve()
     return path.is_file() and path.stat().st_size > 0
+
+
+def _all_artifacts_ready(artifact_root: Path, required: tuple[str, ...]) -> bool:
+    return all(_artifact_ready(artifact_root, rel) for rel in required)
+
+
+def _handoff_valid(artifact_root: Path, relative: str) -> bool:
+    """The handoff artifact parses and passes strict contract validation.
+
+    Presence alone never counts as a healthy machine-readable cycle: a
+    malformed handoff fails closed here (non-retryable) instead of
+    masquerading as success. Never infers from Markdown.
+    """
+
+    path = (artifact_root / relative).resolve()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        validate_handoff(data)
+    except (OSError, json.JSONDecodeError, EditorialHandoffError):
+        return False
+    return True
 
 
 def _occurrence_lock_path(output_root: Path, run_id: str) -> Path:
@@ -195,7 +232,7 @@ def run_morning_editorial(
     for the same occurrence.
     """
 
-    required_artifacts = (board_relative_path(board_date),)
+    required_artifacts = (board_relative_path(board_date), handoff_relative_path(board_date))
     run_id = make_run_id(
         workflow_id=WORKFLOW_ID,
         occurrence_id=occurrence_id,
@@ -224,11 +261,16 @@ def run_morning_editorial(
             attempts_made = attempt
 
             # A previous attempt for this same occurrence may already
-            # have produced the board even though its call was later
+            # have produced the artifacts even though its call was later
             # reported as failed (e.g. a stalled/late response). Never
-            # call the provider again once the required artifact
-            # exists.
-            if _artifact_ready(artifact_root, required_artifacts[0]):
+            # call the provider again once ALL required artifacts exist --
+            # this is what prevents a retry, a re-entry, or a genuinely
+            # concurrent second invocation from producing a second
+            # editorial board/handoff or a second queue/state mutation
+            # for the same occurrence. (A partial artifact set still
+            # re-invokes: only the provider can complete its own cycle,
+            # and the per-attempt artifact gate below keeps that bounded.)
+            if _all_artifacts_ready(artifact_root, required_artifacts):
                 break
 
             try:
@@ -263,6 +305,27 @@ def run_morning_editorial(
                     backoff_seconds[min(attempt - 1, len(backoff_seconds) - 1)]
                 )
                 continue
+
+        # A successful Morning occurrence always produces a healthy
+        # machine-readable cycle too: a missing handoff is caught by the
+        # required-artifact gate inside assess_run, but a present yet
+        # malformed handoff must equally fail closed here (non-retryable --
+        # malformed provider output never earns another attempt).
+        if not _handoff_valid(artifact_root, required_artifacts[1]):
+            result = assess_run(
+                workflow_id=WORKFLOW_ID,
+                occurrence_id=occurrence_id,
+                scheduler_status="succeeded",
+                domain_outcome="FAILED",
+                reason_code="HANDOFF_INVALID",
+                reason_text="Structured candidate handoff missing or malformed.",
+            )
+            emit_result_once(
+                output_root,
+                result,
+                artifact_root=artifact_root,
+            )
+            return result
 
         result = assess_run(
             workflow_id=WORKFLOW_ID,

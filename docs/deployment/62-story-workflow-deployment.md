@@ -93,25 +93,29 @@ ReviewDelivery (nullone_telegram_review_delivery_adapter.TelegramReviewDeliveryA
 Telegram review preview -> human approve/revise/reject (unchanged boundary)
 ```
 
-Notes on what is deliberately NOT decided here:
+Notes on what was deliberately NOT decided here (resolved by #79
+where noted; this document's historical record is otherwise unchanged):
 
 - **No job UUID is invented.** The preflight confirmed no dedicated Story
-  job exists; this document does not assign one. A future deployment PR
-  under #37 creates and records the actual job configuration and its
-  identity at that time.
+  job exists; this document does not assign one. RESOLVED by #79 as a
+  repository decision (dedicated `nullone-story-wakeup` job,
+  `30 10,13,18,21 * * * Asia/Baku`, static wake-up command) —
+  DESIRED / NOT DEPLOYED until #37.
 - **Reuse vs. replace Draft Factory scheduling** is an open deployment
-  choice, not a fact this document asserts. Whether the eventual Story
-  job reuses or replaces existing Draft Factory scheduling infrastructure
-  is a decision for that future deployment PR; nothing here should be read
-  as claiming either option is already chosen.
+  choice, not a fact this document asserts. RESOLVED by #79: dedicated
+  Story job (no reuse); Draft Factory keeps normal main work and must
+  delegate Story opportunity once #79 is deployed.
 - **No cron/systemd timer syntax is authored here.** The OpenClaw edge
   adapter box above is descriptive of the mapping responsibility, not an
-  implementation.
+  implementation. RESOLVED by #79 (exact desired command documented in
+  `docs/deployment/79-story-production-integration.md`).
 - **The candidate-availability signal** (`candidate_availability` passed
   into `run_story_workflow`) is deliberately out of this document's scope
   too: today's repository has no reviewed source for it beyond the
   existing upstream editorial process the #31 cadence contract already
-  assumes computes it. #62 does not add a new one.
+  assumes computes it. RESOLVED by #79: derived from the same validated
+  structured handoff snapshot the production provider reads
+  (`snapshot_story_availability`). #62 does not add a new one.
 
 ## Publisher-wrapper deployment delta (restated, not changed)
 
