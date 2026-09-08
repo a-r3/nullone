@@ -57,28 +57,30 @@ Current M0 executable wake-up edge pins `--source` to reviewed `openclaw`
 production activation yet** — desired OpenClaw wake-up jobs remain
 `DESIRED / NOT DEPLOYED`; live production jobs remain legacy until #37.
 
-The **only remaining M0 repository engineering blocker is #61** (secure
-scheduled injection for `ZERNIO_ANALYTICS_API_TOKEN`). Its AnalyticsProvider
-secret-wiring seam is established by the merged #59 work; #61's reviewed
-implementation (reviewed secret boundary + real production factory) is
-implemented behind that seam and is in review as PR `feature/
-n61-secure-analytics-secret-wiring` — **not yet merged, not deployed**. #37
-remains OPEN / NOT READY YET.
+**#61 is CLOSED/COMPLETED** — secure scheduled injection for
+`ZERNIO_ANALYTICS_API_TOKEN`. PR #77 squash-merged on `main` as
+`b49bf36983b8db1042371d9809410a3d1881593c` (`Closes #61`). The reviewed
+secret boundary (`nullone_secret_provider.py`) and real production factory
+(`nullone_analytics_provider_factory.py`) are merged; the direct GET-only
+Zernio API adapter (not MCP) receives its token as a `SecretValue`.
+Repository-level M0 engineering blockers: **NONE**. The implementation is
+**NOT DEPLOYED** — no real secret provisioned, no systemd/OpenClaw
+production activation. #37 remains OPEN / NOT READY YET.
 
-1. Implement and merge #61 through normal review (do not start production
-   secret provisioning from this context record alone).
-2. Rerun the strictly read-only #37 preflight only after #61 is accepted
-   (earlier #65/#60/#62/#63/#66/#59 dependencies are complete).
+1. Repository engineering for #61 is merged (PR #77); M0 repository
+   engineering blockers are NONE. Do not start production secret
+   provisioning from this context record alone.
+2. Run a NEW strictly read-only #37 preflight (now eligible; earlier
+   #65/#60/#62/#63/#66/#59 dependencies are complete).
 3. Only if the verdict is `READY_FOR_CONTROLLED_DEPLOYMENT`, perform the
-   controlled deployment under #37.
+   separately controlled deployment under #37; a `NO` verdict requires
+   reporting the exact blockers, with no deploy.
 4. Observe natural production behavior; do not manufacture live proof.
 
 Required order:
 
 ```text
-#61
-→ review/merge
-→ read-only #37 preflight
+read-only #37 preflight
 → READY_FOR_CONTROLLED_DEPLOYMENT?
 ```
 
@@ -162,14 +164,18 @@ CLOSED/COMPLETED). Repository path only — **not** production-activated:
   `docs/deployment/59-scheduled-workflows-deployment.md`'s "NullOne
   Scheduled Occurrence Authority" section.
 
-Live truth unchanged by the #61 PR: desired OpenClaw wake-up jobs are still
+Live truth after merging the #61 work: desired OpenClaw wake-up jobs remain
 `NOT DEPLOYED`; existing production jobs remain legacy prompt-only until
-#37; Daily real analytics secret wiring is implemented-but-**NOT DEPLOYED**
-(no credential provisioned, no systemd change applied — identity/source =
-`zernio.analytics.bearer` via `EnvironmentSecretProvider`, documented in
-`docs/deployment/61-secure-analytics-secret-injection.md`); no live
-scheduled proof is claimed. No production/OpenClaw job/Zernio/Telegram/
-Claude action occurred while implementing the #61 PR.
+#37; the canonical secret file
+(`~/.config/nullone/secrets/zernio-analytics.env`) is **NOT CREATED**; the
+`EnvironmentFile=` drop-in is **NOT APPLIED**; the Gateway was **NOT
+restarted**; no real Zernio credential has been provisioned; live Zernio
+auth has **NOT** been tested; no live Daily/Story/Breaking proof is
+claimed. The identity/source contract (`zernio.analytics.bearer` via
+`EnvironmentSecretProvider`) is documented in
+`docs/deployment/61-secure-analytics-secret-injection.md`. No production/
+OpenClaw job/Zernio/Telegram/Claude action occurred while implementing or
+merging the #61 work.
 
 ## GitHub planning / engineering state
 Repository: `a-r3/nullone`
@@ -181,7 +187,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, BreakingWorkflow orchestration #63, scheduled occurrence authority #59, and the narrow legacy-publication-instruction blocker #66 are CLOSED/COMPLETED; the **only remaining M0 repository engineering blocker is #61**, while parent deployment issue #37 remains OPEN / NOT READY YET; #6 remains OPEN in M1 and #13 remains OPEN in M3
+- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, BreakingWorkflow orchestration #63, scheduled occurrence authority #59, scheduled credential injection #61, and the narrow legacy-publication-instruction blocker #66 are CLOSED/COMPLETED; **no M0 repository engineering blockers remain**, while parent deployment issue #37 remains OPEN / NOT READY YET; #6 remains OPEN in M1 and #13 remains OPEN in M3
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -200,12 +206,11 @@ Relevant issues:
 - #34 breaking policy decision — CLOSED/COMPLETED; PR #50 squash-merged as `33bd7c9114ecaeda675f1565a80268541c95dd68`; decision/contract document only, no identity/dedup or routing implementation (see "Verified #34 completion" below)
 - #35 breaking identity/dedup — CLOSED/COMPLETED; PR #53 squash-merged as `0b0679c2d5aac98d777da34e2257526e9d9a09b5`; identity/dedup/follow-up-suppression implementation of the #34 policy, repo-level only (see "Verified #35 completion" below)
 - #36 breaking draft routing — CLOSED/COMPLETED; PR #57 squash-merged as `36f358a539fedf90e0c5cffda9b503b87594e3f1`; deterministic router, durable Story-first draft-set dispatcher, review-only Feed/Carousel main pipeline, strict routing-artifact boundary, Telegram SENT proof, and #35 multi-manifest hardening are complete at repo level only (see "Verified #36 completion" below)
-- #37 controlled production activation/validation — OPEN / NOT READY YET; its historical 2026-09-07 read-only preflight returned `BLOCKED` and remains historically valid; it is not `READY`. Required sequence after #59 completion: `#61 → review/merge → read-only #37 preflight → READY_FOR_CONTROLLED_DEPLOYMENT?`. Only READY permits deployment. Deployment remains prohibited while #61 remains open and until that repeated preflight returns READY.
+- #37 controlled production activation/validation — OPEN / NOT READY YET; its historical 2026-09-07 read-only preflight returned `BLOCKED` and remains preserved as historical evidence; it is not `READY`. Repository engineering is now complete (including #61, PR #77 merged), so #37 is eligible for a NEW strictly read-only preflight — but it is NOT automatically `READY_FOR_CONTROLLED_DEPLOYMENT`. Required sequence: `repository engineering complete → read-only #37 preflight → READY_FOR_CONTROLLED_DEPLOYMENT?` (`NO` → report exact blockers, no deploy; `YES` → separately controlled deployment). Only READY permits deployment. Deployment remains prohibited until that new preflight returns READY.
 - #59 NullOne scheduled workflow orchestration — **CLOSED/COMPLETED**; PR #75 squash-merged as `03603698291b2f6e5c0775067f15abb33f87fa63` (foundation earlier via PR #73 `cec185f9a62c2055175454f06d3d5c54596bba23`). Merged NullOne-owned scheduled occurrence authority: static wake-up → NullOne schedule authority → `nullone.scheduler-invocation.v1` → `MorningWorkflow`/`AnalyticsWorkflow`. Current M0 executable source pinned to `openclaw`; generic authority remains multi-adapter. OpenClaw direct `scheduled_for` injection remains impossible in 2026.8.2 (historical `CONFIRMED BLOCKED` fact unchanged). **No production activation**: desired OpenClaw wake-up jobs `DESIRED / NOT DEPLOYED`; existing live jobs still legacy until #37; Daily real analytics secret wiring implemented but NOT DEPLOYED (see #61); no live proof claimed.
 - #60 cadence-state backward compatibility — CLOSED/COMPLETED; its merged read-only compatibility implementation supplies the authoritative load behavior reused by #62/#63; no production ledger migration was performed or required (`migration_required: False`)
-- #61 secure scheduled analytics credential injection — PR OPEN (`feature/
-    n61-secure-analytics-secret-wiring`, pending review — `Closes #61`);
-    implemented the reviewed secret boundary
+- #61 secure scheduled analytics credential injection — **CLOSED/COMPLETED**; PR #77 squash-merged as `b49bf36983b8db1042371d9809410a3d1881593c` (`Closes #61`).
+    Merged: the reviewed secret boundary
     (`nullone_secret_provider.py`: `SecretValue`, `EnvironmentSecretProvider`,
     presence probe/readback, exact `lstat`-based file/dir mode enforcement
     0600/0700 with parent-symlink rejection) and the real production factory
@@ -216,13 +221,14 @@ Relevant issues:
     (`RuntimeError`, `TypeError`, `AttributeError`, `AssertionError`) from
     the provider now propagate as `RUNTIME_CRASHED`; `SecretValue` is
     deliberately unhashable; missing-secret is a graceful blocked domain
-    outcome (scheduled CLI exit 0), never a crash; **NOT DEPLOYED** — no
-    credential provisioned, no systemd drop-in applied, no OpenClaw job
-    created; production injection mechanism (systemd user `EnvironmentFile`
-    → Gateway process env → child commands) verified read-only on the host
-    2026-09-08 and documented in `docs/deployment/61-secure-analytics-secret-injection.md`.
+    outcome (scheduled CLI exit 0), never a crash. Direct GET-only Zernio
+    API adapter, NOT MCP. **NOT DEPLOYED** — no real credential provisioned,
+    no systemd drop-in applied, no OpenClaw job created; production injection
+    mechanism (systemd user `EnvironmentFile` → Gateway process env → child
+    commands) verified read-only on the host 2026-09-08 and documented in
+    `docs/deployment/61-secure-analytics-secret-injection.md`.
     Canonical default secret path fixed to `~/.config/nullone/secrets/zernio-analytics.env`.
-    Only-remaining M0 blocker until merged.
+    M0 repository engineering blockers: **NONE**.
 - #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
 - #63 `BreakingWorkflow` orchestration — CLOSED/COMPLETED; PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`; repository-level implementation is complete and preserves the exact #34/#36 verification vocabulary, defers optional-main preparation until after Story review delivery succeeds, derives candidate-level Radar occurrences, and emits contract-safe #27 mappings; no production activation occurred, strict Radar handoff remains `DESIRED / NOT DEPLOYED`, natural Breaking live proof remains `UNPROVEN_LIVE / DEFERRED_TO_#37`, and the scheduled Zernio path remains `LIVE_SCHEDULED_PATH_UNPROVEN`
 - #65 NullOne Application Runtime architecture — CLOSED/COMPLETED; the accepted contract establishes NullOne workflow ownership and replaceable provider adapters
@@ -1194,9 +1200,9 @@ Workflow-reliability invariants FAILED on direct, repeated production evidence, 
 - Confirmed via direct `openclaw cron get` query: neither automation has any `failureAlert` configured; `delivery.mode=none`; `lastFailureNotificationDeliveryStatus=not-requested` for the full window (#30 remains the fix).
 - `RUN-ID-001`: the proof window contained 4 real scheduled executions (Morning Editorial ×2, Daily Analytics ×2) with scheduler-side run identity, and for every one of them the required end-to-end binding of that identity to a domain-outcome object was affirmatively absent — an exercised-and-failed requirement, not merely untriggered.
 
-Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The later 2026-09-07 #37 read-only preflight identified deployable-integration prerequisites #59–#63; #59/#60/#62/#63/#65/#66 are now CLOSED/COMPLETED, while **#61 remains the only remaining M0 repository engineering blocker** before a repeated #37 preflight. #37 remains OPEN / NOT READY YET and deployment remains prohibited until #61 is reviewed/merged and preflight is rerun. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
+Unresolved risks and release restrictions (owners/next actions in full in the report): #27 (domain outcomes/health), #28 (Morning Editorial runtime), #29 (Daily Analytics runtime/adapter), and #30 (failure alerts) were the **proof-derived blocking operational bundle** this verdict identified — all four are now merged in Git (#30 via PR #47, squash commit `31ac4cca9e4255d5ba665ea42989ab9237eb05c2`) but none are deployed to production. #36 breaking draft routing is also merged/completed, so #27–#36 component-level repo engineering is complete. The 2026-09-07 #37 read-only preflight identified deployable-integration prerequisites #59–#63; #59/#60/#61/#62/#63/#65/#66 are now CLOSED/COMPLETED — **no M0 repository engineering blockers remain**. #37 remains OPEN / NOT READY YET; it is now eligible for a NEW read-only preflight, and deployment remains prohibited until that preflight is run and returns READY. Do not provision `ZERNIO_API_KEY` based on the automation's own Sep-6 text. The Astra content's `UNKNOWN`/`draft` state is a distinct operator publish-or-discard decision, not a release blocker.
 
-Immediate next engineering order (updated after #59 / PR #75 merged): #27–#36, #65, #60, #62, #63, #66 and #59 are accepted and merged. Deployable end-to-end M0 integration remains incomplete solely for remaining repository work on #61, then #37. Required sequence: `#61 → review/merge → read-only #37 preflight → READY_FOR_CONTROLLED_DEPLOYMENT?`. Only READY permits deployment under #37; then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. Desired OpenClaw wake-up jobs remain `NOT DEPLOYED`. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
+Immediate next engineering order (updated after #61 / PR #77 merged): #27–#36, #65, #60, #62, #63, #66, #59 and **#61** are accepted and merged — **no M0 repository engineering blockers remain**. Deployable end-to-end M0 integration remains incomplete only because #37 controlled deployment has not been executed. Required sequence: `read-only #37 preflight → READY_FOR_CONTROLLED_DEPLOYMENT?`. Only READY permits deployment under #37; then observe genuine scheduled behavior. #37's acceptance criteria are unchanged. Desired OpenClaw wake-up jobs remain `NOT DEPLOYED`. No separate, uncontrolled production deployment stage occurs before #37 except genuine emergency recovery of a concrete production failure under existing hotfix rules.
 
 ### Confirmed Morning Editorial defect
 On 2026-09-05, Morning Editorial scheduled runs at:
@@ -1301,19 +1307,22 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current Git desired-state M0 execution order — after PR #75 (#59 complete)
+### Current Git desired-state M0 execution order — after PR #77 (#61, #59 complete)
 
 1. #59 is CLOSED/COMPLETED: PR #75 squash-merged as
    `03603698291b2f6e5c0775067f15abb33f87fa63` (foundation PR #73
    `cec185f9a62c2055175454f06d3d5c54596bba23`). NullOne-owned scheduled
    occurrence authority is on `main`; current M0 wake-up edge pins
    `source=openclaw`; no production/OpenClaw activation occurred.
-2. #61 is the only remaining M0 repository engineering blocker — implement
-   and merge through normal change control. Do not provision secrets or
-   mutate production from this context record alone.
-3. Repeat the strictly read-only #37 preflight only after #61 is accepted.
+2. #61 is CLOSED/COMPLETED: PR #77 squash-merged as
+   `b49bf36983b8db1042371d9809410a3d1881593c`. M0 repository engineering
+   blockers: **NONE**. Do not provision secrets or mutate production from
+   this context record alone.
+3. Run a NEW strictly read-only #37 preflight (now eligible; the historical
+   2026-09-07 preflight remains preserved as historical evidence).
 4. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
-   deployment under #37; no ad-hoc deployment is permitted.
+   deployment under #37; a `NO` verdict requires reporting the exact
+   blockers with no deploy. No ad-hoc deployment is permitted.
 5. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
 
 #37 remains OPEN under its unchanged acceptance criteria. Once its
