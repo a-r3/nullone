@@ -64,8 +64,34 @@ def _load_scan():
     return module
 
 
-_consume = _load_consume()
-_scan = _load_scan()
+class _LazyModule:
+    def __init__(self, loader):
+        self._loader = loader
+        self._module = None
+
+    def _get(self):
+        if self._module is None:
+            self._module = self._loader()
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+    def __setattr__(self, name, value):
+        if name in ("_loader", "_module"):
+            super().__setattr__(name, value)
+        else:
+            setattr(self._get(), name, value)
+
+    def __delattr__(self, name):
+        if name in ("_loader", "_module"):
+            super().__delattr__(name)
+        else:
+            delattr(self._get(), name)
+
+
+_consume = _LazyModule(_load_consume)
+_scan = _LazyModule(_load_scan)
 
 BAKU = ZoneInfo("Asia/Baku")
 NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=BAKU)

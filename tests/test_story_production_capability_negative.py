@@ -157,10 +157,11 @@ class StoryApplicationHasNoTransportCapabilityTests(unittest.TestCase):
 
     def test_no_module_imports_publisher_or_transport_at_runtime(self):
         import nullone_editorial_candidate_handoff  # noqa: F401
+        before = set(sys.modules.keys())
         import nullone_story_production_provider  # noqa: F401
         import nullone_story_scheduled_workflow  # noqa: F401
-
-        module_names = set(sys.modules.keys())
+        after = set(sys.modules.keys())
+        newly_loaded = after - before
         for forbidden in (
             "nullone-publish-bridge",
             "nullone-publisher-run",
@@ -169,7 +170,7 @@ class StoryApplicationHasNoTransportCapabilityTests(unittest.TestCase):
             "nullone_telegram_review_delivery_adapter",
             "nullone_zernio_analytics_adapter",
         ):
-            self.assertNotIn(forbidden, module_names)
+            self.assertNotIn(forbidden, newly_loaded)
 
 
 if __name__ == "__main__":

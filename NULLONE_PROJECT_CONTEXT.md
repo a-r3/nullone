@@ -145,14 +145,16 @@ with latest-due coalescing; candidate-ID **shape** enforced at commit
 (stable-anchor derivation required by Radar prompt contract; semantic
 slug provenance not independently recomputed); exact
 `nullone.breaking-radar-handoff.v1` envelopes committed atomically by the
-deterministic edge under staging-root containment + per-scan `fcntl`
-serialization (Markdown stays a non-authoritative sibling; the scan
-receipt is the authoritative commit record — orphan handoffs are not
+deterministic edge under canonical staging-root and spool-root
+containment (symlink-mediated canonical-root escape fails closed; the
+scan receipt is the authoritative commit record — orphan handoffs are not
 executable; a later recommit with a different retry `triggered_at`
 preserves the original orphan handoff and repairs the receipt, while
 assessment mutation still conflicts; missing/corrupt/contradictory
 authoritative spool state fails the consumer sweep non-zero with no
-source fallback; scan identity is registry-backed via
+source fallback; every listed handoff is bound to the exact authoritative
+receipt scan before workflow invocation — mismatches fail as
+`HANDOFF_SCAN_IDENTITY_MISMATCH`; scan identity is registry-backed via
 `resolve_radar_scan`); spool
 `social/ops/breaking-handoffs/<scan>/<candidate>.json`; static consumer
 sweep (desired `45 11,14,17,20,23 * * * Asia/Baku`, NOT DEPLOYED) that

@@ -43,7 +43,7 @@ from nullone_breaking_candidate_runner import (
     BreakingScheduledResult,
     run_breaking_candidate,
 )
-from nullone_breaking_radar_edge import HANDOFF_SCHEMA
+from nullone_breaking_radar_edge import HANDOFF_SCHEMA, BreakingRadarEdgeError
 from nullone_breaking_scan_authority import (
     BreakingScanAuthorityError,
     validate_committed_scan_identity,
@@ -90,6 +90,8 @@ AUTHORITATIVE_CORRUPTION_CODES = frozenset(
         "FILENAME_CONTENT_MISMATCH",
         "HANDOFF_REJECTED",
         "CANDIDATE_ID_REJECTED",
+        "HANDOFF_SCAN_IDENTITY_MISMATCH",
+        "SCAN_DIRECTORY_SYMLINK",
     }
 )
 
@@ -111,6 +113,10 @@ SWEEP_ESTABLISHMENT_FAILED_TEXT = (
 )
 SWEEP_RUNTIME_FAILED_TEXT = (
     "Breaking handoff sweep failed on an unexpected runtime error."
+)
+SWEEP_HANDOFF_SCAN_IDENTITY_MISMATCH_TEXT = (
+    "Breaking handoff sweep failed: handoff scan identity does not match "
+    "the authoritative receipt scan."
 )
 
 
@@ -263,9 +269,25 @@ def sweep_breaking_handoffs(
     if not spool.is_dir():
         return report
 
-    for scan_dir in sorted(
-        p for p in spool.iterdir() if p.is_dir() and not p.is_symlink()
-    ):
+    if spool.is_symlink():
+        return _fail_sweep(
+            report,
+            reason_code=SWEEP_AUTHORITY_CORRUPT,
+            reason_text=SWEEP_AUTHORITY_CORRUPT_TEXT,
+        )
+
+    scan_dirs = []
+    for p in spool.iterdir():
+        if p.is_symlink():
+            return _authority_fail(
+                report,
+                path=str(p.relative_to(root)),
+                reason="SCAN_DIRECTORY_SYMLINK",
+            )
+        if p.is_dir():
+            scan_dirs.append(p)
+
+    for scan_dir in sorted(scan_dirs):
         report["scans_seen"] += 1
         receipt, failure = _load_authoritative_receipt(scan_dir, root=root)
         if failure is not None:
@@ -321,6 +343,28 @@ def sweep_breaking_handoffs(
             if expected_name is not None and expected.name != expected_name:
                 return _authority_fail(
                     report, path=rel, reason="FILENAME_CONTENT_MISMATCH"
+                )
+
+            try:
+                from nullone_breaking_radar_edge import (
+                    compute_candidate_external_occurrence_id,
+                )
+
+                bound_external_id = compute_candidate_external_occurrence_id(
+                    handoff["occurrence"]["source_occurrence_id"],
+                    handoff["assessment"]["candidate_id"],
+                )
+            except (BreakingRadarEdgeError, KeyError, TypeError):
+                bound_external_id = None
+            if (
+                handoff.get("occurrence", {}).get("source_occurrence_id")
+                != receipt["source_occurrence_id"]
+                or handoff.get("occurrence", {}).get("scheduled_for")
+                != receipt["scheduled_for"]
+                or bound_external_id != external_id
+            ):
+                return _authority_fail(
+                    report, path=rel, reason="HANDOFF_SCAN_IDENTITY_MISMATCH"
                 )
 
             try:

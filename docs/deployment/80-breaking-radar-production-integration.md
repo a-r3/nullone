@@ -87,8 +87,12 @@ FAIL reintroduced; non-PASS fail-closed before drafts).
 
 Commit edge (`nullone-breaking-scan.py`):
 
-- Staging root containment:
-  staged assessments must resolve inside
+- Canonical staging-root and spool-root containment:
+  `social/ops/breaking-staging` and `social/ops/breaking-handoffs` must
+  each resolve as a real workspace-contained directory and must not be
+  symlink-mediated escape paths. A symlinked canonical root fails the
+  commit before any mutation.
+- Staging-root containment: staged assessments must resolve inside
   `social/ops/breaking-staging` as regular non-symlink `.json` files;
   outside paths and symlinks are rejected.
 - Per-scan `fcntl` lock serializes all commit-edge mutations for one
@@ -123,6 +127,13 @@ plus `scan-receipt.json`
 contents and never falls back to `source="openclaw"` on a
 missing/corrupt receipt.
 
+Canonical spool-root containment: `social/ops/breaking-handoffs` must
+resolve as a real workspace-contained directory and must not be a
+symlink. A symlinked spool root fails the sweep with
+`SWEEP_AUTHORITY_CORRUPT` / non-zero CLI. Scan-directory entries that
+are symlinks are never silently ignored; they fail the sweep as
+`SCAN_DIRECTORY_SYMLINK` under the same authority-corruption umbrella.
+
 For every scan directory:
 
 1. Require exactly one valid `scan-receipt.json`.
@@ -138,6 +149,14 @@ For every scan directory:
    Fabricated names (e.g. `breaking-radar.fake-slot.v1@…`) fail even
    when the receipt mirrors them. Historical legitimate scans validate
    deterministically (no wall-clock dependency).
+
+Handoff-to-receipt binding: before any workflow is invoked, every listed
+handoff is bound to the exact authoritative receipt scan. The handoff's
+`occurrence.source_occurrence_id` and `occurrence.scheduled_for` must
+match the receipt exactly, and the handoff's computed external occurrence
+ID must equal the receipt-listed external ID. Any mismatch is
+authoritative spool corruption → `HANDOFF_SCAN_IDENTITY_MISMATCH` →
+sweep FAILED / non-zero CLI. Mismatches are never inferred or repaired.
 
 `NO_MATERIAL_DEVELOPMENT`: candidates must be `[]`; execute zero
 handoffs; any handoff JSON present is an authoritative inconsistency.
@@ -159,11 +178,13 @@ Sweep result contract (explicit, not counts-only):
 scheduler-native `failureAlert` can own it. This includes at least:
 `RECEIPT_MISSING`, `RECEIPT_REJECTED`, `RECEIPT_SOURCE_UNSUPPORTED`,
 `RECEIPT_IDENTITY_MISMATCH`, `RECEIPT_INCONSISTENT`,
-`CANDIDATE_FILE_MISSING`, `CANDIDATE_PATH_REJECTED`, and listed-candidate
-`UNREADABLE` / `NOT_A_HANDOFF` / `FILENAME_CONTENT_MISMATCH` /
-`HANDOFF_REJECTED` / `CANDIDATE_ID_REJECTED`. Unlisted extra junk never
-executes and does not grant false authority. Unexpected runner crashes
-and runner establishment failures likewise fail the sweep.
+`CANDIDATE_FILE_MISSING`, `CANDIDATE_PATH_REJECTED`, `SCAN_DIRECTORY_SYMLINK`,
+and listed-candidate `UNREADABLE` / `NOT_A_HANDOFF` /
+`FILENAME_CONTENT_MISMATCH` / `HANDOFF_REJECTED` /
+`CANDIDATE_ID_REJECTED` / `HANDOFF_SCAN_IDENTITY_MISMATCH`. Unlisted
+extra junk never executes and does not grant false authority.
+Unexpected runner crashes and runner establishment failures likewise
+fail the sweep.
 
 ## 7. Production runner
 

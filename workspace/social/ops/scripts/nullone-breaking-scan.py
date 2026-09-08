@@ -78,6 +78,29 @@ class BreakingScanCommitError(ValueError):
     """Stable commit-edge rejection (never a partial commit)."""
 
 
+def _assert_canonical_root(
+    workspace_root: Path,
+    canonical_path: Path,
+    label: str,
+) -> None:
+    root = workspace_root.resolve()
+    if canonical_path.is_symlink():
+        raise BreakingScanCommitError(
+            f"{label} is a symlink and cannot be a canonical root"
+        )
+    resolved = canonical_path.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise BreakingScanCommitError(
+            f"{label} escapes the workspace root"
+        ) from exc
+    if canonical_path.exists() and not resolved.is_dir():
+        raise BreakingScanCommitError(
+            f"{label} must be a directory"
+        )
+
+
 def _utc_now_canonical() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -170,7 +193,12 @@ def _scan_locked(
 ) -> Iterator[Path]:
     """Serialize all commit-edge mutations for one scan (fcntl, not local)."""
 
-    scan_dir = workspace_root / HANDOFFS_SUBPATH / source_occurrence_id
+    root = workspace_root.resolve()
+    spool = root / HANDOFFS_SUBPATH
+    _assert_canonical_root(workspace_root, spool, "canonical spool root")
+    scan_dir = spool / source_occurrence_id
+    if scan_dir.is_symlink():
+        raise BreakingScanCommitError("scan directory is a symlink")
     scan_dir.mkdir(parents=True, exist_ok=True)
     lock_path = scan_dir / SCAN_LOCK_FILENAME
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
@@ -237,7 +265,7 @@ def _resolve_staged_path(workspace_root: Path, assessment_path: str | Path) -> P
 
     root = workspace_root.resolve()
     staging = root / STAGING_SUBPATH
-    # Build the candidate path without resolving symlinks yet
+    _assert_canonical_root(workspace_root, staging, "canonical staging root")
     if Path(str(assessment_path)).is_absolute():
         candidate = Path(str(assessment_path))
     else:
