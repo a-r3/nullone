@@ -16,18 +16,22 @@ only effect of calling it is binding the canonical account id from
 created from the injected secret.
 
 Secret failure semantics (#28):
-- missing / blank / whitespace-only secret (typed
-  `SecretNotConfiguredError`) -> `ConnectorUnauthorizedError` (domain
-  `BLOCKED`), with the fixed reason text below;
-- unreadable secret source or any exception escaping the provider
-  (`SecretUnavailableError` or anything else) -> `ConnectorUnavailableError`
-  (domain `BLOCKED`), sanitized -- the provider's own message is never
-  propagated;
-- unknown secret id -> treated as missing (`ConnectorUnauthorizedError`).
+- typed `SecretNotConfiguredError` (missing / blank / whitespace-only
+  secret; unknown secret id is treated as missing the same way) ->
+  `ConnectorUnauthorizedError` (domain `BLOCKED`), with the fixed reason
+  text below;
+- typed `SecretUnavailableError` (unreadable secret source) ->
+  `ConnectorUnavailableError` (domain `BLOCKED`), sanitized -- the
+  provider's own message is never propagated.
 
-Truly unexpected programming defects below the provider call (for example
-in transport construction) are never swallowed: they propagate so the
-workflow reports them as `RUNTIME_CRASHED`.
+These two typed secret errors are the only provider failures this module
+classifies. Anything else the provider raises -- for example an unrelated
+`RuntimeError`, `TypeError`, `AttributeError`, or `AssertionError`, i.e. a
+programming defect, not a typed secret failure -- is never swallowed or
+reclassified: it propagates so the `AnalyticsWorkflow` reports it as
+`RUNTIME_CRASHED` (`application_execution=FAILED`). The same applies to
+truly unexpected programming defects below the provider call (for example
+in transport construction).
 
 The environment-variable binding for the credential exists only inside
 `nullone_secret_provider.py`; this module requests the logical id

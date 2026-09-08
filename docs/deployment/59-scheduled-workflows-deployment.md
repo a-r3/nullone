@@ -279,13 +279,16 @@ behind the reviewed secret source `nullone_secret_provider.py`:
   canonical account id. Construction performs no network calls and writes
   nothing to disk.
 - Missing/blank/whitespace-only secret -> `ConnectorUnauthorizedError`
-  (domain `BLOCKED`, reason `ZERNIO_ANALYTICS_UNAUTHORIZED`); an
-  unreadable secret source (or any exception escaping the provider) ->
+  (domain `BLOCKED`, reason `ZERNIO_ANALYTICS_UNAUTHORIZED`); a typed
+  `SecretUnavailableError` (unreadable secret source) ->
   `ConnectorUnavailableError` (domain `BLOCKED`), with a fixed, generic
   reason text that never interpolates the provider's own message. These are
   exactly the #29-typed connector errors `run_daily_analytics` catches, so
   neither is ever reported as `RUNTIME_CRASHED` and no Zernio bootstrap
-  attempt is fabricated.
+  attempt is fabricated. Any other exception escaping the provider (a
+  programming defect, e.g. `RuntimeError`/`TypeError`/`AttributeError`/
+  `AssertionError`, not a typed secret error) is never reclassified: it
+  propagates and is reported as `RUNTIME_CRASHED`.
 - Truly unexpected programming defects below the provider call (e.g. a
   non-`SecretValue` token reaching transport construction) still propagate
   and are reported as `RUNTIME_CRASHED`; only the stable exception class
