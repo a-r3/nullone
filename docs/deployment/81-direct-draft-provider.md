@@ -1,6 +1,6 @@
 # 81 — Direct Zernio DraftProvider
 
-Status: **IMPLEMENTED & REVIEWED — NOT DEPLOYED**. This document describes the
+Status: **IMPLEMENTED IN PR — NOT DEPLOYED**. This document describes the
 reviewed replacement for the MCP-backed review-draft transport path. Nothing
 here has been applied to production: no credential has been provisioned, no
 Zernio draft has been created, and no deployment action has been taken.
@@ -62,6 +62,9 @@ No real credential has been provisioned in this task.
 
 ## 4. REST endpoint contract
 
+Contract source: Zernio official OpenAPI `docs.zernio.com/api/openapi`
+(`openapi: 3.1.0`, `info.version: "1.0.4"`), inspected 2026-09-08.
+
 Base URL: `https://zernio.com/api/v1`
 
 | Method | Path | Purpose |
@@ -70,9 +73,164 @@ Base URL: `https://zernio.com/api/v1`
 | POST | `/media/presign` | Request a presigned upload URL |
 | PUT | `<presigned uploadUrl>` | Upload exact bytes (unauthenticated) |
 | POST | `/tools/validate/media` | Validate media |
-| POST | `/tools/validate/post` | Validate complete post payload |
+| POST | `/tools/validate/post` | Validate complete post payload (same body as `POST /posts`) |
 | POST | `/posts` | Create exactly one draft |
 | GET | `/posts/{postId}` | Readback the created draft |
+
+### 4.1 POST /media/presign
+
+Request (exact — `size` is never sent):
+
+```json
+{
+  "filename": "source-0.png",
+  "contentType": "image/png"
+}
+```
+
+Success response (`getMediaPresignedUrl`; no `status`/`error` envelope):
+
+```json
+{
+  "uploadUrl": "<presigned-upload-url>",
+  "publicUrl": "https://media.zernio.com/temp/1234567890_abc123_my-video.mp4",
+  "key": "temp/1234567890_abc123_my-video.mp4",
+  "expiresIn": 3600
+}
+```
+
+Both URLs must be HTTPS. The upload URL stays memory-only; only the public
+URL is persisted, and only after a confirmed `PUT` success.
+
+### 4.2 POST /tools/validate/media
+
+Request (exact — `url` only):
+
+```json
+{
+  "url": "<public URL>"
+}
+```
+
+Success response (`validateMedia`; no `status` envelope):
+
+```json
+{
+  "valid": true,
+  "url": "https://example.com/image.jpg",
+  "contentType": "image/jpeg",
+  "size": 250880,
+  "type": "image",
+  "platformLimits": {
+    "instagram": {"limit": 8388608, "limitFormatted": "8.0 MB", "withinLimit": true}
+  }
+}
+```
+
+Requires `valid is True`, a trustworthy structure (`type` of `image`/`video`
+with a non-empty `contentType`), and an acceptable Instagram limit result
+whenever the documented `platformLimits.instagram` field is present.
+Failure stays before create (`create_attempts=0`, `NOT_CREATED`, zero
+`POST /posts`).
+
+### 4.3 POST /tools/validate/post and POST /posts (one canonical payload)
+
+One canonical exact payload is built and the identical object is used for
+both `validate/post` and the create `POST /posts`:
+
+```json
+{
+  "content": "<exact caption>",
+  "mediaItems": [
+    {"type": "image", "url": "<public url>"}
+  ],
+  "platforms": [
+    {
+      "platform": "instagram",
+      "accountId": "<canonical account id>",
+      "platformSpecificData": {"contentType": "story"}
+    }
+  ],
+  "isDraft": true
+}
+```
+
+`MediaItem.type` is derived deterministically from the manifest media MIME
+type (`image/*` → `image`, `video/*` → `video`); unsupported media fails
+closed. `platformSpecificData.contentType = "story"` is nested inside
+`platforms[0]` for STORY only; FEED/CAROUSEL never set it. Media ordering is
+preserved exactly. Never included: `publishNow`, `scheduledFor`,
+`queuedFromProfile`, `queueId`, any publication/scheduling field, or the
+obsolete root `platform`/`accountId`/`media`/`platformSpecificData` shape.
+
+Post-validation success (`validatePost`; no `status`/`error` envelope):
+
+```json
+{
+  "valid": true,
+  "message": "No validation issues found.",
+  "warnings": []
+}
+```
+
+Requires `valid is True`; malformed responses fail closed before create.
+
+### 4.4 POST /posts success envelope
+
+Only HTTP `201` with the documented `post` envelope (`PostCreateResponse`)
+proves a create:
+
+```json
+{
+  "message": "Post created successfully",
+  "post": {
+    "_id": "<created post id>",
+    "status": "draft",
+    "platforms": [{"platform": "instagram", "accountId": {"_id": "<id>", "...": "..."}}]
+  },
+  "warnings": []
+}
+```
+
+Top-level `_id` is never trusted. Unexpected `200` variants (TikTok `dryRun`
+preview, same `x-request-id` idempotency hint with `existingPost`), `207`
+incomplete publish, `409` content-hash dedup, and any other status are
+ambiguity: `create_attempts=1`, `REVIEW_UNKNOWN`, zero retry.
+
+### 4.5 GET /posts/{postId} readback envelope
+
+```json
+{
+  "post": {
+    "_id": "<exact created id>",
+    "status": "draft",
+    "content": "<exact caption>",
+    "platforms": [
+      {
+        "platform": "instagram",
+        "accountId": {"_id": "<canonical account id>", "...": "..."}
+      }
+    ]
+  }
+}
+```
+
+No top-level `platform`/`accountId`/`platformSpecificData` is required.
+Requires `post._id` equal to the created id, `post.status` of `draft`, an
+Instagram platform entry whose account resolves to the canonical id (plain
+string or expanded `{_id, ...}` object), Story data matching wherever the
+contract exposes it, and exact content/media identity wherever GET exposes
+those fields. Unexposed fields are never invented as proof; any
+insufficient/contradictory readback is `REVIEW_UNKNOWN` with no retry.
+
+### 4.6 x-request-id
+
+Sent as `X-Request-ID` on the single `POST /posts`. A valid UUID string
+(per current docs, `format: uuid`, one value per logical request),
+derived deterministically as UUIDv5 over immutable manifest identity
+(`manifest_id`, caption/media fingerprints, format) so the same logical
+review-create request carries one stable id. Defense-in-depth only:
+NullOne never retries `POST /posts` after ambiguity.
 
 ## 5. Partial-presign recovery semantics
 
@@ -151,5 +309,3 @@ repository implementation only.
 
 Sep 7/8 incidents are old-production baseline evidence, not failures of the
 undeployed replacement.
-
-(End of file - total 10 lines)

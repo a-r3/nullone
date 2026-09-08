@@ -12,17 +12,27 @@ with a deterministic, testable direct HTTPS path:
     DraftConnector -> nullone-draft-bridge.py -> ZernioDraftProvider (this module)
 
 Endpoint contract confirmed 2026-09-08 against Zernio's official
-OpenAPI specification (docs.zernio.com/api/openapi, openapi: 3.1.0):
+OpenAPI specification (docs.zernio.com/api/openapi, openapi: 3.1.0,
+info.version: "1.0.4"):
 
 - base URL: https://zernio.com/api/v1
 - GET /accounts (listAccounts) -> AccountsListResponse
   {accounts: [{_id, platform, profileId, username, displayName, profileUrl, isActive}], hasAnalyticsAccess}
-- POST /media/presign (createMediaPresignedUrl) -> {status, uploadUrl, publicUrl, error}
+- POST /media/presign (getMediaPresignedUrl) -> {uploadUrl, publicUrl, key, expiresIn}
+  request: {filename, contentType} (size is optional pre-validation only; never sent)
 - PUT <presigned uploadUrl> (unauthenticated, exact bytes)
-- POST /tools/validate/media (validateMedia) -> {status, valid, error}
-- POST /tools/validate/post (validatePost) -> {status, valid, error}
-- POST /posts (createPost) -> {_id, status, platform, accountId, ...}
-- GET /posts/{postId} (getPost) -> {_id, status, platform, accountId, ...}
+- POST /tools/validate/media (validateMedia) -> {valid, url, error, contentType,
+  size, sizeFormatted, type, platformLimits}
+  request: {url}
+- POST /tools/validate/post (validatePost) -> {valid, message, warnings} or
+  {valid, errors, warnings}; accepts the SAME BODY as POST /v1/posts
+- POST /posts (createPost) -> 201 {message, post: {_id, ...}, warnings};
+  request: {content, mediaItems: [{type, url}], platforms: [{platform,
+  accountId, platformSpecificData}], isDraft: true}; x-request-id header is a
+  UUID per logical request (idempotency, ~5min window)
+- GET /posts/{postId} (getPost) -> {post: {_id, status, platforms: [{platform,
+  accountId: {_id,...} | "...", platformSpecificData, ...}], content,
+  mediaItems, ...}}
 
 By construction this module exposes ONLY draft-creation capability:
 - there is no publish, schedule, delete, update-to-publish, or retry method;
@@ -460,87 +470,183 @@ def _validate_account_list(body: Any, *, account_id: str) -> dict[str, Any]:
 
 
 def _validate_media_response(body: Any, *, what: str) -> bool:
-    """Validate a media validation response envelope."""
-    body = _require_keys(
-        body,
-        ("status", "valid", "error"),
-        what=what,
-    )
+    """Validate a media validation response envelope (validateMedia).
 
-    status = body["status"]
-    if status not in ("READY", "OK", "BLOCKED"):
+    Current contract (OpenAPI 1.0.4): {valid, url, error, contentType, size,
+    sizeFormatted, type, platformLimits}. There is no `status` field.
+    Requires valid is True, a trustworthy structure (type image/video with a
+    non-empty contentType), and an acceptable Instagram platform-limit result
+    whenever the documented platformLimits.instagram field is present.
+    """
+    if not isinstance(body, dict):
+        raise DraftAdapterError(f"{what} response was not a JSON object")
+
+    if "status" in body:
+        # Legacy/invented envelope marker: the current validateMedia
+        # contract has no `status` field. Reject outright so stale
+        # fixtures fail closed instead of being trusted.
         raise DraftAdapterError(
-            f"{what} response status {status!r} is not recognized"
+            f"{what} response carried an undocumented 'status' field"
         )
 
-    valid = _require_bool(body, "valid", what=what)
-    return valid
+    valid = body.get("valid")
+    if not isinstance(valid, bool):
+        raise DraftAdapterError(
+            f"{what} response field 'valid' was not a boolean"
+        )
+
+    if not valid:
+        return False
+
+    media_type = body.get("type")
+    if media_type not in ("image", "video"):
+        raise DraftAdapterError(
+            f"{what} response field 'type' was not a supported media type"
+        )
+
+    content_type = body.get("contentType")
+    if not isinstance(content_type, str) or not content_type.strip():
+        raise DraftAdapterError(
+            f"{what} response field 'contentType' was not a non-empty string"
+        )
+
+    platform_limits = body.get("platformLimits")
+    if isinstance(platform_limits, dict) and "instagram" in platform_limits:
+        instagram = platform_limits.get("instagram")
+        if not isinstance(instagram, dict):
+            raise DraftAdapterError(
+                f"{what} response platformLimits.instagram was not an object"
+            )
+        within = instagram.get("withinLimit")
+        if within is not True:
+            # Instagram limit exceeded or unprovable -> not acceptable.
+            return False
+
+    return True
 
 
 def _validate_post_response(body: Any, *, what: str) -> bool:
-    """Validate a post validation response envelope."""
-    body = _require_keys(
-        body,
-        ("status", "valid", "error"),
-        what=what,
-    )
+    """Validate a post validation response envelope (validatePost).
 
-    status = body["status"]
-    if status not in ("READY", "OK", "BLOCKED"):
+    Current contract (OpenAPI 1.0.4): valid post -> {valid, message,
+    warnings}; invalid post -> {valid, errors, warnings}. There is no
+    `status`/`error` envelope. Requires valid is True.
+    """
+    if not isinstance(body, dict):
+        raise DraftAdapterError(f"{what} response was not a JSON object")
+
+    if "status" in body:
+        # Legacy/invented envelope marker: the current validatePost
+        # contract has no `status` field. Reject outright so stale
+        # fixtures fail closed instead of being trusted.
         raise DraftAdapterError(
-            f"{what} response status {status!r} is not recognized"
+            f"{what} response carried an undocumented 'status' field"
         )
 
-    valid = _require_bool(body, "valid", what=what)
+    valid = body.get("valid")
+    if not isinstance(valid, bool):
+        raise DraftAdapterError(
+            f"{what} response field 'valid' was not a boolean"
+        )
     return valid
 
 
 def _validate_presign_response(body: Any) -> tuple[str, str]:
-    """Validate a presign response envelope.
+    """Validate a presign response envelope (getMediaPresignedUrl).
 
-    Returns (upload_url, public_url). Both must be http(s) URLs.
+    Current contract (OpenAPI 1.0.4): {uploadUrl, publicUrl, key, expiresIn}.
+    There is no `status`/`error` envelope. Both URLs must be HTTPS. The
+    upload URL is returned for memory-only use; only the public URL is ever
+    persisted.
     """
-    body = _require_keys(
-        body,
-        ("status", "uploadUrl", "publicUrl", "error"),
-        what="presign",
-    )
+    if not isinstance(body, dict):
+        raise DraftPresignBlockedError(PRESIGN_FAILED_REASON)
 
-    status = body["status"]
-    if status not in ("OK", "BLOCKED"):
-        raise DraftAdapterError(
-            f"presign response status {status!r} is not recognized"
-        )
-
-    if status != "OK":
+    if "status" in body:
+        # Legacy/invented envelope marker: the current getMediaPresignedUrl
+        # contract has no `status` field. Reject outright so stale fixtures
+        # fail closed instead of being trusted.
         raise DraftPresignBlockedError(PRESIGN_FAILED_REASON)
 
     upload_url = body.get("uploadUrl")
     public_url = body.get("publicUrl")
 
-    if not isinstance(upload_url, str) or not upload_url.startswith("http"):
+    if (
+        not isinstance(upload_url, str)
+        or not upload_url.startswith("https://")
+    ):
         raise DraftPresignBlockedError(PRESIGN_FAILED_REASON)
 
-    if not isinstance(public_url, str) or not public_url.startswith("http"):
+    if (
+        not isinstance(public_url, str)
+        or not public_url.startswith("https://")
+    ):
         raise DraftPresignBlockedError(PRESIGN_FAILED_REASON)
 
     return upload_url, public_url
 
 
-def _validate_create_response(body: Any) -> str:
-    """Validate a POST /posts create response envelope.
+def _media_item_type(content_type: Any) -> str:
+    """Derive the Zernio MediaItem.type from a manifest media MIME type.
 
-    Returns the post ID. The response must contain a usable post ID.
+    Current documented MediaItem.type values center on image/video (with gif
+    and document variants). NullOne manifests carry image MIME types; video
+    MIME types are mapped for determinism. Anything else fails closed.
     """
-    body = _require_keys(
-        body,
-        ("_id",),
-        what="create",
-    )
+    if not isinstance(content_type, str):
+        raise DraftPreflightBlockedError(PREFLIGHT_POST_FAILED_REASON)
+    normalized = content_type.strip().lower()
+    if normalized in ("image/jpeg", "image/jpg", "image/png", "image/webp"):
+        return "image"
+    if normalized in ("image/gif",):
+        return "gif"
+    if normalized.startswith("video/"):
+        return "video"
+    if normalized in ("application/pdf",):
+        return "document"
+    raise DraftPreflightBlockedError(PREFLIGHT_POST_FAILED_REASON)
 
-    post_id = body.get("_id")
+
+def _resolve_account_id(value: Any) -> str | None:
+    """Resolve the canonical account id from the documented representation.
+
+    Create requests send accountId as a plain string. GET /posts/{id}
+    responses echo it as an expanded SocialAccount object ({_id, ...}).
+    Returns the resolved string id, or None when unresolvable.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        resolved = value.get("_id")
+        if isinstance(resolved, str):
+            return resolved
+    return None
+
+
+def _validate_create_response(body: Any) -> str:
+    """Validate a POST /posts create response envelope (PostCreateResponse).
+
+    Current contract (OpenAPI 1.0.4): 201 {message, post: {_id, ...},
+    warnings}. There is no top-level `_id`. Only an unambiguous envelope
+    with a non-empty post._id proves a created post. Anything else
+    (top-level _id legacy shape, missing post envelope, dryRun preview,
+    existingPost idempotency hint, 207/409 shapes) is ambiguous.
+    """
+    if not isinstance(body, dict):
+        raise DraftCreateAmbiguousError(CREATE_AMBIGUOUS_REASON)
+
+    post = body.get("post")
+    if not isinstance(post, dict):
+        raise DraftCreateAmbiguousError(CREATE_AMBIGUOUS_REASON)
+
+    post_id = post.get("_id")
     if not isinstance(post_id, str) or not post_id.strip():
         raise DraftCreateAmbiguousError(CREATE_AMBIGUOUS_REASON)
+
+    status = post.get("status")
+    if status is not None:
+        if not isinstance(status, str) or status.lower() != "draft":
+            raise DraftCreateAmbiguousError(CREATE_AMBIGUOUS_REASON)
 
     return post_id.strip()
 
@@ -551,45 +657,95 @@ def _validate_readback_response(
     post_id: str,
     account_id: str,
     fmt: str,
+    expected_content: str | None = None,
+    expected_media_items: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Validate the GET /posts/{postId} readback response.
+    """Validate the GET /posts/{postId} readback response (PostGetResponse).
+
+    Current contract (OpenAPI 1.0.4): {post: {_id, status, platforms:
+    [{platform, accountId: {_id,...} | "...", platformSpecificData, ...}],
+    content, mediaItems, ...}}. There are no top-level platform/accountId/
+    platformSpecificData fields.
 
     Requires exact documented evidence that:
-    - returned post ID is the created ID
-    - status is draft
-    - Instagram target is present
-    - canonical account ID matches
-    - Story platformSpecificData matches when format = STORY
-    """
-    body = _require_keys(
-        body,
-        ("_id", "status", "platform", "accountId"),
-        what="readback",
-    )
+    - post._id is the created id
+    - post.status is draft
+    - the intended Instagram platform entry exists and its account resolves
+      to the canonical account id
+    - Story platformSpecificData matches wherever the contract exposes it
+    - exact content/media identity matches wherever GET exposes those fields
 
-    returned_id = body.get("_id")
+    Fields the API does not expose are not invented as proof; a missing
+    optional exposure is accepted, while any present-but-contradictory field
+    fails closed.
+    """
+    if not isinstance(body, dict):
+        raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+
+    post = body.get("post")
+    if not isinstance(post, dict):
+        raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+
+    returned_id = post.get("_id")
     if returned_id != post_id:
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
-    status = body.get("status")
+    status = post.get("status")
     if not isinstance(status, str) or status.lower() != "draft":
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
-    platform = body.get("platform")
-    if not isinstance(platform, str) or platform.lower() != INSTAGRAM_PLATFORM:
+    platforms = post.get("platforms")
+    if not isinstance(platforms, list) or not platforms:
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
-    returned_account = body.get("accountId")
-    if returned_account != account_id:
+    instagram_entry: dict[str, Any] | None = None
+    for entry in platforms:
+        if not isinstance(entry, dict):
+            raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+        platform = entry.get("platform")
+        if isinstance(platform, str) and platform.lower() == INSTAGRAM_PLATFORM:
+            instagram_entry = entry
+            break
+
+    if instagram_entry is None:
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
+    resolved = _resolve_account_id(instagram_entry.get("accountId"))
+    if resolved != account_id:
+        raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+
+    # Story-specific data: enforced only where the contract exposes it
+    # (inside the matched platforms[] entry). Absent exposure is not
+    # invented as proof.
+    psd = instagram_entry.get("platformSpecificData")
     if fmt == "STORY":
-        psd = body.get("platformSpecificData")
-        if not isinstance(psd, dict):
+        if psd is not None:
+            if not isinstance(psd, dict):
+                raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+            if "contentType" in psd and psd.get("contentType") != "story":
+                raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+    else:
+        if isinstance(psd, dict) and psd.get("contentType") == "story":
             raise DraftReadbackFailedError(READBACK_FAILED_REASON)
-        content_type = psd.get("contentType")
-        if content_type != "story":
+
+    # Exact content/media identity wherever GET exposes those fields.
+    if expected_content is not None and "content" in post:
+        if post.get("content") != expected_content:
             raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+
+    if expected_media_items is not None and "mediaItems" in post:
+        exposed = post.get("mediaItems")
+        if not isinstance(exposed, list):
+            raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+        if len(exposed) != len(expected_media_items):
+            raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+        for got, want in zip(exposed, expected_media_items):
+            if not isinstance(got, dict):
+                raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+            if got.get("url") != want.get("url"):
+                raise DraftReadbackFailedError(READBACK_FAILED_REASON)
+            if "type" in got and got.get("type") != want.get("type"):
+                raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
 # ---------------------------------------------------------------------------
 # ZernioDraftProvider
@@ -756,7 +912,6 @@ class ZernioDraftProvider:
                 json_body={
                     "filename": local_path.name,
                     "contentType": item["content_type"],
-                    "size": len(data),
                 },
             )
         except DraftConnectorUnavailableError:
@@ -876,7 +1031,6 @@ class ZernioDraftProvider:
                     "/tools/validate/media",
                     json_body={
                         "url": public_url,
-                        "platform": INSTAGRAM_PLATFORM,
                     },
                 )
             except DraftConnectorUnavailableError:
@@ -957,54 +1111,60 @@ class ZernioDraftProvider:
     # -- Phase 3: exactly one POST /posts ------------------------------------
 
     def _build_draft_payload(self, m: dict) -> dict[str, Any]:
-        """Build the EXACT draft payload for preflight and create.
+        """Build the ONE canonical exact draft payload for validate + create.
 
-        For draft creation:
-        - isDraft = true
-        - Instagram platform
-        - canonical account ID
-        - exact caption/content
-        - exact media order
+        Current Zernio shape (OpenAPI 1.0.4, createPost/validatePost):
 
-        For STORY:
-        platformSpecificData.contentType = "story"
+            {
+              "content": "<exact caption>",
+              "mediaItems": [{"type": "image|video", "url": "<public url>"}],
+              "platforms": [{
+                "platform": "instagram",
+                "accountId": "<canonical account id>",
+                "platformSpecificData": {... only when required ...}
+              }],
+              "isDraft": true
+            }
 
-        For FEED/CAROUSEL:
-        do not set Story contentType
+        MediaItem.type is derived deterministically from the manifest media
+        MIME type; unsupported media fails closed. Media ordering is
+        preserved exactly. For STORY, platforms[0].platformSpecificData.
+        contentType = "story"; for FEED/CAROUSEL no Story contentType is set.
 
-        MUST NOT include or invoke:
-        - publishNow = true
-        - scheduledFor
-        - queued scheduling
-        - publish endpoint
-        - retry endpoint
-        - update-to-publish behavior
+        MUST NOT include publishNow, scheduledFor, queuedFromProfile,
+        queueId, or any publication/scheduling field, nor the obsolete root
+        platform/accountId/media/platformSpecificData shape.
         """
         caption_path = resolve_workspace_path(m["caption"]["file"])
         caption = caption_path.read_text(encoding="utf-8")
 
-        media_urls = [
-            item["public_url"]
-            for item in m["media"]
-        ]
+        media_items: list[dict[str, Any]] = []
+        for item in m["media"]:
+            public_url = item.get("public_url")
+            if not isinstance(public_url, str) or not public_url:
+                raise DraftPreflightBlockedError(PREFLIGHT_MEDIA_FAILED_REASON)
+            media_items.append(
+                {
+                    "type": _media_item_type(item.get("content_type")),
+                    "url": public_url,
+                }
+            )
 
-        payload: dict[str, Any] = {
+        platform_entry: dict[str, Any] = {
             "platform": INSTAGRAM_PLATFORM,
             "accountId": self._account_id,
-            "isDraft": True,
-            "content": caption,
-            "media": [
-                {"url": url}
-                for url in media_urls
-            ],
         }
-
         if m["format"] == "STORY":
-            payload["platformSpecificData"] = {
+            platform_entry["platformSpecificData"] = {
                 "contentType": "story",
             }
 
-        return payload
+        return {
+            "content": caption,
+            "mediaItems": media_items,
+            "platforms": [platform_entry],
+            "isDraft": True,
+        }
 
     def _create_draft(self, manifest_path, m: dict) -> str:
         """Perform exactly ONE POST /posts.
@@ -1044,8 +1204,12 @@ class ZernioDraftProvider:
             self._persist_unknown(manifest_path, m)
             raise DraftCreateAmbiguousError(CREATE_AMBIGUOUS_REASON)
 
-        if status != 201 and status != 200:
-            # Ambiguity: unexpected status.
+        if status != 201:
+            # Ambiguity: only 201 with the documented post envelope proves a
+            # create. Unexpected 200 variants (dryRun preview, same
+            # x-request-id idempotency hint with existingPost), 207
+            # incomplete publish, 409 content-hash dedup, and any other
+            # status cannot prove the created post: REVIEW_UNKNOWN, no retry.
             self._persist_unknown(manifest_path, m)
             raise DraftCreateAmbiguousError(CREATE_AMBIGUOUS_REASON)
 
@@ -1062,13 +1226,30 @@ class ZernioDraftProvider:
 
     @staticmethod
     def _request_id(manifest_path, m: dict) -> str:
-        """Stable per-manifest x-request-id as defense-in-depth.
+        """Stable per-manifest x-request-id as defense-in-depth (UUID).
+
+        Current Zernio docs define x-request-id as UUID, one value per
+        logical request. Derived deterministically (UUIDv5) from immutable
+        manifest identity so the same logical review-create request has one
+        stable request id: manifest_id + canonical-adjacent identity +
+        caption/media fingerprints + format.
 
         MUST NOT be used as justification for a NullOne retry.
         NullOne still makes max one create request.
         """
-        manifest_id = m.get("manifest_id", "unknown")
-        return f"nullone-draft-{manifest_id}-{uuid.uuid4().hex[:16]}"
+        manifest_id = str(m.get("manifest_id", "unknown"))
+        caption_sha = str(m.get("caption", {}).get("sha256", ""))
+        media_fingerprint = ",".join(
+            str(item.get("sha256", ""))
+            for item in m.get("media", [])
+            if isinstance(item, dict)
+        )
+        fmt = str(m.get("format", ""))
+        name = (
+            f"nullone-review-draft:{manifest_id}:{caption_sha}:"
+            f"{media_fingerprint}:{fmt}"
+        )
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
     # -- Phase 4: exactly one readback ---------------------------------------
 
@@ -1110,11 +1291,14 @@ class ZernioDraftProvider:
             raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
         try:
+            expected_payload = self._build_draft_payload(m)
             _validate_readback_response(
                 body,
                 post_id=post_id,
                 account_id=self._account_id,
                 fmt=m["format"],
+                expected_content=expected_payload.get("content"),
+                expected_media_items=expected_payload.get("mediaItems"),
             )
         except DraftReadbackFailedError:
             self._persist_unknown(manifest_path, m)

@@ -100,6 +100,12 @@ def execute(manifest_arg: str) -> int:
     except DraftUploadFailedError as e:
         print(f"BLOCKED={e}")
         return 2
+    except DraftConnectorUnauthorizedError as e:
+        print(f"BLOCKED={e}")
+        return 2
+    except DraftConnectorUnavailableError as e:
+        print(f"BLOCKED={e}")
+        return 2
     except DraftCreateAmbiguousError as e:
         print(f"BLOCKED={e}")
         return 2
