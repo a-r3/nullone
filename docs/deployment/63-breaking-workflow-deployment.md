@@ -162,9 +162,14 @@ as a repository decision (DESIRED / NOT DEPLOYED until #37): the Radar
 agent additionally authors exact `nullone.breaking-radar-handoff.v1`
 envelopes through the deterministic commit edge
 (`nullone-breaking-scan.py`), which stamps scan occurrence metadata,
-strict-validates, and atomically commits to
+strict-validates, contains staged assessments under
+`social/ops/breaking-staging`, serializes per-scan commits under an
+`fcntl` lock, and atomically commits to
 `social/ops/breaking-handoffs/<scan>/<candidate>.json` with a scan
-receipt. The Markdown report stays a non-authoritative human artifact;
+receipt that is the **authoritative commit record**. Orphan handoffs
+(present on disk but absent from a valid receipt) are never executable;
+missing/corrupt receipts never fall back to an inferred source. The
+Markdown report stays a non-authoritative human artifact;
 arbitrary Radar Markdown is never scraped heuristically into
 safety-critical #35/#36 fields. Details:
 `docs/deployment/80-breaking-radar-production-integration.md`.
@@ -172,8 +177,10 @@ safety-critical #35/#36 fields. Details:
 The reviewed structured authoritative production Breaking candidate
 source is the #80 commit edge + spool described above (repository
 decision, DESIRED / NOT DEPLOYED). No Story-specific live OpenClaw job
-is proven or deployed. The scheduled-session Zernio DraftProvider
-bootstrap remains `LIVE_SCHEDULED_PATH_UNPROVEN` (owned by #81, untouched
-by #80). Natural live Breaking proof remains `UNPROVEN_LIVE /
-DEFERRED_TO_#37`; no synthetic production event may be used to
-manufacture it.
+is proven or deployed. Dispatch-time dependency readiness remains
+caller-injected only: Radar/LLM `story_safety.dependencies_available`
+is editorial evidence, not an authoritative recheck. The scheduled-session
+Zernio DraftProvider bootstrap remains `LIVE_SCHEDULED_PATH_UNPROVEN`
+(owned by #81, untouched by #80). Natural live Breaking proof remains
+`UNPROVEN_LIVE / DEFERRED_TO_#37`; no synthetic production event may be
+used to manufacture it.

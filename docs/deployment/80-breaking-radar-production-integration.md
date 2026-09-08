@@ -23,9 +23,10 @@ confirmed live cadence already matches the approved monitoring rhythm).
 ```text
 existing Radar agent job (discovery/verification LLM surface,
   structured-handoff-aware prompt, unchanged schedule)
-  -> staged assessment JSON + deterministic commit edge
-  -> committed handoff spool (atomic, validated, receipted)
-  -> static consumer job (sweep, replay-safe, per-file isolated)
+  -> staged assessment JSON under social/ops/breaking-staging
+  -> deterministic commit edge (fcntl-serialized, receipted)
+  -> committed handoff spool (receipt = COMMIT AUTHORITY)
+  -> static consumer job (receipt-authoritative sweep)
   -> Breaking candidate runner (#27 persistence, #30 notify)
   -> #63 BreakingWorkflow (Story-first, unchanged)
 ```
@@ -67,10 +68,14 @@ resolution is byte-for-behavior unchanged.
 
 ## 4. Candidate-ID rule
 
-Stable lowercase slug, 2–8 hyphen segments, ≤80 chars, built from a
-stable anchor (primary announcement/source identity + topic slug).
-Enforced at commit and re-checked before workflow; rank/title/timestamp
-derivation forbidden by prompt contract.
+Stable lowercase slug, 2–8 hyphen segments, ≤80 chars. Stable-anchor
+derivation (primary announcement/source identity + topic slug) is
+required by the Radar prompt contract. The deterministic edge enforces
+canonical slug **shape** at commit and re-checks shape before workflow;
+commit immutability prevents same candidate occurrence content overwrite.
+Semantic provenance of the slug itself is **not** independently
+recomputed at the commit edge. Rank/title/timestamp derivation remains
+forbidden by the prompt contract.
 
 ## 5. Strict handoff and commit
 
@@ -80,23 +85,74 @@ verification UNVERIFIED/PARTIAL/PASS/BLOCKED, severity
 NORMAL/MATERIAL_BREAKING/EXCEPTIONAL_BREAKING, NEWS/BREAKING only; no
 FAIL reintroduced; non-PASS fail-closed before drafts).
 
-Commit edge (`nullone-breaking-scan.py`): `current-scan` (identity, no
-side effects) → agent stages assessment JSON → `commit` (candidate-ID
-shape, DUE-slot resolution, envelope build, edge strict-validation,
-atomic write, receipt update) / `record-empty` (truthful
-NO_MATERIAL_DEVELOPMENT). Identical recommit idempotent; conflicting
-content → COMMIT_CONFLICT; out-of-slot, malformed, symlink, or
-contradictory-empty commits rejected. M0 source allowlist (`openclaw`)
-mirrors the wake-up edge; alternate namespaces mint distinct identities.
+Commit edge (`nullone-breaking-scan.py`):
+
+- Staging root containment:
+  staged assessments must resolve inside
+  `social/ops/breaking-staging` as regular non-symlink `.json` files;
+  outside paths and symlinks are rejected.
+- Per-scan `fcntl` lock serializes all commit-edge mutations for one
+  scan (candidate commit and empty record cannot both win).
+- Strict receipt validation (`validate_scan_receipt`): exact field set,
+  schema/contract_version, identity, supported source, status,
+  duplicate-free candidates with external-ID shape, and
+  status↔candidates invariants. Malformed receipts fail closed (never
+  reinterpreted as empty).
+- `NO_MATERIAL_DEVELOPMENT` is checked **before** any handoff write, so
+  a rejected candidate is never left durably committed.
+- Concurrent A/B candidate commits both land; the receipt lists both
+  once.
+- Identical recommit is idempotent and repairs a missing receipt
+  listing; conflicting content → `COMMIT_CONFLICT`.
 
 Canonical path:
 `social/ops/breaking-handoffs/<source_occurrence_id>/<candidate-external-id>.json`
 plus `scan-receipt.json`
-(`nullone.breaking-radar-scan-receipt.v1`: scan identity, status
-NO_MATERIAL_DEVELOPMENT | CANDIDATES_EMITTED, emitted refs). Zero
-candidates is valid truth; receipts never bypass validation.
+(`nullone.breaking-radar-scan-receipt.v1`). The receipt is the
+**authoritative commit record**. Zero candidates is valid truth.
 
-## 6. Production runner
+## 6. Receipt-authoritative consumer
+
+`nullone-breaking-consume.py` never infers authority from directory
+contents and never falls back to `source="openclaw"` on a
+missing/corrupt receipt.
+
+For every scan directory:
+
+1. Require exactly one valid `scan-receipt.json`.
+2. Strict-validate schema, contract_version, source_occurrence_id,
+   scheduled_for, source, status, candidates, created_at.
+3. Receipt source must be supported; directory name must match
+   `source_occurrence_id`.
+
+`NO_MATERIAL_DEVELOPMENT`: candidates must be `[]`; execute zero
+handoffs; any handoff JSON present is an inconsistency and is never
+executable.
+
+`CANDIDATES_EMITTED`: consume **only** exact external occurrence IDs
+listed in `receipt.candidates`; each listed ID must have exactly one
+matching regular non-symlink JSON file; unlisted handoffs are not
+executable; missing listed files are safety-relevant inconsistencies;
+filename/content ID mismatch fails closed.
+
+Sweep result contract (explicit, not counts-only):
+
+- `sweep_status`: `COMPLETED` | `FAILED`
+- `reason_code` / `reason_text` (stable generic text; raw exception
+  messages never exposed)
+- `processed` / `skipped_invalid` / `establishment_failed`
+
+Only safely classified input defects may be skipped per-file
+(`HANDOFF_REJECTED`, `CANDIDATE_ID_REJECTED`, receipt/file integrity
+rejections). Unexpected runtime/programming/orchestration exceptions
+and runner establishment failures
+(`RESULT_MISSING_OR_CORRUPT`, `RESULT_IDENTITY_MISMATCH`,
+`RESULT_COMMIT_FAILED`, `NOTIFICATION_STATE_UNSAFE`,
+`NOTIFICATION_RESULT_INVALID`, `RUNTIME_CRASHED`) fail the sweep:
+CLI exits non-zero; scheduler-native `failureAlert` owns
+execution-level failure. Orphan handoffs are never executable.
+
+## 7. Production runner
 
 `run_breaking_candidate` (`nullone_breaking_candidate_runner.py`):
 normalize (malformed → FAILED, no workflow) → candidate-ID shape →
@@ -104,15 +160,28 @@ run_id → per-run lock → persisted #27 FIRST (replay returns it; corrupt
 or identity-mismatched fails closed, never a replacement run) →
 `run_breaking_workflow` (Haiku writer, numeric-scope verifier,
 MCP-backed DraftConnector with live path still UNPROVEN per #81,
-Telegram ReviewDelivery, assessment-attested dependency recheck, NO main
+Telegram ReviewDelivery, **caller-injected** `dependency_recheck` only —
+Radar/LLM `story_safety.dependencies_available` is editorial evidence,
+never a dispatch-time fallback; production #80 currently passes `None`
+so #63 fails closed with `DRAFT_DEPENDENCY_RECHECK_MISSING`; no Story /
+main draft work without an authoritative recheck; #81 remains
+unresolved and owns live DraftProvider readiness; NO main
 provider/verifier) → existing `run_outcome_mapping()` → assess + emit
 under `social/ops/run-outcomes/breaking` → reload/validate → #30 notify
-once. COMPLETED + exit 0 for every established outcome (including
-actionable UNKNOWN); FAILED + non-zero only for establishment failures
-(native alert owns those; no duplication, no retries around
+once.
+
+Fresh and replay for the exact same persisted #27 result agree on
+`domain_outcome`, `reason_code`, and `reason_text`. When
+`domain_outcome == SUCCEEDED`, `reason_code = OK`; otherwise both paths
+surface the persisted reason. Do not confuse
+`application_execution=COMPLETED` with domain success.
+
+COMPLETED + exit 0 for every established outcome (including actionable
+UNKNOWN); FAILED + non-zero only for establishment failures (native
+alert owns those; no duplication, no retries around
 draft/delivery/ambiguity). No publication capability.
 
-## 7. Story-first and source split
+## 8. Story-first and source split
 
 #36/#63 semantics untouched: STORY first; main never prepares before
 Story SUCCEEDED (`DRAFT_CREATED` + SENT); Story failure → main never
@@ -122,28 +191,34 @@ fallback. With no reviewed real main provider, optional main stays
 handoff; Breaking Story uses only the Radar handoff; both converge after
 their own admission into the shared #33 core.
 
-## 8. Relation to #79 / #81
+## 9. Relation to #79 / #81
 
 - #79: reused as-is (writer, verifier, DraftConnector, ReviewDelivery,
   #27/#30 patterns, source-independence).
 - #81: the DraftConnector live path is wired as the desired dependency
   but remains UNPROVEN; #81 owns its proof/replacement. #81 stays OPEN.
+  #80 does not solve #81 and does not invent a fake production recheck.
 
-## 9. Failure and recovery
+## 10. Failure and recovery
 
-- Handoff persisted, crash before dispatch → next consumer sweep
-  processes it exactly once (#27 result existence = idempotence).
+- Handoff persisted, crash before receipt listing → orphan is not
+  executable until a recommit repairs the receipt; next consumer sweep
+  never invents authority from directory contents.
+- Handoff + receipt committed, crash before dispatch → next consumer
+  sweep processes listed candidates exactly once (#27 result existence =
+  idempotence).
 - #27 persisted, crash before CLI return → replay returns the
-  authoritative result.
-- Malformed/unreadable/misnamed spool files → SKIPPED_INVALID, never
-  blocking; unknown non-JSON ignored; receipts never consumed.
+  authoritative result with identical reason semantics.
+- Malformed/unreadable/misnamed/unlisted spool files → SKIPPED_INVALID
+  (input defects only); unexpected runner crashes → sweep FAILED /
+  non-zero CLI.
 - Deployment delta for #37: install new/changed scripts + prompts,
   create consumer job, preserve ledgers/manifests/state/jobs; rollback
   restores the Markdown-only prompt/job, removes the consumer edge,
   never rewinds ledgers or deletes review drafts.
 
-## 10. Live truth
+## 11. Live truth
 
 No Radar prompt change deployed, no handoff committed in production, no
 consumer job, no Breaking production run, no Telegram/Zernio proof. All
-`UNPROVEN_LIVE / DEFERRED_TO_#37`.
+`UNPROVEN_LIVE / DEFERRED_TO_#37`. **NOT DEPLOYED.**

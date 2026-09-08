@@ -113,7 +113,9 @@ class CommitEdgeTests(unittest.TestCase):
         self.td.cleanup()
 
     def stage(self, assessment) -> Path:
-        staged = self.root / "staged.json"
+        staging = self.root / "social/ops/breaking-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        staged = staging / "staged.json"
         staged.write_text(json.dumps(assessment), encoding="utf-8")
         return staged
 
@@ -251,6 +253,81 @@ class CommitEdgeTests(unittest.TestCase):
                 at=AT,
                 workspace_root=self.root,
             )
+
+    def test_staged_path_outside_root_rejected(self):
+        outside = self.root / "elsewhere.json"
+        outside.write_text(json.dumps(make_assessment()), encoding="utf-8")
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=outside,
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_staged_symlink_rejected(self):
+        staging = self.root / "social/ops/breaking-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        real = staging / "real.json"
+        real.write_text(json.dumps(make_assessment()), encoding="utf-8")
+        link = staging / "staged.json"
+        link.symlink_to(real)
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=link,
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_malformed_receipt_fails_closed(self):
+        # First create a valid receipt via empty scan
+        record_empty_scan(source="openclaw", at=AT, workspace_root=self.root)
+        scan_dir = self.root / "social/ops/breaking-handoffs" / SCAN_ID
+        receipt_path = scan_dir / "scan-receipt.json"
+        # Corrupt it
+        receipt_path.write_text("{not json", encoding="utf-8")
+        # Any subsequent commit should fail closed
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=self.stage(make_assessment()),
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_receipt_symlink_rejected(self):
+        # Create a valid receipt then replace with symlink
+        record_empty_scan(source="openclaw", at=AT, workspace_root=self.root)
+        scan_dir = self.root / "social/ops/breaking-handoffs" / SCAN_ID
+        receipt_path = scan_dir / "scan-receipt.json"
+        real = scan_dir / "real-receipt.json"
+        real.write_text(receipt_path.read_text(encoding="utf-8"), encoding="utf-8")
+        receipt_path.unlink()
+        receipt_path.symlink_to(real)
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=self.stage(make_assessment()),
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_empty_receipt_rejects_candidate_no_handoff(self):
+        # Record empty scan first
+        record_empty_scan(source="openclaw", at=AT, workspace_root=self.root)
+        # Attempt to commit a candidate in same scan slot
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=self.stage(make_assessment()),
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+        # Ensure no handoff file was created
+        scan_dir = self.root / "social/ops/breaking-handoffs" / SCAN_ID
+        handoffs = [p for p in scan_dir.iterdir() if p.suffix == ".json" and p.name != "scan-receipt.json"]
+        self.assertEqual(handoffs, [])
 
 
 if __name__ == "__main__":

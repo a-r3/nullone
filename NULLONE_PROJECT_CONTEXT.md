@@ -141,17 +141,24 @@ blocks READY. #37 is OPEN / BLOCKED; do not rerun yet.
 job verified read-only (`texbrif-breaking-radar`,
 `30 11,14,17,20,23 * * * Asia/Baku`, prompt-only agent job — preserved
 slots 11:30/14:30/17:30/20:30/23:30); deterministic scan-slot authority
-with latest-due coalescing; stable `candidate_id` slug rule; exact
+with latest-due coalescing; candidate-ID **shape** enforced at commit
+(stable-anchor derivation required by Radar prompt contract; semantic
+slug provenance not independently recomputed); exact
 `nullone.breaking-radar-handoff.v1` envelopes committed atomically by the
-deterministic edge (Markdown stays a non-authoritative sibling; strict
-Breaking handoff is the authoritative desired source); spool
-`social/ops/breaking-handoffs/<scan>/<candidate>.json` with scan
-receipts; static consumer sweep (desired
-`45 11,14,17,20,23 * * * Asia/Baku`, NOT DEPLOYED) with per-file
-isolation and #27 replay authority; Story-first preserved with no main
-provider. #80 remains OPEN until merge. #81 remains OPEN (live
-DraftProvider proof still unresolved). #37 remains OPEN / BLOCKED. No
-production activation occurred; no synthetic Breaking event.
+deterministic edge under staging-root containment + per-scan `fcntl`
+serialization (Markdown stays a non-authoritative sibling; the scan
+receipt is the authoritative commit record — orphan handoffs are not
+executable; missing/corrupt receipts have no source fallback); spool
+`social/ops/breaking-handoffs/<scan>/<candidate>.json`; static consumer
+sweep (desired `45 11,14,17,20,23 * * * Asia/Baku`, NOT DEPLOYED) that
+consumes only receipt-listed candidates, fails closed on unexpected
+runner crashes (non-zero CLI), and never treats establishment failures
+as ordinary processed work; Story-first preserved with no main provider;
+Radar/LLM dependency attestation is not dispatch-time recheck (production
+#80 passes no fake recheck; #81 remains OPEN). Fresh/replay #27 reason
+semantics are identical. #80 remains OPEN until merge. #37 remains
+OPEN / BLOCKED. No production activation occurred; no synthetic Breaking
+event. **NOT DEPLOYED.**
 
 Current required order:
 

@@ -25,10 +25,15 @@ identity (see `nullone_breaking_scan_authority.py`).
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import sys
+import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from nullone_breaking_radar_edge import (
     BreakingRadarEdgeError,
@@ -44,11 +49,27 @@ from nullone_breaking_workflow_input import BreakingWorkflowInputError
 from nullone_bridge_common import WORKSPACE, atomic_write_json
 
 HANDOFFS_SUBPATH = Path("social/ops/breaking-handoffs")
+STAGING_SUBPATH = Path("social/ops/breaking-staging")
 RECEIPT_FILENAME = "scan-receipt.json"
+SCAN_LOCK_FILENAME = "scan.lock"
 
 RECEIPT_SCHEMA = "nullone.breaking-radar-scan-receipt.v1"
 RECEIPT_CONTRACT_VERSION = "1.0.0"
+RECEIPT_FIELDS = frozenset(
+    {
+        "schema",
+        "contract_version",
+        "source_occurrence_id",
+        "scheduled_for",
+        "source",
+        "status",
+        "candidates",
+        "created_at",
+    }
+)
 RECEIPT_STATUSES = frozenset({"NO_MATERIAL_DEVELOPMENT", "CANDIDATES_EMITTED"})
+
+_EXTERNAL_ID_RE = re.compile(r"^breaking-candidate-[0-9a-f]{24}$")
 
 M0_SCAN_SOURCES = frozenset({"openclaw"})
 
@@ -81,24 +102,83 @@ def _resolve_due_scan(*, source: str, at: str) -> Any:
     return resolution
 
 
-def _scan_dir(workspace_root: Path, source_occurrence_id: str) -> Path:
-    return workspace_root / HANDOFFS_SUBPATH / source_occurrence_id
+def validate_scan_receipt(
+    data: Any, *, source_occurrence_id: str, scheduled_for: str
+) -> dict[str, Any]:
+    """Strictly validate a scan receipt against its scan identity.
 
+    Exact field set, exact schema/version, supported source, exact scan
+    IDs, canonical timestamp shape, exact status vocabulary, duplicate-free
+    candidate list with expected external-ID shape, and the status/
+    candidates semantic invariants. Anything else fails closed -- garbage
+    is never reinterpreted as an empty scan.
+    """
 
-def _receipt_path(workspace_root: Path, source_occurrence_id: str) -> Path:
-    return _scan_dir(workspace_root, source_occurrence_id) / RECEIPT_FILENAME
+    from nullone_scheduler_invocation import TIMESTAMP_RE
 
-
-def _read_receipt(path: Path) -> dict[str, Any] | None:
-    if not path.is_file() or path.is_symlink():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise BreakingScanCommitError("existing scan receipt is unreadable")
-    if not isinstance(data, dict) or data.get("schema") != RECEIPT_SCHEMA:
-        raise BreakingScanCommitError("existing scan receipt has wrong schema")
+    if not isinstance(data, dict):
+        raise BreakingScanCommitError("scan receipt must be a JSON object")
+    actual = set(data)
+    if actual != RECEIPT_FIELDS:
+        raise BreakingScanCommitError(
+            "scan receipt field set mismatch "
+            f"(missing={sorted(RECEIPT_FIELDS - actual)}, "
+            f"unknown={sorted(actual - RECEIPT_FIELDS)})"
+        )
+    if data["schema"] != RECEIPT_SCHEMA:
+        raise BreakingScanCommitError("scan receipt has wrong schema")
+    if data["contract_version"] != RECEIPT_CONTRACT_VERSION:
+        raise BreakingScanCommitError("scan receipt has wrong contract_version")
+    if data["source_occurrence_id"] != source_occurrence_id:
+        raise BreakingScanCommitError("scan receipt names a different scan")
+    if data["scheduled_for"] != scheduled_for:
+        raise BreakingScanCommitError("scan receipt names a different slot")
+    if data["source"] not in M0_SCAN_SOURCES:
+        raise BreakingScanCommitError("scan receipt names an unsupported source")
+    if not isinstance(data["created_at"], str) or not TIMESTAMP_RE.fullmatch(
+        data["created_at"]
+    ):
+        raise BreakingScanCommitError("scan receipt has malformed created_at")
+    if data["status"] not in RECEIPT_STATUSES:
+        raise BreakingScanCommitError("scan receipt has unknown status")
+    candidates = data["candidates"]
+    if not isinstance(candidates, list) or any(
+        not isinstance(c, str) for c in candidates
+    ):
+        raise BreakingScanCommitError("scan receipt candidates must be a list[str]")
+    if len(candidates) != len(set(candidates)):
+        raise BreakingScanCommitError("scan receipt candidates must be duplicate-free")
+    for candidate in candidates:
+        if not _EXTERNAL_ID_RE.fullmatch(candidate):
+            raise BreakingScanCommitError(
+                "scan receipt candidate has unexpected external-ID shape"
+            )
+    if data["status"] == "NO_MATERIAL_DEVELOPMENT" and candidates:
+        raise BreakingScanCommitError(
+            "scan receipt contradicts itself: empty status with candidates"
+        )
+    if data["status"] == "CANDIDATES_EMITTED" and not candidates:
+        raise BreakingScanCommitError(
+            "scan receipt contradicts itself: emitted status without candidates"
+        )
     return data
+
+
+@contextmanager
+def _scan_locked(
+    workspace_root: Path, source_occurrence_id: str
+) -> Iterator[Path]:
+    """Serialize all commit-edge mutations for one scan (fcntl, not local)."""
+
+    scan_dir = workspace_root / HANDOFFS_SUBPATH / source_occurrence_id
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = scan_dir / SCAN_LOCK_FILENAME
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield scan_dir
+    finally:
+        os.close(lock_fd)
 
 
 def _write_receipt(
@@ -122,7 +202,9 @@ def _write_receipt(
         "candidates": list(candidates),
         "created_at": _utc_now_canonical(),
     }
-    path = _receipt_path(workspace_root, source_occurrence_id)
+    path = (
+        workspace_root / HANDOFFS_SUBPATH / source_occurrence_id / RECEIPT_FILENAME
+    )
     atomic_write_json(path, receipt)
     return path
 
@@ -145,6 +227,41 @@ def current_scan(
     }
 
 
+def _resolve_staged_path(workspace_root: Path, assessment_path: str | Path) -> Path:
+    """Contain the staged assessment inside the canonical staging root.
+
+    The commit edge never reads an arbitrary host file: the path must
+    resolve inside `<workspace>/social/ops/breaking-staging`, be a
+    regular non-symlink file, and carry a `.json` suffix.
+    """
+
+    root = workspace_root.resolve()
+    staging = root / STAGING_SUBPATH
+    # Build the candidate path without resolving symlinks yet
+    if Path(str(assessment_path)).is_absolute():
+        candidate = Path(str(assessment_path))
+    else:
+        candidate = staging / str(assessment_path)
+    # Check for symlink now, before resolving
+    if candidate.is_symlink():
+        raise BreakingScanCommitError("staged assessment must be a regular file, not a symlink")
+    # Now resolve to get the absolute path and to check if it's inside the staging root
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(staging.resolve())
+    except (ValueError, OSError) as exc:
+        raise BreakingScanCommitError(
+            "staged assessment must live inside the canonical staging root"
+        ) from exc
+    if not candidate.is_file():
+        raise BreakingScanCommitError(
+            "staged assessment must be a regular file, not a symlink"
+        )
+    if candidate.suffix != ".json":
+        raise BreakingScanCommitError("staged assessment must be a JSON file")
+    return candidate
+
+
 def commit_assessment(
     *,
     assessment_path: str | Path,
@@ -154,20 +271,34 @@ def commit_assessment(
 ) -> dict[str, Any]:
     """Validate, stamp, and atomically commit one staged assessment.
 
+    Commit authority rule: the candidate handoff may be written first,
+    but the scan receipt is the COMMIT RECORD -- only candidates listed
+    in a valid CANDIDATES_EMITTED receipt are consumable, so a crash
+    between the two writes leaves an orphan that a recommit repairs.
+
+    Everything mutating happens inside the per-scan fcntl lock: receipt
+    state is re-read and strictly validated there, conflicts and
+    idempotency are decided there, and only then are the handoff and
+    receipt written. In particular a NO_MATERIAL_DEVELOPMENT receipt is
+    checked BEFORE any handoff write, so a rejected candidate is never
+    left durably committed.
+
     Returns the committed handoff path, candidate external occurrence ID,
-    and scan identity. Identical recommit is idempotent; conflicting
-    content for the same candidate path is rejected (COMMIT_CONFLICT).
+    and scan identity. Identical recommit is idempotent (and repairs a
+    missing receipt listing); conflicting content for the same candidate
+    path is rejected (COMMIT_CONFLICT).
     """
 
     reviewed_source = _require_m0_source(source)
     triggered_at = at or _utc_now_canonical()
     resolution = _resolve_due_scan(source=reviewed_source, at=triggered_at)
-
+    root = workspace_root.resolve()
+    staged = _resolve_staged_path(root, assessment_path)
     try:
-        assessment = json.loads(Path(assessment_path).read_text(encoding="utf-8"))
+        assessment = json.loads(staged.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise BreakingScanCommitError(
-            f"staged assessment unreadable: {assessment_path}"
+            f"staged assessment unreadable: {staged.name}"
         ) from exc
     if not isinstance(assessment, dict):
         raise BreakingScanCommitError("staged assessment must be a JSON object")
@@ -196,48 +327,70 @@ def commit_assessment(
         raise BreakingScanCommitError(f"handoff validation failed: {exc}") from exc
 
     external_id = normalized.trigger["external_occurrence_id"]
-    scan_dir = _scan_dir(workspace_root, resolution.source_occurrence_id)
-    target = scan_dir / f"{external_id}.json"
-    if target.is_symlink():
-        raise BreakingScanCommitError("handoff target is a symlink; refusing commit")
-    if target.is_file():
-        try:
-            existing = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+
+    with _scan_locked(root, resolution.source_occurrence_id) as scan_dir:
+        receipt_path = scan_dir / RECEIPT_FILENAME
+        existing_receipt: dict[str, Any] | None = None
+        if receipt_path.is_file() or receipt_path.is_symlink():
+            if receipt_path.is_symlink():
+                raise BreakingScanCommitError("scan receipt is a symlink")
+            try:
+                existing_receipt = validate_scan_receipt(
+                    json.loads(receipt_path.read_text(encoding="utf-8")),
+                    source_occurrence_id=resolution.source_occurrence_id,
+                    scheduled_for=resolution.scheduled_for,
+                )
+            except (OSError, ValueError) as exc:
+                raise BreakingScanCommitError(
+                    "existing scan receipt is unreadable"
+                ) from exc
+
+        if (
+            existing_receipt is not None
+            and existing_receipt["status"] == "NO_MATERIAL_DEVELOPMENT"
+        ):
+            # Checked BEFORE any handoff write: a rejected candidate is
+            # never left durably committed.
             raise BreakingScanCommitError(
-                "existing handoff unreadable; refusing overwrite"
-            ) from exc
-        if existing != handoff:
-            raise BreakingScanCommitError(
-                "COMMIT_CONFLICT: a different handoff already occupies "
-                "this candidate path"
+                "COMMIT_CONFLICT: scan already recorded NO_MATERIAL_DEVELOPMENT"
             )
 
-    atomic_write_json(target, handoff)
+        target = scan_dir / f"{external_id}.json"
+        if target.is_symlink():
+            raise BreakingScanCommitError("handoff target is a symlink; refusing commit")
+        if target.is_file():
+            try:
+                existing_handoff = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise BreakingScanCommitError(
+                    "existing handoff unreadable; refusing overwrite"
+                ) from exc
+            if existing_handoff != handoff:
+                raise BreakingScanCommitError(
+                    "COMMIT_CONFLICT: a different handoff already occupies "
+                    "this candidate path"
+                )
 
-    existing_receipt = _read_receipt(_receipt_path(workspace_root, resolution.source_occurrence_id))
-    if existing_receipt is not None and existing_receipt.get("status") == "NO_MATERIAL_DEVELOPMENT":
-        raise BreakingScanCommitError(
-            "COMMIT_CONFLICT: scan already recorded NO_MATERIAL_DEVELOPMENT"
+        atomic_write_json(target, handoff)
+
+        known = (
+            list(existing_receipt["candidates"])
+            if isinstance(existing_receipt, dict)
+            else []
         )
-    known = (
-        list(existing_receipt.get("candidates", []))
-        if isinstance(existing_receipt, dict)
-        else []
-    )
-    if external_id not in known:
-        known.append(external_id)
-    _write_receipt(
-        workspace_root=workspace_root,
-        source_occurrence_id=resolution.source_occurrence_id,
-        scheduled_for=resolution.scheduled_for,
-        source=reviewed_source,
-        status="CANDIDATES_EMITTED",
-        candidates=sorted(known),
-    )
+        if external_id not in known:
+            known.append(external_id)
+        _write_receipt(
+            workspace_root=root,
+            source_occurrence_id=resolution.source_occurrence_id,
+            scheduled_for=resolution.scheduled_for,
+            source=reviewed_source,
+            status="CANDIDATES_EMITTED",
+            candidates=sorted(known),
+        )
 
     return {
-        "handoff_path": str(target.relative_to(workspace_root.resolve())),
+        "handoff_path": str(target.relative_to(root)),
         "external_occurrence_id": external_id,
         "source_occurrence_id": resolution.source_occurrence_id,
         "scheduled_for": resolution.scheduled_for,
@@ -250,33 +403,55 @@ def record_empty_scan(
     at: str | None = None,
     workspace_root: Path = WORKSPACE,
 ) -> dict[str, Any]:
-    """Record a truthful zero-candidate scan receipt (no handoff)."""
+    """Record a truthful zero-candidate scan receipt (no handoff).
+
+    Serialized with candidate commits under the same per-scan lock: a
+    concurrent candidate commit and an empty record cannot both win --
+    exactly one logical outcome survives, and a contradictory state is
+    rejected rather than merged. A malformed existing receipt fails
+    closed (never reinterpreted as an empty scan).
+    """
 
     reviewed_source = _require_m0_source(source)
     resolution = _resolve_due_scan(
         source=reviewed_source, at=at or _utc_now_canonical()
     )
-    existing = _read_receipt(
-        _receipt_path(workspace_root, resolution.source_occurrence_id)
-    )
-    if existing is not None:
-        if existing.get("status") == "CANDIDATES_EMITTED" or existing.get("candidates"):
-            raise BreakingScanCommitError(
-                "scan already emitted candidates; cannot record empty"
-            )
-        return {"receipt_path": RECEIPT_FILENAME, "status": "NO_MATERIAL_DEVELOPMENT"}
-    path = _write_receipt(
-        workspace_root=workspace_root,
-        source_occurrence_id=resolution.source_occurrence_id,
-        scheduled_for=resolution.scheduled_for,
-        source=reviewed_source,
-        status="NO_MATERIAL_DEVELOPMENT",
-        candidates=[],
-    )
-    return {
-        "receipt_path": str(path.relative_to(workspace_root.resolve())),
-        "status": "NO_MATERIAL_DEVELOPMENT",
-    }
+    root = workspace_root.resolve()
+    with _scan_locked(root, resolution.source_occurrence_id) as scan_dir:
+        receipt_path = scan_dir / RECEIPT_FILENAME
+        if receipt_path.is_symlink():
+            raise BreakingScanCommitError("scan receipt is a symlink")
+        if receipt_path.is_file():
+            try:
+                existing = validate_scan_receipt(
+                    json.loads(receipt_path.read_text(encoding="utf-8")),
+                    source_occurrence_id=resolution.source_occurrence_id,
+                    scheduled_for=resolution.scheduled_for,
+                )
+            except (OSError, ValueError) as exc:
+                raise BreakingScanCommitError(
+                    "existing scan receipt is unreadable"
+                ) from exc
+            if existing["status"] == "CANDIDATES_EMITTED":
+                raise BreakingScanCommitError(
+                    "scan already emitted candidates; cannot record empty"
+                )
+            return {
+                "receipt_path": str(receipt_path.relative_to(root)),
+                "status": "NO_MATERIAL_DEVELOPMENT",
+            }
+        path = _write_receipt(
+            workspace_root=root,
+            source_occurrence_id=resolution.source_occurrence_id,
+            scheduled_for=resolution.scheduled_for,
+            source=reviewed_source,
+            status="NO_MATERIAL_DEVELOPMENT",
+            candidates=[],
+        )
+        return {
+            "receipt_path": str(path.relative_to(root)),
+            "status": "NO_MATERIAL_DEVELOPMENT",
+        }
 
 
 def self_test() -> int:
@@ -342,6 +517,8 @@ def self_test() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
+        staging = root / "social/ops/breaking-staging"
+        staging.mkdir(parents=True, exist_ok=True)
         at = "2026-09-08T07:35:00Z"  # inside the 11:30 Baku scan slot
 
         # 1. current-scan resolves the slot identity, no side effects.
@@ -352,7 +529,7 @@ def self_test() -> int:
         assert not (root / "social/ops/breaking-handoffs").exists()
 
         # 2. Commit one valid candidate.
-        staged = root / "staged.json"
+        staged = staging / "staged.json"
         staged.write_text(json.dumps(assessment()), encoding="utf-8")
         committed = commit_assessment(
             assessment_path=staged, source="openclaw", at=at, workspace_root=root
@@ -427,6 +604,79 @@ def self_test() -> int:
                 source="openclaw", at=at, workspace_root=root
             )
             raise AssertionError("contradictory empty record was not rejected")
+        except BreakingScanCommitError:
+            pass
+
+        # 10. NO_MATERIAL receipt then candidate commit: rejected BEFORE
+        #     any handoff write (never a partial commit).
+        scan_dir = (
+            root
+            / "social/ops/breaking-handoffs"
+            / "breaking-radar.scan-1430.v1@2026-09-08T10:30:00Z"
+        )
+        record_empty_scan(
+            source="openclaw", at="2026-09-08T10:35:00Z", workspace_root=root
+        )
+        staged.write_text(json.dumps(assessment()), encoding="utf-8")
+        try:
+            commit_assessment(
+                assessment_path=staged,
+                source="openclaw",
+                at="2026-09-08T10:35:00Z",
+                workspace_root=root,
+            )
+            raise AssertionError("post-empty candidate commit was not rejected")
+        except BreakingScanCommitError:
+            pass
+        leftovers = [
+            p for p in scan_dir.iterdir() if p.suffix == ".json" and p.name != "scan-receipt.json"
+        ]
+        assert leftovers == [], leftovers
+
+        # 11. Concurrent A/B commits: both land, receipt lists both once.
+        import threading
+
+        def _commit(candidate_id: str) -> None:
+            path = staging / f"{candidate_id}.json"
+            path.write_text(json.dumps(assessment(candidate_id)), encoding="utf-8")
+            commit_assessment(
+                assessment_path=path,
+                source="openclaw",
+                at="2026-09-08T13:35:00Z",
+                workspace_root=root,
+            )
+
+        threads = [
+            threading.Thread(target=_commit, args=(cid,))
+            for cid in ("concurrent-alpha-x", "concurrent-beta-y")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        receipt = json.loads(
+            (
+                root
+                / "social/ops/breaking-handoffs"
+                / "breaking-radar.scan-1730.v1@2026-09-08T13:30:00Z"
+                / "scan-receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert receipt["status"] == "CANDIDATES_EMITTED", receipt
+        assert len(receipt["candidates"]) == 2, receipt
+        assert len(set(receipt["candidates"])) == 2
+
+        # 12. Staged path outside the canonical root is rejected.
+        outside = root / "elsewhere.json"
+        outside.write_text(json.dumps(assessment()), encoding="utf-8")
+        try:
+            commit_assessment(
+                assessment_path=outside,
+                source="openclaw",
+                at=at,
+                workspace_root=root,
+            )
+            raise AssertionError("outside-staging path was not rejected")
         except BreakingScanCommitError:
             pass
 

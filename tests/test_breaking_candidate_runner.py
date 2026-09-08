@@ -115,6 +115,8 @@ class BreakingRunnerTests(unittest.TestCase):
             "draft_connector": FakeDraftConnector(),
             "review_delivery": FakeReviewDelivery(status="SENT"),
             "notifier": lambda _r: {"status": "NOT_REQUIRED"},
+            # TEST ONLY authoritative recheck. Production #80 passes None.
+            "dependency_recheck": lambda _stage: True,
             "workspace_root": self.root,
             "output_root": self.out,
             "now": NOW,
@@ -129,6 +131,7 @@ class BreakingRunnerTests(unittest.TestCase):
                 story_writer=Exploding("writer"),
                 draft_connector=Exploding("draft"),
                 review_delivery=Exploding("delivery"),
+                dependency_recheck=None,
             ),
         )
         self.assertEqual(result.application_execution, "FAILED")
@@ -153,10 +156,102 @@ class BreakingRunnerTests(unittest.TestCase):
                 },
                 "assessment": assessment,
             },
-            **self.base_kwargs(draft_connector=draft),
+            **self.base_kwargs(draft_connector=draft, dependency_recheck=None),
         )
         self.assertEqual(result.application_execution, "COMPLETED")
         self.assertEqual(draft.calls, 0)
+
+    def test_llm_dependency_attestation_is_not_authoritative_recheck(self):
+        # Radar says dependencies_available=true, but no injected recheck.
+        handoff = make_handoff()
+        self.assertTrue(
+            handoff["assessment"]["story_safety"]["dependencies_available"]
+        )
+        draft = FakeDraftConnector()
+        delivery = FakeReviewDelivery(status="SENT")
+        result = run_breaking_candidate(
+            handoff,
+            **self.base_kwargs(
+                draft_connector=draft,
+                review_delivery=delivery,
+                dependency_recheck=None,
+            ),
+        )
+        self.assertEqual(result.application_execution, "COMPLETED")
+        self.assertEqual(result.domain_outcome, "BLOCKED")
+        self.assertEqual(result.reason_code, "DRAFT_DEPENDENCY_RECHECK_MISSING")
+        self.assertEqual(draft.calls, 0)
+        self.assertEqual(len(delivery.sent), 0)
+
+    def test_injected_authoritative_recheck_allows_story_path(self):
+        draft = FakeDraftConnector()
+        delivery = FakeReviewDelivery(status="SENT")
+        result = run_breaking_candidate(
+            make_handoff(),
+            **self.base_kwargs(draft_connector=draft, review_delivery=delivery),
+        )
+        self.assertEqual(result.application_execution, "COMPLETED")
+        self.assertEqual(result.domain_outcome, "SUCCEEDED")
+        self.assertEqual(result.reason_code, "OK")
+        self.assertEqual(draft.calls, 1)
+        self.assertEqual(len(delivery.sent), 1)
+
+    def test_fresh_and_replay_agree_on_blocked_reason(self):
+        handoff = make_handoff()
+        fresh = run_breaking_candidate(
+            handoff, **self.base_kwargs(dependency_recheck=None)
+        )
+        self.assertEqual(fresh.application_execution, "COMPLETED")
+        self.assertEqual(fresh.domain_outcome, "BLOCKED")
+        self.assertEqual(fresh.reason_code, "DRAFT_DEPENDENCY_RECHECK_MISSING")
+        persisted = json.loads(Path(fresh.result_file).read_text(encoding="utf-8"))
+        self.assertEqual(persisted["domain_outcome"], "BLOCKED")
+        self.assertEqual(persisted["reason_code"], fresh.reason_code)
+        self.assertEqual(persisted["reason_text"], fresh.reason_text)
+
+        replay = run_breaking_candidate(
+            handoff,
+            **self.base_kwargs(
+                story_writer=Exploding("writer"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+                dependency_recheck=None,
+                notifier=lambda _r: {"status": "NOT_REQUIRED"},
+            ),
+        )
+        self.assertEqual(replay.domain_outcome, fresh.domain_outcome)
+        self.assertEqual(replay.reason_code, fresh.reason_code)
+        self.assertEqual(replay.reason_text, fresh.reason_text)
+
+    def test_fresh_and_replay_agree_on_failed_reason(self):
+        delivery = FakeReviewDelivery(status="FAILED", error="down")
+        draft = FakeDraftConnector()
+        handoff = make_handoff()
+        fresh = run_breaking_candidate(
+            handoff,
+            **self.base_kwargs(draft_connector=draft, review_delivery=delivery),
+        )
+        self.assertEqual(fresh.application_execution, "COMPLETED")
+        # Preview failure is a Failed domain outcome, not application crash.
+        self.assertEqual(fresh.domain_outcome, "FAILED")
+        persisted = json.loads(Path(fresh.result_file).read_text(encoding="utf-8"))
+        self.assertEqual(persisted["domain_outcome"], "FAILED")
+        self.assertEqual(fresh.reason_code, persisted["reason_code"])
+        self.assertEqual(fresh.reason_text, persisted["reason_text"])
+        self.assertNotEqual(fresh.reason_code, "OK")
+
+        replay = run_breaking_candidate(
+            handoff,
+            **self.base_kwargs(
+                story_writer=Exploding("writer"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+                notifier=lambda _r: {"status": "ALREADY_SENT"},
+            ),
+        )
+        self.assertEqual(replay.domain_outcome, fresh.domain_outcome)
+        self.assertEqual(replay.reason_code, fresh.reason_code)
+        self.assertEqual(replay.reason_text, fresh.reason_text)
 
     def test_material_breaking_runs_story_first_without_main(self):
         delivery = FakeReviewDelivery(status="SENT")
@@ -189,6 +284,8 @@ class BreakingRunnerTests(unittest.TestCase):
         self.assertEqual(second.application_execution, "COMPLETED")
         self.assertEqual(second.run_id, first.run_id)
         self.assertEqual(second.notification_status, "ALREADY_SENT")
+        self.assertEqual(second.reason_code, first.reason_code)
+        self.assertEqual(second.reason_text, first.reason_text)
 
     def test_corrupt_persisted_result_fails_closed(self):
         handoff = make_handoff()

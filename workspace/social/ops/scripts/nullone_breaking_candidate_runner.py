@@ -31,6 +31,13 @@ module must never import OpenClaw internals, invoke `openclaw`, know
 Telegram/Zernio transport details, know cron syntax/job UUIDs, publish,
 approve, schedule, or create Zernio drafts. All provider/transport
 implementations are caller-injected.
+
+Dispatch-time dependency rule: `dependency_recheck` is caller-injected
+authoritative state only. Radar/LLM `story_safety.dependencies_available`
+is never used as a dispatch-time fallback. When the caller passes None,
+existing #63 fail-closed behavior applies
+(`DRAFT_DEPENDENCY_RECHECK_MISSING`). Production #80 currently supplies
+no fake recheck (#81 owns live DraftProvider readiness).
 """
 from __future__ import annotations
 
@@ -238,34 +245,20 @@ def run_breaking_candidate(
                 occurrence_id=occurrence_id,
                 result_file=str(persisted_file),
                 notification_status=notification_status,
-                reason_code=(
-                    "OK"
-                    if persisted["domain_outcome"] == "SUCCEEDED"
-                    else persisted["reason_code"]
-                ),
-                reason_text=(
-                    "Breaking orchestration completed (replay)."
-                    if persisted["domain_outcome"] == "SUCCEEDED"
-                    else persisted["reason_text"]
-                ),
+                reason_code=_reason_code_for_persisted(persisted),
+                reason_text=_reason_text_for_persisted(persisted),
                 breaking_outcome=None,
                 candidate_id=candidate_id,
             )
 
         observed_now = now if now is not None else _now_baku(timezone_name)
 
-        def _production_dependency_recheck(stage: str) -> bool:
-            if dependency_recheck is not None:
-                return bool(dependency_recheck(stage))
-            # Assessment-attested dependency state: the Radar assessment
-            # asserts its own Story draft dependencies, and the #33
-            # pipeline independently fails closed on actually missing
-            # media (RENDER_FAILED, no retry). Nothing is invented here.
-            return bool(
-                normalized.assessment.get("story_safety", {}).get(
-                    "dependencies_available", False
-                )
-            )
+        # Radar/LLM `story_safety.dependencies_available` is editorial
+        # evidence only — never authoritative dispatch-time recheck.
+        # Pass the caller-injected recheck through (including None) so
+        # existing #63 fail-closed behavior applies
+        # (DRAFT_DEPENDENCY_RECHECK_MISSING). Production #80 supplies no
+        # fake recheck; #81 owns live DraftProvider readiness.
 
         try:
             workflow_result = run_breaking_workflow(
@@ -278,7 +271,7 @@ def run_breaking_candidate(
                 story_verifier=story_verifier,
                 draft_connector=draft_connector,
                 review_delivery=review_delivery,
-                dependency_recheck=_production_dependency_recheck,
+                dependency_recheck=dependency_recheck,
                 main_candidate_provider=None,
                 main_final_verifier=None,
                 timezone_name=timezone_name,
@@ -379,13 +372,29 @@ def run_breaking_candidate(
             occurrence_id=occurrence_id,
             result_file=str(reloaded_file),
             notification_status=notification_status,
-            reason_code="OK",
-            reason_text="Breaking scheduled orchestration completed.",
+            reason_code=_reason_code_for_persisted(persisted_result),
+            reason_text=_reason_text_for_persisted(persisted_result),
             breaking_outcome=workflow_result.domain_outcome,
             candidate_id=candidate_id,
         )
     finally:
         os.close(lock_fd)
+
+
+def _reason_code_for_persisted(persisted: dict[str, Any]) -> str:
+    """Fresh and replay must agree: SUCCEEDED → OK, else persisted code."""
+
+    if persisted.get("domain_outcome") == "SUCCEEDED":
+        return "OK"
+    return str(persisted["reason_code"])
+
+
+def _reason_text_for_persisted(persisted: dict[str, Any]) -> str:
+    """Fresh and replay must agree on the same semantic reason text."""
+
+    if persisted.get("domain_outcome") == "SUCCEEDED":
+        return "Breaking scheduled orchestration completed."
+    return str(persisted["reason_text"])
 
 
 def _now_baku(timezone_name: str) -> datetime:
