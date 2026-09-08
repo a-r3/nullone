@@ -431,20 +431,45 @@ class CommitEdgeTests(unittest.TestCase):
     def test_canonical_spool_root_parent_symlink_escape_rejected(self):
         outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
-        real_handoffs = outside / "breaking-handoffs"
-        real_handoffs.mkdir()
+        outside_ops = outside / "ops"
+        real_handoffs = outside_ops / "breaking-handoffs"
+        real_handoffs.mkdir(parents=True)
         social_ops = self.root / "social/ops"
-        social_ops.mkdir(parents=True, exist_ok=True)
-        (social_ops / "breaking-handoffs").symlink_to(
-            real_handoffs, target_is_directory=True
-        )
+        if social_ops.exists():
+            shutil.rmtree(social_ops)
+        social_ops.parent.mkdir(parents=True, exist_ok=True)
+        social_ops.symlink_to(outside_ops, target_is_directory=True)
+
+        spool = self.root / "social/ops/breaking-handoffs"
+        self.assertFalse(spool.is_symlink())
+        self.assertTrue(spool.is_dir())
+        self.assertEqual(spool.resolve(), real_handoffs.resolve())
+        with self.assertRaises(ValueError):
+            spool.resolve().relative_to(self.root.resolve())
+
         with self.assertRaises(BreakingScanCommitError):
-            commit_assessment(
-                assessment_path=self.stage(make_assessment()),
+            record_empty_scan(
                 source="openclaw",
                 at=AT,
                 workspace_root=self.root,
             )
+        self.assertFalse((real_handoffs / f".scan-{SCAN_ID}.lock").exists())
+        self.assertFalse((real_handoffs / SCAN_ID).exists())
+        self.assertEqual(list(real_handoffs.iterdir()), [])
+
+        staged = outside_ops / "breaking-staging" / "staged.json"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(json.dumps(make_assessment()), encoding="utf-8")
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=staged,
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+        self.assertFalse((real_handoffs / f".scan-{SCAN_ID}.lock").exists())
+        self.assertFalse((real_handoffs / SCAN_ID).exists())
+        self.assertEqual(list(real_handoffs.iterdir()), [])
 
     def test_canonical_spool_root_parent_symlink_escape_record_empty_rejected(self):
         outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))

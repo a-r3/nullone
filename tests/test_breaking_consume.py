@@ -496,13 +496,21 @@ class BreakingConsumeTests(unittest.TestCase):
     def test_parent_component_symlink_mediated_spool_escape_fails_sweep(self):
         outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
-        real_spool = outside / "breaking-handoffs"
-        real_spool.mkdir()
+        outside_ops = outside / "ops"
+        real_spool = outside_ops / "breaking-handoffs"
+        real_spool.mkdir(parents=True)
         social_ops = self.root / "social/ops"
-        social_ops.mkdir(parents=True, exist_ok=True)
-        (social_ops / "breaking-handoffs").symlink_to(
-            real_spool, target_is_directory=True
-        )
+        if social_ops.exists():
+            shutil.rmtree(social_ops)
+        social_ops.symlink_to(outside_ops, target_is_directory=True)
+
+        spool = self.root / "social/ops/breaking-handoffs"
+        self.assertFalse(spool.is_symlink())
+        self.assertTrue(spool.is_dir())
+        self.assertEqual(spool.resolve(), real_spool.resolve())
+        with self.assertRaises(ValueError):
+            spool.resolve().relative_to(self.root.resolve())
+
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root,
             overrides=self.overrides(
