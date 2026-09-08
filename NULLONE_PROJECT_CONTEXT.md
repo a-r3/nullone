@@ -101,28 +101,51 @@ Safety-relevant unresolved deployment unknown:
 These are distinct from the completed #27–#36/#59/#61 repository components.
 The historical 2026-09-07 preflight record below is unchanged.
 
-### #79 Story production integration — IN PR (not merged, not deployed)
+### #79 Story production integration — CLOSED / COMPLETED
 
-#82 merged at `7a8aea4419ebdb86a0b4825870a179255eaa2f3d`. #79 repository
-implementation is now in PR (OPEN until merge): dedicated Story wake-up
-(`30 10,13,18,21 * * * Asia/Baku`, static
-`nullone-scheduled-wakeup.py story --source openclaw`, DESIRED / NOT
-DEPLOYED); four immutable Story schedule slots (10:30/13:30/18:30/21:30
-Asia/Baku) with latest-due-slot coalescing; structured Morning handoff
-`nullone.editorial-candidate-handoff.v1` per Baku date (Morning writes
-board + handoff; partial output never re-invokes the provider;
-HANDOFF_INCOMPLETE / PARTIAL_EDITORIAL_ARTIFACT_SET / HANDOFF_INVALID
-fail-closed; exact date/board binding; `story_eligible` requires PASS +
-READY); real `StructuredHandoffStoryProvider` (rank-ordered, READY-only,
-consumed-suppressed with fail-closed manifest reads, Markdown-free);
-exact production entrypoint with Morning #27 provenance gate
-(MORNING_SOURCE_UNPROVEN; replay authority first; provenance follows the
-invocation's own source namespace, never a hard-coded adapter); persisted
-#27 Story run outcomes; Draft
-Factory Story exclusivity (desired prompt change, not deployed). #79
-remains OPEN until merge. #80 remains OPEN / blocked by #79. #81 remains
-OPEN (live DraftProvider proof still unresolved). #37 remains OPEN /
-BLOCKED. No production activation occurred.
+#82 merged at `7a8aea4419ebdb86a0b4825870a179255eaa2f3d`. #79 is
+CLOSED/COMPLETED: PR #83 squash-merged on `main` as
+`3d88d142c0757f4cdb70ae3e7c5861e1efe115bf` (`Closes #79`). Production
+Story repository integration is complete:
+
+- Story windows: 10:30 / 13:30 / 18:30 / 21:30 Asia/Baku (dedicated
+  static wake-up `nullone-scheduled-wakeup.py story --source openclaw`,
+  latest-due-slot coalescing, replay-stable identity);
+- structured Morning handoff `nullone.editorial-candidate-handoff.v1` is
+  the authoritative normal Story source (Morning writes board + handoff;
+  partial output never re-invokes the provider; exact date/board
+  binding; `story_eligible` requires PASS + READY);
+- Story replay/provenance safety: persisted Story #27 replay authority
+  first (identity-checked, corrupt fails closed), Morning #27 provenance
+  before first execution only (source follows the invocation namespace);
+- consumed-state reads fail closed; provider is rank-ordered, READY-only,
+  Markdown-free;
+- Draft Factory normal Story ownership superseded by StoryWorkflow in
+  desired state (main FEED/CAROUSEL preserved; Breaking Story-first
+  unaffected);
+- DraftProvider live path still UNPROVEN (#81 untouched).
+
+NOT DEPLOYED — no Story job exists, no live handoff, no Story production
+run proof, no Zernio draft created, no Telegram preview sent, no OpenClaw
+changes.
+
+#80 is OPEN with its previous #79 dependency now satisfied:
+NEXT_ENGINEERING_TASK = #80 (Breaking production structured handoff).
+#81 is OPEN: DraftProvider live scheduled path remains UNPROVEN and still
+blocks READY. #37 is OPEN / BLOCKED; do not rerun yet.
+
+Current required order:
+
+```text
+#80 Breaking production integration
+→ #81 DraftProvider resolution/proof
+→ NEW read-only #37 preflight
+→ READY_FOR_CONTROLLED_DEPLOYMENT?
+→ controlled deployment only if READY
+```
+
+Historical 2026-09-07 preflight and 2026-09-08 BLOCKED preflight evidence
+are preserved unchanged.
 
 1. Repository engineering for #61 is merged (PR #77). Do not start
    production secret provisioning from this context record alone.
@@ -1370,7 +1393,7 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current Git desired-state M0 execution order — after 2026-09-08 #37 preflight BLOCKED
+### Current Git desired-state M0 execution order — after #79 merge (PR #83)
 
 1. #59 is CLOSED/COMPLETED: PR #75 squash-merged as
    `03603698291b2f6e5c0775067f15abb33f87fa63` (foundation PR #73
@@ -1383,12 +1406,14 @@ rewrite historical production evidence or authorize deployment.
    blockers had been closed; that preflight then discovered the new
    production-integration blockers #79/#80 and readiness gate #81. Do not
    provision secrets or mutate production from this context record alone.
-3. #79 Story production integration → #80 Breaking production integration
-   (#80 depends on #79) → #81 DraftProvider production-path
-   resolution/proof (#81 may be investigated in parallel where technically
-   independent, but must be resolved before READY) → NEW strictly read-only
-   #37 preflight (the historical 2026-09-07 preflight remains preserved as
-   historical evidence).
+3. #79 is CLOSED/COMPLETED: PR #83 squash-merged as
+   `3d88d142c0757f4cdb70ae3e7c5861e1efe115bf`. NEXT_ENGINEERING_TASK =
+   #80 Breaking production integration (previous #79 dependency
+   satisfied) → #81 DraftProvider production-path resolution/proof (#81
+   may be investigated in parallel where technically independent, but
+   must be resolved before READY) → NEW strictly read-only #37 preflight
+   (the historical 2026-09-07 preflight remains preserved as historical
+   evidence).
 4. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
    deployment under #37; otherwise report the exact blockers with no deploy.
    No ad-hoc deployment is permitted.
