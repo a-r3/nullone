@@ -27,6 +27,7 @@ from nullone_morning_workflow import (  # noqa: E402
     MorningWorkflowResult,
     run_morning_workflow,
 )
+from support.morning_artifacts import write_morning_artifacts  # noqa: E402
 from nullone_run_outcome import assess_run, emit_result_once, make_run_id, result_path  # noqa: E402
 from nullone_scheduler_invocation import compute_occurrence_id  # noqa: E402
 
@@ -57,9 +58,7 @@ class BakuDateDerivationTests(unittest.TestCase):
             trigger = make_trigger(scheduled_for="2026-09-08T21:30:00Z")
 
             def succeed():
-                board = root / "artifacts/social/research/daily/2026-09-09-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# board\n", encoding="utf-8")
+                write_morning_artifacts(root / "artifacts", "2026-09-09")
 
             result = run_morning_workflow(
                 trigger,
@@ -87,9 +86,7 @@ class ExactPersistedResultTests(unittest.TestCase):
             artifact_root = root / "artifacts"
 
             def succeed():
-                board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# board\n", encoding="utf-8")
+                write_morning_artifacts(artifact_root, "2026-09-08")
 
             result = run_morning_workflow(
                 trigger,
@@ -132,10 +129,7 @@ class ReplayNeverRepeatsProviderSideEffectsTests(unittest.TestCase):
 
             def succeed():
                 calls.append(1)
-                board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                if not board.is_file():
-                    board.write_text("# board\n", encoding="utf-8")
+                write_morning_artifacts(artifact_root, "2026-09-08")
 
             first = run_morning_workflow(
                 trigger, invoke_provider=succeed, artifact_root=artifact_root,
@@ -167,8 +161,7 @@ class DifferentOccurrenceIndependenceTests(unittest.TestCase):
 
             def succeed():
                 calls.append(1)
-                board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
+                board, _handoff = write_morning_artifacts(artifact_root, "2026-09-08")
                 # Each occurrence's board write is independent; simulate by
                 # always (re)writing distinct content per call count.
                 board.write_text(f"# board {len(calls)}\n", encoding="utf-8")

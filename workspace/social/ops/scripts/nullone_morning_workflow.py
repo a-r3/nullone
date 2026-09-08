@@ -346,6 +346,29 @@ def self_test() -> int:
     from nullone_run_outcome import assess_run, emit_result_once
     from nullone_scheduler_invocation import compute_occurrence_id
 
+    def _complete_morning_cycle(artifact_root: Path, board_date: str) -> None:
+        """Simulate one completed provider cycle: board AND handoff (#79)."""
+
+        board = artifact_root / f"social/research/daily/{board_date}-editorial-board.md"
+        board.parent.mkdir(parents=True, exist_ok=True)
+        board.write_text("# Editorial board\n", encoding="utf-8")
+        handoff = (
+            artifact_root
+            / f"social/research/daily/{board_date}-editorial-candidates.json"
+        )
+        handoff.write_text(
+            json.dumps(
+                {
+                    "schema": "nullone.editorial-candidate-handoff.v1",
+                    "contract_version": "1.0.0",
+                    "editorial_date": board_date,
+                    "board_path": f"social/research/daily/{board_date}-editorial-board.md",
+                    "candidates": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def make_trigger(**overrides: Any) -> dict[str, Any]:
         base = {
             "schema": "nullone.scheduler-invocation.v1",
@@ -399,9 +422,7 @@ def self_test() -> int:
 
         def succeed_immediately() -> None:
             calls.append(1)
-            board = case3_artifact_root / f"social/research/daily/{'2026-09-08'}-editorial-board.md"
-            board.parent.mkdir(parents=True, exist_ok=True)
-            board.write_text("# Editorial board\n", encoding="utf-8")
+            _complete_morning_cycle(case3_artifact_root, "2026-09-08")
 
         notifier_calls: list[dict[str, Any]] = []
 
@@ -436,9 +457,7 @@ def self_test() -> int:
 
         def succeed_boundary() -> None:
             calls2.append(1)
-            board = case4_artifact_root / "social/research/daily/2026-09-09-editorial-board.md"
-            board.parent.mkdir(parents=True, exist_ok=True)
-            board.write_text("# Editorial board\n", encoding="utf-8")
+            _complete_morning_cycle(case4_artifact_root, "2026-09-09")
 
         result = run_morning_workflow(
             boundary_trigger,
@@ -462,10 +481,7 @@ def self_test() -> int:
             retry_calls.append(1)
             if len(retry_calls) < 2:
                 raise ProviderUnreachableError("ENOTFOUND")
-            board = case5_artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-            board.parent.mkdir(parents=True, exist_ok=True)
-            if not board.is_file():
-                board.write_text("# Editorial board\n", encoding="utf-8")
+            _complete_morning_cycle(case5_artifact_root, "2026-09-08")
 
         result = run_morning_workflow(
             retry_trigger,
@@ -586,10 +602,7 @@ def self_test() -> int:
             with call_lock:
                 concurrent_calls.append(1)
             time.sleep(0.05)
-            board = case8_artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-            board.parent.mkdir(parents=True, exist_ok=True)
-            if not board.is_file():
-                board.write_text("# Editorial board\n", encoding="utf-8")
+            _complete_morning_cycle(case8_artifact_root, "2026-09-08")
 
         concurrent_notifications: list[str] = []
         notify_lock = threading.Lock()
@@ -740,10 +753,7 @@ def self_test() -> int:
 
         def succeed_unsafe() -> None:
             unsafe_calls.append(1)
-            board = artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
-            board.parent.mkdir(parents=True, exist_ok=True)
-            if not board.is_file():
-                board.write_text("# Editorial board\n", encoding="utf-8")
+            _complete_morning_cycle(artifact_root, "2026-09-08")
 
         FAKE_NOTIFIER_SECRET = "FAKE-NOTIFIER-SECRET-should-never-be-echoed"
 
@@ -776,9 +786,7 @@ def self_test() -> int:
             trigger = make_trigger(external_occurrence_id=f"openclaw-occ-morning-malformed-notifier-{index}")
 
             def succeed_case(_ar=case_artifact_root) -> None:
-                board = _ar / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                _complete_morning_cycle(_ar, "2026-09-08")
 
             result = run_morning_workflow(
                 trigger,
@@ -811,9 +819,7 @@ def self_test() -> int:
             )
 
             def succeed_case(_ar=case_artifact_root) -> None:
-                board = _ar / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                _complete_morning_cycle(_ar, "2026-09-08")
 
             result = run_morning_workflow(
                 trigger,
@@ -845,9 +851,7 @@ def self_test() -> int:
             trigger = make_trigger(external_occurrence_id=f"openclaw-occ-morning-legit-notifier-{index}")
 
             def succeed_case(_ar=case_artifact_root) -> None:
-                board = _ar / "social/research/daily/2026-09-08-editorial-board.md"
-                board.parent.mkdir(parents=True, exist_ok=True)
-                board.write_text("# Editorial board\n", encoding="utf-8")
+                _complete_morning_cycle(_ar, "2026-09-08")
 
             result = run_morning_workflow(
                 trigger,

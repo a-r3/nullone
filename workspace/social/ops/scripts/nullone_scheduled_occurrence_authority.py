@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from nullone_schedule_registry import ScheduleRegistryError, ScheduleSpec, get_schedule
+from nullone_schedule_registry import ScheduleRegistryError, ScheduleSpec, get_schedules
 from nullone_scheduler_invocation import (
     CONTRACT_VERSION,
     SCHEMA,
@@ -132,6 +132,24 @@ def _todays_scheduled_instant(spec: ScheduleSpec, observed_local: datetime) -> d
     )
 
 
+def _resolve_due_spec(
+    specs: tuple[ScheduleSpec, ...], observed_local: datetime
+) -> tuple[ScheduleSpec, datetime] | None:
+    """Latest same-date slot at or before the observation, or None.
+
+    Multiple missed theoretical slots coalesce into the single latest due
+    slot -- never N replay executions -- and an observation before the
+    first slot is simply early (never a previous-date backfill).
+    """
+
+    due: tuple[ScheduleSpec, datetime] | None = None
+    for spec in specs:
+        candidate = _todays_scheduled_instant(spec, observed_local)
+        if observed_local >= candidate:
+            due = (spec, candidate)
+    return due
+
+
 def resolve_scheduled_occurrence(
     *,
     workflow_id: str,
@@ -144,28 +162,30 @@ def resolve_scheduled_occurrence(
     Algorithm (see module docstring for the non-goals this deliberately
     excludes):
 
-    1. Load the exact `ScheduleSpec` for `workflow_id` (fails closed for an
-       unsupported workflow).
-    2. Convert `triggered_at` (canonical UTC) to the schedule's own local
+    1. Load the exact `ScheduleSpec` entries for `workflow_id` (fails
+       closed for an unsupported workflow).
+    2. Convert `triggered_at` (canonical UTC) to the schedules' own local
        timezone.
     3. Take that observation's local calendar date.
-    4. Construct *that same local date's* configured schedule instant.
-    5. If the observation is strictly before that instant: `NO_DUE_OCCURRENCE`.
-       This never falls back to a previous local date's slot -- a wake-up
-       that arrives before today's slot is simply early, not a signal to
-       backfill yesterday's occurrence.
-    6. Otherwise: today's slot is due. Convert it to canonical UTC as
-       `scheduled_for`, derive a deterministic `external_occurrence_id`
-       from `(schedule_id, scheduled_for)` only, compute `occurrence_id`
-       via the existing #65 contract rule, and return a
-       `nullone.scheduler-invocation.v1` payload already run through
-       `validate_payload()`.
+    4. Construct *that same local date's* configured schedule instants.
+    5. If the observation is strictly before the first instant:
+       `NO_DUE_OCCURRENCE`. This never falls back to a previous local
+       date's slot -- a wake-up that arrives before today's first slot is
+       simply early, not a signal to backfill yesterday's occurrence.
+    6. Otherwise the latest due slot is due: missed theoretical slots
+       coalesce into this one current evaluation, never N replays.
+       Convert it to canonical UTC as `scheduled_for`, derive a
+       deterministic `external_occurrence_id` from `(schedule_id,
+       scheduled_for)` only, compute `occurrence_id` via the existing #65
+       contract rule, and return a `nullone.scheduler-invocation.v1`
+       payload already run through `validate_payload()`.
 
     Same-day replays (09:07, 10:15, a manual 18:00 run) all recompute the
     identical `scheduled_for`/`external_occurrence_id`/`occurrence_id`
-    because those are derived only from the schedule slot, never from
-    `triggered_at` -- only `triggered_at` (and the diagnostic
-    `lateness_seconds`) changes between calls.
+    because those are derived only from the resolved schedule slot, never
+    from `triggered_at` -- only `triggered_at` (and the diagnostic
+    `lateness_seconds`) changes between calls. For multi-slot workflows a
+    later slot resolves to a new, distinct occurrence.
     """
 
     if not isinstance(workflow_id, str) or not workflow_id.strip():
@@ -176,29 +196,33 @@ def resolve_scheduled_occurrence(
     triggered_at_instant = _parse_triggered_at(triggered_at)
 
     try:
-        spec = get_schedule(workflow_id)
+        specs = get_schedules(workflow_id)
     except ScheduleRegistryError as exc:
         raise ScheduledOccurrenceAuthorityError(str(exc)) from exc
 
-    local_tz = ZoneInfo(spec.timezone_name)
+    local_tz = ZoneInfo(specs[0].timezone_name)
     observed_local = triggered_at_instant.astimezone(local_tz)
-    todays_scheduled_local = _todays_scheduled_instant(spec, observed_local)
 
-    local_scheduled_date = todays_scheduled_local.strftime("%Y-%m-%d")
-    local_scheduled_time = spec.local_time
-
-    if observed_local < todays_scheduled_local:
+    first_local = _todays_scheduled_instant(specs[0], observed_local)
+    if observed_local < first_local:
         return ScheduledOccurrenceResolution(
             status="NO_DUE_OCCURRENCE",
             workflow_id=workflow_id,
-            schedule_id=spec.schedule_id,
+            schedule_id=specs[0].schedule_id,
             source=source,
             triggered_at=triggered_at,
             reason_code="BEFORE_TODAYS_SCHEDULED_SLOT",
-            local_scheduled_date=local_scheduled_date,
-            local_scheduled_time=local_scheduled_time,
-            next_local_scheduled_instant=_format_canonical(todays_scheduled_local),
+            local_scheduled_date=first_local.strftime("%Y-%m-%d"),
+            local_scheduled_time=specs[0].local_time,
+            next_local_scheduled_instant=_format_canonical(first_local),
         )
+
+    due = _resolve_due_spec(specs, observed_local)
+    assert due is not None  # observed >= first slot, so a due slot exists
+    spec, todays_scheduled_local = due
+
+    local_scheduled_date = todays_scheduled_local.strftime("%Y-%m-%d")
+    local_scheduled_time = spec.local_time
 
     scheduled_for = _format_canonical(todays_scheduled_local)
     external_occurrence_id = f"{spec.schedule_id}@{scheduled_for}"
@@ -319,7 +343,7 @@ def self_test() -> int:
         {"workflow_id": "", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
         {"workflow_id": "morning-editorial", "source": "", "triggered_at": "2026-09-08T04:30:00Z"},
         {"workflow_id": "morning-editorial", "source": "openclaw", "triggered_at": "not-a-timestamp"},
-        {"workflow_id": "story", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
+        {"workflow_id": "breaking", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
         {"workflow_id": "unknown-workflow", "source": "openclaw", "triggered_at": "2026-09-08T04:30:00Z"},
     ):
         try:
@@ -327,6 +351,64 @@ def self_test() -> int:
             raise AssertionError(f"malformed input was not rejected: {bad_kwargs}")
         except ScheduledOccurrenceAuthorityError:
             pass
+
+    # 10. Story multi-slot windows (Asia/Baku, UTC+4): 10:29:59 -> NO_DUE.
+    story_early = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T06:29:59Z"
+    )
+    assert story_early.status == "NO_DUE_OCCURRENCE", story_early
+    assert story_early.schedule_id == "story.check-1030.v1", story_early
+
+    # 11. Story 10:30:00 exactly -> DUE occurrence A.
+    story_a = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T06:30:00Z"
+    )
+    assert story_a.status == "DUE", story_a
+    assert story_a.scheduled_for == "2026-09-08T06:30:00Z", story_a
+    assert story_a.schedule_id == "story.check-1030.v1", story_a
+
+    # 12. Story 10:45 -> same A (replay-stable).
+    story_a_replay = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T06:45:00Z"
+    )
+    assert story_a_replay.status == "DUE", story_a_replay
+    assert story_a_replay.scheduler_invocation["occurrence_id"] == story_a.scheduler_invocation["occurrence_id"]
+
+    # 13. Story 13:29:59 -> latest due remains A (coalesced, not a replay queue).
+    story_coalesced = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T09:29:59Z"
+    )
+    assert story_coalesced.status == "DUE", story_coalesced
+    assert story_coalesced.scheduler_invocation["occurrence_id"] == story_a.scheduler_invocation["occurrence_id"]
+
+    # 14. Story 13:30 -> new occurrence B; 18:30 -> C; 21:30 -> D.
+    story_b = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T09:30:00Z"
+    )
+    story_c = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T14:30:00Z"
+    )
+    story_d = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-08T17:30:00Z"
+    )
+    for slot in (story_b, story_c, story_d):
+        assert slot.status == "DUE", slot
+    assert story_b.schedule_id == "story.check-1330.v1", story_b
+    assert story_c.schedule_id == "story.check-1830.v1", story_c
+    assert story_d.schedule_id == "story.check-2130.v1", story_d
+    story_ids = {
+        story_a.scheduler_invocation["occurrence_id"],
+        story_b.scheduler_invocation["occurrence_id"],
+        story_c.scheduler_invocation["occurrence_id"],
+        story_d.scheduler_invocation["occurrence_id"],
+    }
+    assert len(story_ids) == 4, story_ids
+
+    # 15. Next day before 10:30 -> NO_DUE, no previous-day fallback.
+    story_next_early = resolve_scheduled_occurrence(
+        workflow_id="story", source="openclaw", triggered_at="2026-09-09T06:00:00Z"
+    )
+    assert story_next_early.status == "NO_DUE_OCCURRENCE", story_next_early
 
     print("SCHEDULED_OCCURRENCE_AUTHORITY_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

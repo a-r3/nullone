@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""M0 NullOne-owned schedule registry (#59 remaining scope).
+"""M0 NullOne-owned schedule registry (#59 remaining scope, extended by #79).
 
-Answers, for exactly the two currently reviewed/live daily cadences, "what
-is NullOne's own repo-owned daily schedule slot for this workflow" -- the
-narrow question `nullone_scheduled_occurrence_authority.py` needs before it
-can compute an exact `scheduled_for`.
+Answers, for each currently reviewed cadence, "what is NullOne's own
+repo-owned schedule slot for this workflow" -- the narrow question
+`nullone_scheduled_occurrence_authority.py` needs before it can compute
+an exact `scheduled_for`.
 
 This is deliberately NOT a scheduler, a cron engine, or a
 user-configurable schedule store:
@@ -12,9 +12,16 @@ user-configurable schedule store:
 - no cron-expression parsing;
 - no persistence, I/O, subprocess, or network;
 - no generic/arbitrary schedule registration API;
-- exactly one immutable `ScheduleSpec` per currently supported
-  `workflow_id`, reviewed and committed as code, not data a caller can
-  mutate at runtime.
+- immutable `ScheduleSpec` entries only, reviewed and committed as code,
+  not data a caller can mutate at runtime.
+
+Morning Editorial and Daily Analytics each own exactly one daily slot
+(unchanged by #79). Story owns exactly the four reviewed Story check
+windows from the accepted cadence policy (`CONTENT_STRATEGY.md` §10,
+already referenced by `docs/contracts/cadence-contract-v1.md`'s daypart
+table): 10:30 / 13:30 / 18:30 / 21:30 Asia/Baku. Multiple missed Story
+slots coalesce into one current evaluation -- the authority resolves the
+latest due slot for the observed local date, never a queue of N replays.
 
 A future schedule semantic change (a different local time, a different
 timezone, or any other change to what "the slot" means) must introduce a
@@ -30,9 +37,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # The M0-supported workflow_ids -- a strict subset of
 # `nullone_scheduler_invocation.ALLOWED_WORKFLOW_IDS` (which also includes
-# `"story"`/`"breaking"`, neither of which has a NullOne-owned daily
-# schedule slot in M0).
-SUPPORTED_WORKFLOW_IDS = frozenset({"morning-editorial", "daily-analytics"})
+# `"breaking"`, which has no NullOne-owned schedule slot in M0).
+SUPPORTED_WORKFLOW_IDS = frozenset({"morning-editorial", "daily-analytics", "story"})
+
+# Workflows with exactly one daily slot. `get_schedule()` serves these;
+# Morning/Daily resolution behavior is byte-for-behavior unchanged by #79.
+SINGLE_SLOT_WORKFLOW_IDS = frozenset({"morning-editorial", "daily-analytics"})
 
 _SCHEDULE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*\.v[0-9]+$")
 _LOCAL_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])$")
@@ -87,29 +97,43 @@ class ScheduleSpec:
         return time(hour=hour, minute=minute, second=second)
 
 
-def _build_registry(specs: tuple[ScheduleSpec, ...]) -> dict[str, ScheduleSpec]:
-    by_workflow: dict[str, ScheduleSpec] = {}
+def _build_registry(
+    specs: tuple[ScheduleSpec, ...],
+) -> dict[str, tuple[ScheduleSpec, ...]]:
+    by_workflow: dict[str, list[ScheduleSpec]] = {}
     seen_schedule_ids: set[str] = set()
 
     for spec in specs:
-        if spec.workflow_id in by_workflow:
-            raise ScheduleRegistryError(f"duplicate workflow_id definition: {spec.workflow_id!r}")
         if spec.schedule_id in seen_schedule_ids:
             raise ScheduleRegistryError(f"duplicate schedule_id: {spec.schedule_id!r}")
-        by_workflow[spec.workflow_id] = spec
         seen_schedule_ids.add(spec.schedule_id)
+        by_workflow.setdefault(spec.workflow_id, []).append(spec)
 
     missing = SUPPORTED_WORKFLOW_IDS - set(by_workflow)
     if missing:
         raise ScheduleRegistryError(f"missing schedule definition(s) for: {sorted(missing)}")
 
-    return by_workflow
+    for workflow_id, workflow_specs in by_workflow.items():
+        if workflow_id in SINGLE_SLOT_WORKFLOW_IDS and len(workflow_specs) != 1:
+            raise ScheduleRegistryError(
+                f"single-slot workflow must own exactly one slot: {workflow_id!r}"
+            )
+
+    return {
+        workflow_id: tuple(
+            sorted(workflow_specs, key=lambda spec: spec.local_time_of_day())
+        )
+        for workflow_id, workflow_specs in by_workflow.items()
+    }
 
 
 # The exact M0 reviewed/live cadence. See the #59 remaining-scope goal:
-# these two values reflect the schedules currently reviewed as live,
+# Morning/Daily values reflect the schedules currently reviewed as live,
 # expressed here as NullOne-owned repo config -- not read from OpenClaw,
-# not user-editable at runtime.
+# not user-editable at runtime. Story's four check windows are the
+# approved Story windows from CONTENT_STRATEGY.md §10 (already referenced
+# by the cadence contract's daypart table), expressed here as immutable
+# reviewed slots.
 _REGISTRY = _build_registry(
     (
         ScheduleSpec(
@@ -124,12 +148,51 @@ _REGISTRY = _build_registry(
             timezone_name="Asia/Baku",
             local_time="03:20:00",
         ),
+        ScheduleSpec(
+            workflow_id="story",
+            schedule_id="story.check-1030.v1",
+            timezone_name="Asia/Baku",
+            local_time="10:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="story",
+            schedule_id="story.check-1330.v1",
+            timezone_name="Asia/Baku",
+            local_time="13:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="story",
+            schedule_id="story.check-1830.v1",
+            timezone_name="Asia/Baku",
+            local_time="18:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="story",
+            schedule_id="story.check-2130.v1",
+            timezone_name="Asia/Baku",
+            local_time="21:30:00",
+        ),
     )
 )
 
 
 def get_schedule(workflow_id: str) -> ScheduleSpec:
-    """Return the exact `ScheduleSpec` for `workflow_id`, or fail closed."""
+    """Return the exact single `ScheduleSpec` for `workflow_id`.
+
+    Single-slot workflows only; fails closed for multi-slot or
+    unsupported workflows. Morning/Daily behavior is unchanged.
+    """
+
+    specs = get_schedules(workflow_id)
+    if len(specs) != 1:
+        raise ScheduleRegistryError(
+            f"workflow_id owns {len(specs)} slots, not one: {workflow_id!r}"
+        )
+    return specs[0]
+
+
+def get_schedules(workflow_id: str) -> tuple[ScheduleSpec, ...]:
+    """Return all `ScheduleSpec` entries for `workflow_id`, ascending by local time."""
 
     if not isinstance(workflow_id, str) or workflow_id not in _REGISTRY:
         raise ScheduleRegistryError(f"no NullOne-owned schedule for workflow_id: {workflow_id!r}")
@@ -149,7 +212,37 @@ def self_test() -> int:
 
     try:
         get_schedule("story")
-        raise AssertionError("unsupported workflow_id was not rejected")
+        raise AssertionError("multi-slot workflow_id was not rejected by get_schedule")
+    except ScheduleRegistryError:
+        pass
+
+    story_specs = get_schedules("story")
+    assert [spec.schedule_id for spec in story_specs] == [
+        "story.check-1030.v1",
+        "story.check-1330.v1",
+        "story.check-1830.v1",
+        "story.check-2130.v1",
+    ]
+    assert [spec.local_time for spec in story_specs] == [
+        "10:30:00",
+        "13:30:00",
+        "18:30:00",
+        "21:30:00",
+    ]
+    assert all(spec.timezone_name == "Asia/Baku" for spec in story_specs)
+
+    try:
+        _build_registry(
+            (
+                ScheduleSpec(
+                    workflow_id="morning-editorial",
+                    schedule_id="morning-editorial.daily.v1",
+                    timezone_name="Asia/Baku",
+                    local_time="08:30:00",
+                ),
+            )
+        )
+        raise AssertionError("missing workflow definition was not rejected")
     except ScheduleRegistryError:
         pass
 

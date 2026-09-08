@@ -20,6 +20,10 @@ COMMANDS = [
     [sys.executable, "tests/test_review_delivery.py"],
     [sys.executable, "tests/test_story_workflow.py"],
     [sys.executable, "tests/test_story_workflow_capability_negative.py"],
+    [sys.executable, "tests/test_editorial_candidate_handoff.py"],
+    [sys.executable, "tests/test_story_production_provider.py"],
+    [sys.executable, "tests/test_story_scheduled_workflow.py"],
+    [sys.executable, "tests/test_story_production_capability_negative.py"],
     [sys.executable, "tests/test_breaking_router.py"],
     [sys.executable, "tests/test_main_draft_pipeline.py"],
     [sys.executable, "tests/test_breaking_dispatch.py"],
@@ -165,6 +169,21 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_story_workflow.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_editorial_candidate_handoff.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_story_production_provider.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_story_scheduled_workflow.py",
         "self-test",
     ],
 ]

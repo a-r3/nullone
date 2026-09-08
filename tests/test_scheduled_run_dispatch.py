@@ -25,6 +25,7 @@ sys.path.insert(0, str(SCRIPTS))
 from nullone_scheduled_run_dispatch import (  # noqa: E402
     run_analytics_trigger,
     run_morning_trigger,
+    run_story_trigger,
 )
 
 
@@ -36,6 +37,11 @@ class RejectedTriggerNeverReachesProductionAdaptersTests(unittest.TestCase):
 
     def test_analytics_invalid_trigger_is_rejected_offline(self):
         result = run_analytics_trigger({"workflow_id": "daily-analytics"})
+        self.assertEqual(result.application_execution, "FAILED")
+        self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
+
+    def test_story_invalid_trigger_is_rejected_offline(self):
+        result = run_story_trigger({"workflow_id": "story"})
         self.assertEqual(result.application_execution, "FAILED")
         self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
 

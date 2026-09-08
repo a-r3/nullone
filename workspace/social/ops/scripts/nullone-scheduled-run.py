@@ -204,6 +204,15 @@ def self_test() -> int:
             board = morning_artifact_root / "social/research/daily/2026-09-08-editorial-board.md"
             board.parent.mkdir(parents=True, exist_ok=True)
             board.write_text("# Editorial board\n", encoding="utf-8")
+            handoff = morning_artifact_root / "social/research/daily/2026-09-08-editorial-candidates.json"
+            handoff.write_text(
+                '{"schema":"nullone.editorial-candidate-handoff.v1",'
+                '"contract_version":"1.0.0",'
+                '"editorial_date":"2026-09-08",'
+                '"board_path":"social/research/daily/2026-09-08-editorial-board.md",'
+                '"candidates":[]}',
+                encoding="utf-8",
+            )
 
         morning_result = run_morning_workflow(
             morning_trigger,

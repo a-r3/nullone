@@ -37,6 +37,28 @@ Before returning success, verify that this exact file exists:
 
 social/research/daily/YYYY-MM-DD-editorial-board.md
 
+The automation is also not complete until today's structured
+machine-readable candidate handoff has actually been written
+(machine-authored directly by THIS cycle, never parsed out of Markdown
+later):
+
+social/research/daily/YYYY-MM-DD-editorial-candidates.json
+
+Write it with schema `nullone.editorial-candidate-handoff.v1`
+(contract_version `1.0.0`): editorial_date, board_path, and the ordered
+candidate list with each candidate's stable candidate_id, rank (Morning's
+own accepted ordering, unique positive integers), topic, topic_cluster,
+content_type, angle, verification status, evidence_refs (non-empty),
+source_attribution, source_urls, editorial_status, and explicit
+story_eligible boolean. Set story_eligible=true only when ALL hold:
+VERIFICATION: PASS, editorial_status=READY, and the candidate is genuinely
+suitable for Story. Never mark NEW, RESEARCHING, DEFERRED, or REJECTED
+candidates Story-eligible. On a quiet news day write a valid handoff
+with an explicitly empty candidate list -- never fill quota with weak
+items. Never overwrite an already-completed handoff artifact for the same
+date with different content; if both artifacts already exist and are
+complete, the cycle is already done.
+
 If the cycle cannot be completed in this run, return BLOCKED with the
 specific reason instead of delegating or claiming background progress.
 

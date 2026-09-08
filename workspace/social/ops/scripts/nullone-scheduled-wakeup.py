@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""NullOne static wake-up edge (#59 remaining scope).
+"""NullOne static wake-up edge (#59 remaining scope, extended by #79).
 
     nullone-scheduled-wakeup.py morning --source openclaw
     nullone-scheduled-wakeup.py analytics --source openclaw
+    nullone-scheduled-wakeup.py story --source openclaw
 
 Replaces the disproven "OpenClaw directly supplies the scheduled
 occurrence" design (`docs/deployment/59-scheduled-workflows-deployment.md`'s
@@ -17,10 +18,10 @@ point of this replacement architecture:
         -> WAKE-UP ONLY
         -> nullone_scheduled_occurrence_authority.resolve_scheduled_occurrence
         -> exact NullOne-owned scheduled_for (or NO_DUE_OCCURRENCE)
-        -> nullone.scheduler-invocation.v1
-        -> MorningWorkflow / AnalyticsWorkflow (via
-           nullone_scheduled_run_dispatch, shared with
-           nullone-scheduled-run.py's exact-trigger-file path)
+-> nullone.scheduler-invocation.v1
+-> MorningWorkflow / AnalyticsWorkflow / StoryWorkflow (via
+   nullone_scheduled_run_dispatch, shared with
+   nullone-scheduled-run.py's exact-trigger-file path)
 
 Architectural split (intentional, not accidental):
 
@@ -77,11 +78,16 @@ from nullone_scheduled_occurrence_authority import (
     ScheduledOccurrenceResolution,
     resolve_scheduled_occurrence,
 )
-from nullone_scheduled_run_dispatch import run_analytics_trigger, run_morning_trigger
+from nullone_scheduled_run_dispatch import (
+    run_analytics_trigger,
+    run_morning_trigger,
+    run_story_trigger,
+)
 
 WORKFLOW_BY_COMMAND = {
     "morning": "morning-editorial",
     "analytics": "daily-analytics",
+    "story": "story",
 }
 
 # Current M0 production wake-up edge allowlist only. Generic
@@ -96,6 +102,7 @@ REASON_AUTHORITY_REJECTED = "WAKEUP_AUTHORITY_REJECTED"
 _DISPATCH_BY_WORKFLOW: dict[str, Callable[[dict[str, Any]], Any]] = {
     "morning-editorial": run_morning_trigger,
     "daily-analytics": run_analytics_trigger,
+    "story": run_story_trigger,
 }
 
 
@@ -254,7 +261,11 @@ def self_test() -> int:
         calls.append(trigger)
         return _FakeMorningResult()
 
-    fixed = {"morning-editorial": fake_dispatch, "daily-analytics": fake_dispatch}
+    fixed = {
+        "morning-editorial": fake_dispatch,
+        "daily-analytics": fake_dispatch,
+        "story": fake_dispatch,
+    }
 
     # 1. Before today's slot -> NO_DUE, exit 0, zero dispatch calls.
     exit_code = wake_up(
@@ -372,6 +383,60 @@ def self_test() -> int:
     assert exit_code != 0
     assert len(calls) == before
 
+    # 10. Story: before the first check window -> NO_DUE, exit 0.
+    story_calls: list[dict[str, Any]] = []
+
+    def fake_story_dispatch(trigger: dict[str, Any]) -> _FakeMorningResult:
+        story_calls.append(trigger)
+        return _FakeMorningResult()
+
+    story_fixed = {
+        "morning-editorial": fake_dispatch,
+        "daily-analytics": fake_dispatch,
+        "story": fake_story_dispatch,
+    }
+    exit_code = wake_up(
+        "story",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 8, 6, 29, 59, tzinfo=timezone.utc),
+        dispatch_by_workflow=story_fixed,
+    )
+    assert exit_code == 0
+    assert len(story_calls) == 0
+
+    # 11. Story 10:30 -> DUE; 10:45 replays the same occurrence; 13:30 is new.
+    exit_code = wake_up(
+        "story",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 8, 6, 30, 0, tzinfo=timezone.utc),
+        dispatch_by_workflow=story_fixed,
+    )
+    assert exit_code == 0
+    assert len(story_calls) == 1
+    assert story_calls[0]["workflow_id"] == "story"
+    assert story_calls[0]["scheduled_for"] == "2026-09-08T06:30:00Z"
+
+    exit_code = wake_up(
+        "story",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 8, 6, 45, 0, tzinfo=timezone.utc),
+        dispatch_by_workflow=story_fixed,
+    )
+    assert exit_code == 0
+    assert len(story_calls) == 2
+    assert story_calls[1]["occurrence_id"] == story_calls[0]["occurrence_id"]
+
+    exit_code = wake_up(
+        "story",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 8, 9, 30, 0, tzinfo=timezone.utc),
+        dispatch_by_workflow=story_fixed,
+    )
+    assert exit_code == 0
+    assert len(story_calls) == 3
+    assert story_calls[2]["occurrence_id"] != story_calls[0]["occurrence_id"]
+    assert story_calls[2]["scheduled_for"] == "2026-09-08T09:30:00Z"
+
     print("SCHEDULED_WAKEUP_CLI_SELF_TEST=PASS")
     print("NO_OPENCLAW_EXECUTION=TRUE")
     print("NO_ZERNIO_CALL=TRUE")
@@ -393,6 +458,9 @@ def main() -> int:
 
     a = sub.add_parser("analytics")
     a.add_argument("--source", required=True)
+
+    s = sub.add_parser("story")
+    s.add_argument("--source", required=True)
 
     args = parser.parse_args()
 
