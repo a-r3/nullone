@@ -463,6 +463,169 @@ class BreakingConsumeTests(unittest.TestCase):
         self.assertNotIn(marker, printed)
         self.assertIn("SWEEP_RUNTIME_FAILED", printed)
 
+    def test_direct_canonical_spool_root_symlink_fails_sweep(self):
+        real_spool = self.root / "real-breaking-handoffs"
+        real_spool.mkdir(parents=True)
+        spool_link = self.root / "social/ops/breaking-handoffs"
+        spool_link.parent.mkdir(parents=True, exist_ok=True)
+        spool_link.symlink_to(real_spool)
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assertEqual(report["sweep_status"], "FAILED")
+        self.assertEqual(report["reason_code"], _consume.SWEEP_AUTHORITY_CORRUPT)
+
+    def test_broken_canonical_spool_root_symlink_fails_sweep(self):
+        spool_link = self.root / "social/ops/breaking-handoffs"
+        spool_link.parent.mkdir(parents=True, exist_ok=True)
+        spool_link.symlink_to(self.root / "does-not-exist")
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assertEqual(report["sweep_status"], "FAILED")
+        self.assertEqual(report["reason_code"], _consume.SWEEP_AUTHORITY_CORRUPT)
+
+    def test_parent_component_symlink_mediated_spool_escape_fails_sweep(self):
+        outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        real_spool = outside / "breaking-handoffs"
+        real_spool.mkdir()
+        social_ops = self.root / "social/ops"
+        social_ops.mkdir(parents=True, exist_ok=True)
+        (social_ops / "breaking-handoffs").symlink_to(
+            real_spool, target_is_directory=True
+        )
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assertEqual(report["sweep_status"], "FAILED")
+        self.assertEqual(report["reason_code"], _consume.SWEEP_AUTHORITY_CORRUPT)
+
+    def test_scan_directory_symlink_fails_sweep(self):
+        self.commit()
+        scan_dir = self.scan_dir()
+        real_scan = self.root / "real-scan-dir"
+        real_scan.mkdir()
+        shutil.rmtree(scan_dir)
+        scan_dir.symlink_to(real_scan, target_is_directory=True)
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assert_failed_authority(report, reason="SCAN_DIRECTORY_SYMLINK")
+
+    def test_cross_scan_handoff_under_scan_b_receipt_fails_sweep(self):
+        scan_a_id = SCAN_ID
+        scan_b_id = "breaking-radar.scan-1430.v1@2026-09-08T10:30:00Z"
+        assessment = make_assessment(candidate_id="acme-widget-launch")
+        external_id = _scan.compute_candidate_external_occurrence_id(
+            scan_a_id, assessment["candidate_id"]
+        )
+
+        scan_b_dir = self.root / "social/ops/breaking-handoffs" / scan_b_id
+        scan_b_dir.mkdir(parents=True, exist_ok=True)
+        receipt = {
+            "schema": "nullone.breaking-radar-scan-receipt.v1",
+            "contract_version": "1.0.0",
+            "source_occurrence_id": scan_b_id,
+            "scheduled_for": "2026-09-08T10:30:00Z",
+            "source": "openclaw",
+            "status": "CANDIDATES_EMITTED",
+            "candidates": [external_id],
+            "created_at": "2026-09-08T10:35:00Z",
+        }
+        (scan_b_dir / "scan-receipt.json").write_text(
+            json.dumps(receipt), encoding="utf-8"
+        )
+
+        handoff = {
+            "schema": "nullone.breaking-radar-handoff.v1",
+            "contract_version": "1.0.0",
+            "occurrence": {
+                "source_occurrence_id": scan_a_id,
+                "scheduled_for": "2026-09-08T07:30:00Z",
+                "triggered_at": "2026-09-08T07:35:00Z",
+            },
+            "assessment": assessment,
+        }
+        (scan_b_dir / f"{external_id}.json").write_text(
+            json.dumps(handoff), encoding="utf-8"
+        )
+
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assertEqual(report["sweep_status"], "FAILED")
+        reasons = {entry["reason"] for entry in report["establishment_failed"]}
+        self.assertIn("HANDOFF_SCAN_IDENTITY_MISMATCH", reasons)
+
+    def test_handoff_scheduled_for_mismatch_fails_sweep(self):
+        committed = self.commit()
+        handoff_path = self.root / committed["handoff_path"]
+        handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+
+        # Mutate scheduled_for in the handoff but keep receipt unchanged.
+        handoff["occurrence"]["scheduled_for"] = "2026-09-08T11:30:00Z"
+        handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
+
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assertEqual(report["sweep_status"], "FAILED")
+        reasons = {entry["reason"] for entry in report["establishment_failed"]}
+        self.assertIn("HANDOFF_SCAN_IDENTITY_MISMATCH", reasons)
+
+    def test_listed_filename_computed_external_id_binding_fails(self):
+        committed = self.commit()
+        external_id = committed["external_occurrence_id"]
+        handoff_path = self.root / committed["handoff_path"]
+        receipt_path = self.scan_dir() / "scan-receipt.json"
+
+        # Rename handoff to a bogus filename and update receipt to list that
+        # bogus filename. Content is unchanged => computed external ID (from
+        # source_occurrence_id + candidate_id) still differs from the bogus
+        # filename. This exercises the filename/computed binding before runner.
+        bogus_id = "breaking-candidate-000000000000000000000001"
+        bogus_path = handoff_path.parent / f"{bogus_id}.json"
+        handoff_path.rename(bogus_path)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["candidates"] = [bogus_id]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assertEqual(report["sweep_status"], "FAILED")
+        reasons = {entry["reason"] for entry in report["establishment_failed"]}
+        self.assertIn("FILENAME_CONTENT_MISMATCH", reasons)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

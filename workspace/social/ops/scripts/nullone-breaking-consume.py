@@ -170,6 +170,27 @@ def _authority_fail(
     )
 
 
+def _canonical_spool_containment_ok(root: Path, spool: Path) -> bool:
+    """Canonical spool-root containment check (mirrors commit-side _assert_canonical_root).
+
+    Rejects a direct spool-root symlink, a broken spool-root symlink, and any
+    parent-component symlink-mediated escape that resolves outside the
+    workspace. A missing real directory (not a symlink, not an escape) is
+    clean and returns True so the caller can treat it as an empty spool.
+    """
+
+    if spool.is_symlink():
+        return False
+    resolved = spool.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return False
+    if spool.exists() and not resolved.is_dir():
+        return False
+    return True
+
+
 def _load_authoritative_receipt(
     scan_dir: Path, *, root: Path
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -266,15 +287,15 @@ def sweep_breaking_handoffs(
     if overrides:
         deps.update(overrides)
 
-    if not spool.is_dir():
-        return report
-
-    if spool.is_symlink():
+    if not _canonical_spool_containment_ok(root, spool):
         return _fail_sweep(
             report,
             reason_code=SWEEP_AUTHORITY_CORRUPT,
             reason_text=SWEEP_AUTHORITY_CORRUPT_TEXT,
         )
+
+    if not spool.exists():
+        return report
 
     scan_dirs = []
     for p in spool.iterdir():

@@ -9,6 +9,7 @@ empty scans, and that Markdown reports alone can never become handoffs.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -384,6 +385,110 @@ class CommitEdgeTests(unittest.TestCase):
         preserved = json.loads((self.root / first["handoff_path"]).read_text(encoding="utf-8"))
         self.assertEqual(preserved["occurrence"]["triggered_at"], t1)
         self.assertEqual(preserved["assessment"]["topic"], "Acme Widget launch")
+
+    def test_canonical_staging_root_direct_symlink_rejected(self):
+        real_staging = self.root / "real-breaking-staging"
+        real_staging.mkdir(parents=True)
+        staging_link = self.root / "social/ops/breaking-staging"
+        staging_link.parent.mkdir(parents=True, exist_ok=True)
+        staging_link.symlink_to(real_staging)
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=staging_link / "staged.json",
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_canonical_staging_root_parent_symlink_escape_rejected(self):
+        outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        social = self.root / "social"
+        social.mkdir(parents=True, exist_ok=True)
+        (social / "ops").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path="staged.json",
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_canonical_spool_root_direct_symlink_rejected(self):
+        real_handoffs = self.root / "real-breaking-handoffs"
+        real_handoffs.mkdir(parents=True)
+        spool_link = self.root / "social/ops/breaking-handoffs"
+        spool_link.parent.mkdir(parents=True, exist_ok=True)
+        spool_link.symlink_to(real_handoffs)
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=self.stage(make_assessment()),
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_canonical_spool_root_parent_symlink_escape_rejected(self):
+        outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        real_handoffs = outside / "breaking-handoffs"
+        real_handoffs.mkdir()
+        social_ops = self.root / "social/ops"
+        social_ops.mkdir(parents=True, exist_ok=True)
+        (social_ops / "breaking-handoffs").symlink_to(
+            real_handoffs, target_is_directory=True
+        )
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=self.stage(make_assessment()),
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+
+    def test_canonical_spool_root_parent_symlink_escape_record_empty_rejected(self):
+        outside = Path(tempfile.mkdtemp(dir=str(self.root.parent)))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        social = self.root / "social"
+        social.mkdir(parents=True, exist_ok=True)
+        (social / "ops").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(BreakingScanCommitError):
+            record_empty_scan(
+                source="openclaw", at=AT, workspace_root=self.root
+            )
+
+    def test_scan_directory_symlink_rejected_before_mutation(self):
+        scan_dir = self.root / "social/ops/breaking-handoffs" / SCAN_ID
+        scan_dir.mkdir(parents=True, exist_ok=True)
+        real_scan = self.root / "real-scan-dir"
+        real_scan.mkdir()
+        shutil.rmtree(scan_dir)
+        scan_dir.symlink_to(real_scan, target_is_directory=True)
+        with self.assertRaises(BreakingScanCommitError):
+            commit_assessment(
+                assessment_path=self.stage(make_assessment()),
+                source="openclaw",
+                at=AT,
+                workspace_root=self.root,
+            )
+        self.assertFalse((real_scan / "scan-receipt.json").exists())
+        self.assertFalse((real_scan / SCAN_ID).exists())
+
+    def test_normal_real_directories_unchanged(self):
+        committed = commit_assessment(
+            assessment_path=self.stage(make_assessment()),
+            source="openclaw",
+            at=AT,
+            workspace_root=self.root,
+        )
+        target = self.root / committed["handoff_path"]
+        self.assertTrue(target.is_file())
+        scan_dir = self.root / "social/ops/breaking-handoffs" / SCAN_ID
+        self.assertTrue(scan_dir.is_dir())
+        self.assertFalse(scan_dir.is_symlink())
+        staging = self.root / "social/ops/breaking-staging"
+        self.assertTrue(staging.is_dir())
+        self.assertFalse(staging.is_symlink())
 
 
 if __name__ == "__main__":
