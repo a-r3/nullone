@@ -103,7 +103,13 @@ Commit edge (`nullone-breaking-scan.py`):
 - Concurrent A/B candidate commits both land; the receipt lists both
   once.
 - Identical recommit is idempotent and repairs a missing receipt
-  listing; conflicting content → `COMMIT_CONFLICT`.
+  listing. If an orphan already occupies the deterministic
+  external-occurrence path with the same scan identity, same
+  `candidate_id`, same exact assessment, and same external occurrence
+  ID, a later retry may differ only in `occurrence.triggered_at`: the
+  **original committed handoff bytes are preserved** (triggered_at is
+  never rewritten) and the receipt listing is repaired under the scan
+  lock. Assessment mutation still → `COMMIT_CONFLICT`.
 
 Canonical path:
 `social/ops/breaking-handoffs/<source_occurrence_id>/<candidate-external-id>.json`
@@ -124,33 +130,40 @@ For every scan directory:
    scheduled_for, source, status, candidates, created_at.
 3. Receipt source must be supported; directory name must match
    `source_occurrence_id`.
+4. Registry-backed identity:
+   `validate_committed_scan_identity` calls
+   `resolve_radar_scan(source=…, triggered_at=receipt.scheduled_for)`
+   and requires a DUE resolution whose `scheduled_for` /
+   `source_occurrence_id` exactly match the receipt (and directory).
+   Fabricated names (e.g. `breaking-radar.fake-slot.v1@…`) fail even
+   when the receipt mirrors them. Historical legitimate scans validate
+   deterministically (no wall-clock dependency).
 
 `NO_MATERIAL_DEVELOPMENT`: candidates must be `[]`; execute zero
-handoffs; any handoff JSON present is an inconsistency and is never
-executable.
+handoffs; any handoff JSON present is an authoritative inconsistency.
 
 `CANDIDATES_EMITTED`: consume **only** exact external occurrence IDs
 listed in `receipt.candidates`; each listed ID must have exactly one
 matching regular non-symlink JSON file; unlisted handoffs are not
-executable; missing listed files are safety-relevant inconsistencies;
-filename/content ID mismatch fails closed.
+executable (non-authoritative skip); missing listed files and listed
+file integrity failures are authoritative corruption.
 
 Sweep result contract (explicit, not counts-only):
 
 - `sweep_status`: `COMPLETED` | `FAILED`
 - `reason_code` / `reason_text` (stable generic text; raw exception
-  messages never exposed)
+  messages / file contents never exposed)
 - `processed` / `skipped_invalid` / `establishment_failed`
 
-Only safely classified input defects may be skipped per-file
-(`HANDOFF_REJECTED`, `CANDIDATE_ID_REJECTED`, receipt/file integrity
-rejections). Unexpected runtime/programming/orchestration exceptions
-and runner establishment failures
-(`RESULT_MISSING_OR_CORRUPT`, `RESULT_IDENTITY_MISMATCH`,
-`RESULT_COMMIT_FAILED`, `NOTIFICATION_STATE_UNSAFE`,
-`NOTIFICATION_RESULT_INVALID`, `RUNTIME_CRASHED`) fail the sweep:
-CLI exits non-zero; scheduler-native `failureAlert` owns
-execution-level failure. Orphan handoffs are never executable.
+**Authoritative spool corruption → sweep FAILED / CLI non-zero** so
+scheduler-native `failureAlert` can own it. This includes at least:
+`RECEIPT_MISSING`, `RECEIPT_REJECTED`, `RECEIPT_SOURCE_UNSUPPORTED`,
+`RECEIPT_IDENTITY_MISMATCH`, `RECEIPT_INCONSISTENT`,
+`CANDIDATE_FILE_MISSING`, `CANDIDATE_PATH_REJECTED`, and listed-candidate
+`UNREADABLE` / `NOT_A_HANDOFF` / `FILENAME_CONTENT_MISMATCH` /
+`HANDOFF_REJECTED` / `CANDIDATE_ID_REJECTED`. Unlisted extra junk never
+executes and does not grant false authority. Unexpected runner crashes
+and runner establishment failures likewise fail the sweep.
 
 ## 7. Production runner
 
@@ -201,17 +214,24 @@ their own admission into the shared #33 core.
 
 ## 10. Failure and recovery
 
-- Handoff persisted, crash before receipt listing → orphan is not
-  executable until a recommit repairs the receipt; next consumer sweep
-  never invents authority from directory contents.
+- Handoff written, crash before receipt listing → orphan is not
+  executable. A later recommit of the same scan + same candidate + same
+  assessment may use a different `triggered_at`: the original orphan
+  handoff bytes are preserved (triggered_at not rewritten), the receipt
+  listing is repaired, and the consumer may then process once.
+  Assessment mutation still conflicts. Directory contents alone never
+  grant authority.
 - Handoff + receipt committed, crash before dispatch → next consumer
   sweep processes listed candidates exactly once (#27 result existence =
   idempotence).
 - #27 persisted, crash before CLI return → replay returns the
-  authoritative result with identical reason semantics.
-- Malformed/unreadable/misnamed/unlisted spool files → SKIPPED_INVALID
-  (input defects only); unexpected runner crashes → sweep FAILED /
-  non-zero CLI.
+  authoritative result with identical reason and notification-error
+  classification semantics (notifier raise → `NOTIFICATION_STATE_UNSAFE`;
+  malformed notifier return → `NOTIFICATION_RESULT_INVALID`).
+- Authoritative spool corruption (missing/corrupt/contradictory receipt
+  or listed-candidate integrity failure) → sweep FAILED / non-zero CLI.
+  Unlisted extras are non-authoritative skips. Unexpected runner crashes
+  → sweep FAILED / non-zero CLI.
 - Deployment delta for #37: install new/changed scripts + prompts,
   create consumer job, preserve ledgers/manifests/state/jobs; rollback
   restores the Markdown-only prompt/job, removes the consumer edge,

@@ -148,17 +148,23 @@ slug provenance not independently recomputed); exact
 deterministic edge under staging-root containment + per-scan `fcntl`
 serialization (Markdown stays a non-authoritative sibling; the scan
 receipt is the authoritative commit record — orphan handoffs are not
-executable; missing/corrupt receipts have no source fallback); spool
+executable; a later recommit with a different retry `triggered_at`
+preserves the original orphan handoff and repairs the receipt, while
+assessment mutation still conflicts; missing/corrupt/contradictory
+authoritative spool state fails the consumer sweep non-zero with no
+source fallback; scan identity is registry-backed via
+`resolve_radar_scan`); spool
 `social/ops/breaking-handoffs/<scan>/<candidate>.json`; static consumer
 sweep (desired `45 11,14,17,20,23 * * * Asia/Baku`, NOT DEPLOYED) that
-consumes only receipt-listed candidates, fails closed on unexpected
-runner crashes (non-zero CLI), and never treats establishment failures
-as ordinary processed work; Story-first preserved with no main provider;
-Radar/LLM dependency attestation is not dispatch-time recheck (production
-#80 passes no fake recheck; #81 remains OPEN). Fresh/replay #27 reason
-semantics are identical. #80 remains OPEN until merge. #37 remains
-OPEN / BLOCKED. No production activation occurred; no synthetic Breaking
-event. **NOT DEPLOYED.**
+consumes only receipt-listed candidates, fails closed on authoritative
+corruption and unexpected runner crashes (non-zero CLI), and never
+treats establishment failures as ordinary processed work; Story-first
+preserved with no main provider; Radar/LLM dependency attestation is not
+dispatch-time recheck (production #80 passes no fake recheck; #81
+remains OPEN). Fresh/replay #27 reason and notification-error
+classification semantics are identical. #80 remains OPEN until merge.
+#37 remains OPEN / BLOCKED. No production activation occurred; no
+synthetic Breaking event. **NOT DEPLOYED.**
 
 Current required order:
 

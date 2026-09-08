@@ -127,6 +127,49 @@ def validate_candidate_id(candidate_id: Any) -> str:
     return candidate_id
 
 
+def validate_committed_scan_identity(
+    *,
+    source: str,
+    scheduled_for: str,
+    source_occurrence_id: str,
+    scan_directory_name: str,
+) -> RadarScanResolution:
+    """Prove a committed scan receipt names a real reviewed Radar slot.
+
+    Does not depend on wall clock: `resolve_radar_scan` is invoked with
+    `triggered_at=scheduled_for` so historical legitimate scans validate
+    deterministically against the `breaking-radar` ScheduleSpec registry.
+    Fabricated schedule IDs or mismatched slot times fail closed even when
+    a receipt mirrors them exactly.
+    """
+
+    if not isinstance(scan_directory_name, str) or not scan_directory_name:
+        raise BreakingScanAuthorityError("scan directory name must be non-empty")
+    if scan_directory_name != source_occurrence_id:
+        raise BreakingScanAuthorityError(
+            "scan directory name does not match source_occurrence_id"
+        )
+    if not isinstance(scheduled_for, str) or not scheduled_for:
+        raise BreakingScanAuthorityError("scheduled_for must be non-empty")
+    if not isinstance(source_occurrence_id, str) or not source_occurrence_id:
+        raise BreakingScanAuthorityError("source_occurrence_id must be non-empty")
+
+    resolution = resolve_radar_scan(source=source, triggered_at=scheduled_for)
+    if resolution.status != "DUE":
+        raise BreakingScanAuthorityError(
+            "committed scan does not resolve to a DUE Radar slot"
+        )
+    if resolution.scheduled_for != scheduled_for:
+        raise BreakingScanAuthorityError(
+            "committed scheduled_for does not match registry-backed resolution"
+        )
+    if resolution.source_occurrence_id != source_occurrence_id:
+        raise BreakingScanAuthorityError(
+            "committed source_occurrence_id does not match registry-backed resolution"
+        )
+    return resolution
+
+
 def resolve_radar_scan(
     *,
     source: str,
@@ -235,6 +278,53 @@ def self_test() -> int:
             raise AssertionError(f"malformed input was not rejected: {bad_kwargs}")
         except BreakingScanAuthorityError:
             pass
+
+    # Registry-backed committed identity for all five reviewed slots.
+    for triggered in (
+        "2026-09-08T07:30:00Z",
+        "2026-09-08T10:30:00Z",
+        "2026-09-08T13:30:00Z",
+        "2026-09-08T16:30:00Z",
+        "2026-09-08T19:30:00Z",
+    ):
+        due = resolve_radar_scan(source="openclaw", triggered_at=triggered)
+        assert due.status == "DUE", due
+        validate_committed_scan_identity(
+            source="openclaw",
+            scheduled_for=due.scheduled_for,
+            source_occurrence_id=due.source_occurrence_id,
+            scan_directory_name=due.source_occurrence_id,
+        )
+    try:
+        validate_committed_scan_identity(
+            source="openclaw",
+            scheduled_for="2026-09-08T07:30:00Z",
+            source_occurrence_id="breaking-radar.fake-slot.v1@2026-09-08T07:30:00Z",
+            scan_directory_name="breaking-radar.fake-slot.v1@2026-09-08T07:30:00Z",
+        )
+        raise AssertionError("fake schedule_id accepted")
+    except BreakingScanAuthorityError:
+        pass
+    try:
+        validate_committed_scan_identity(
+            source="openclaw",
+            scheduled_for="2026-09-08T10:30:00Z",
+            source_occurrence_id="breaking-radar.scan-1130.v1@2026-09-08T10:30:00Z",
+            scan_directory_name="breaking-radar.scan-1130.v1@2026-09-08T10:30:00Z",
+        )
+        raise AssertionError("wrong scheduled_for for schedule_id accepted")
+    except BreakingScanAuthorityError:
+        pass
+    try:
+        validate_committed_scan_identity(
+            source="openclaw",
+            scheduled_for="2026-09-08T07:30:00Z",
+            source_occurrence_id="breaking-radar.scan-1130.v1@2026-09-08T07:30:00Z",
+            scan_directory_name="breaking-radar.scan-1430.v1@2026-09-08T10:30:00Z",
+        )
+        raise AssertionError("directory/receipt mismatch accepted")
+    except BreakingScanAuthorityError:
+        pass
 
     print("BREAKING_SCAN_AUTHORITY_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

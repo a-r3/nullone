@@ -2,8 +2,9 @@
 """Breaking spool consumer tests (#80).
 
 Proves receipt-authoritative sweep: committed handoffs processed only
-when listed by a strict scan receipt, orphan/unlisted/missing-receipt
-paths never execute, unexpected runner crashes fail the CLI closed, and
+when listed by a strict registry-backed scan receipt, orphan/unlisted/
+missing-receipt paths never execute, authoritative spool corruption fails
+the sweep non-zero, unexpected runner crashes fail the CLI closed, and
 replay-safe second sweeps remain idempotent.
 """
 from __future__ import annotations
@@ -26,6 +27,10 @@ SCRIPTS = ROOT / "workspace/social/ops/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import nullone_bridge_common as bridge_common  # noqa: E402
+from nullone_breaking_scan_authority import (  # noqa: E402
+    BreakingScanAuthorityError,
+    validate_committed_scan_identity,
+)
 from nullone_review_delivery import FakeReviewDelivery  # noqa: E402
 from nullone_story_pipeline import numeric_scope_verifier  # noqa: E402
 
@@ -132,6 +137,13 @@ class BreakingConsumeTests(unittest.TestCase):
     def scan_dir(self) -> Path:
         return self.root / "social/ops/breaking-handoffs" / SCAN_ID
 
+    def assert_failed_authority(self, report, *, reason):
+        self.assertEqual(report["sweep_status"], "FAILED")
+        self.assertEqual(report["reason_code"], "SWEEP_AUTHORITY_CORRUPT")
+        self.assertNotIn("FAKE_SECRET", json.dumps(report))
+        reasons = {entry["reason"] for entry in report["establishment_failed"]}
+        self.assertIn(reason, reasons)
+
     def test_empty_spool_sweeps_clean(self):
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root, overrides=self.overrides()
@@ -159,41 +171,36 @@ class BreakingConsumeTests(unittest.TestCase):
         self.assertEqual(len(second["processed"]), 1)
         self.assertEqual(draft.calls, 0)
 
-    def test_malformed_file_does_not_block_valid_candidate(self):
+    def test_unlisted_extra_handoff_never_executed(self):
+        committed = self.commit("acme-widget-launch")
+        extra = self.scan_dir() / "breaking-candidate-bbbbbbbbbbbbbbbbbbbbbbbb.json"
+        extra.write_text(
+            (self.root / committed["handoff_path"]).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(report["sweep_status"], "COMPLETED")
+        self.assertEqual(self.workflow_calls, 1)
+        self.assertEqual(len(report["processed"]), 1)
+        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
+        self.assertIn("CANDIDATE_NOT_LISTED", reasons)
+
+    def test_malformed_file_unlisted_does_not_block_valid_candidate(self):
         self.commit("acme-widget-launch")
-        # Unlisted junk beside a valid listed handoff must not execute,
-        # and must not block the listed candidate.
         (self.scan_dir() / "zzz-broken.json").write_text("{not json", encoding="utf-8")
         (self.scan_dir() / "notes.txt").write_text("human note", encoding="utf-8")
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root, overrides=self.overrides()
         )
+        self.assertEqual(report["sweep_status"], "COMPLETED")
         self.assertEqual(len(report["processed"]), 1)
         reasons = {entry["reason"] for entry in report["skipped_invalid"]}
         self.assertIn("CANDIDATE_NOT_LISTED", reasons)
-
-    def test_filename_content_mismatch_skipped(self):
-        committed = self.commit()
-        src = self.root / committed["handoff_path"]
-        # Keep receipt listing the original external id, but rename the
-        # file so content no longer matches the listed path / filename.
-        receipt_path = self.scan_dir() / "scan-receipt.json"
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        listed_id = receipt["candidates"][0]
-        dst = src.parent / "breaking-candidate-000000000000000000000000.json"
-        src.rename(dst)
-        # Repair receipt to still list the original id (file now missing)
-        # is covered elsewhere; here rewrite receipt to list the wrong
-        # filename's stem while content still encodes the real id.
-        receipt["candidates"] = [dst.stem]
-        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-        report = _consume.sweep_breaking_handoffs(
-            workspace_root=self.root, overrides=self.overrides()
-        )
-        self.assertEqual(report["processed"], [])
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("FILENAME_CONTENT_MISMATCH", reasons)
-        self.assertNotEqual(listed_id, dst.stem)
 
     def test_markdown_report_never_consumed(self):
         research = self.root / "social/research/daily"
@@ -207,7 +214,7 @@ class BreakingConsumeTests(unittest.TestCase):
         self.assertEqual(report["processed"], [])
         self.assertEqual(report["skipped_invalid"], [])
 
-    def test_handoff_without_receipt_zero_calls(self):
+    def test_handoff_without_receipt_fails_sweep(self):
         committed = self.commit()
         (self.scan_dir() / "scan-receipt.json").unlink()
         report = _consume.sweep_breaking_handoffs(
@@ -218,11 +225,13 @@ class BreakingConsumeTests(unittest.TestCase):
         )
         self.assertEqual(self.workflow_calls, 0)
         self.assertEqual(report["processed"], [])
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("RECEIPT_MISSING", reasons)
+        self.assert_failed_authority(report, reason="RECEIPT_MISSING")
         self.assertTrue((self.root / committed["handoff_path"]).is_file())
+        self.assertNotEqual(
+            0 if report.get("sweep_status") == "COMPLETED" else 1, 0
+        )
 
-    def test_malformed_receipt_zero_calls(self):
+    def test_malformed_receipt_fails_sweep(self):
         self.commit()
         (self.scan_dir() / "scan-receipt.json").write_text("{not json", encoding="utf-8")
         report = _consume.sweep_breaking_handoffs(
@@ -232,18 +241,11 @@ class BreakingConsumeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(self.workflow_calls, 0)
-        self.assertEqual(report["processed"], [])
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("RECEIPT_REJECTED", reasons)
+        self.assert_failed_authority(report, reason="RECEIPT_REJECTED")
 
-    def test_receipt_not_listing_handoff_zero_calls(self):
+    def test_listed_candidate_missing_file_fails_sweep(self):
         committed = self.commit()
-        receipt_path = self.scan_dir() / "scan-receipt.json"
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        # Keep CANDIDATES_EMITTED but list a different ID; original file
-        # becomes an unlisted orphan.
-        receipt["candidates"] = ["breaking-candidate-aaaaaaaaaaaaaaaaaaaaaaaa"]
-        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        (self.root / committed["handoff_path"]).unlink()
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root,
             overrides=self.overrides(
@@ -251,17 +253,12 @@ class BreakingConsumeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(self.workflow_calls, 0)
-        self.assertEqual(report["processed"], [])
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("CANDIDATE_NOT_LISTED", reasons)
-        self.assertIn("CANDIDATE_FILE_MISSING", reasons)
-        self.assertTrue((self.root / committed["handoff_path"]).is_file())
+        self.assert_failed_authority(report, reason="CANDIDATE_FILE_MISSING")
 
-    def test_no_material_with_orphan_handoff_zero_calls(self):
+    def test_no_material_with_orphan_handoff_fails_sweep(self):
         committed = self.commit()
         handoff_path = self.root / committed["handoff_path"]
         receipt_path = self.scan_dir() / "scan-receipt.json"
-        # Force empty receipt while leaving the handoff file in place.
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["status"] = "NO_MATERIAL_DEVELOPMENT"
         receipt["candidates"] = []
@@ -273,14 +270,48 @@ class BreakingConsumeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(self.workflow_calls, 0)
-        self.assertEqual(report["processed"], [])
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("RECEIPT_INCONSISTENT", reasons)
+        self.assert_failed_authority(report, reason="RECEIPT_INCONSISTENT")
         self.assertTrue(handoff_path.is_file())
 
-    def test_listed_candidate_missing_file_fail_closed(self):
+    def test_listed_malformed_handoff_fails_sweep(self):
         committed = self.commit()
-        (self.root / committed["handoff_path"]).unlink()
+        path = self.root / committed["handoff_path"]
+        path.write_text("{not a handoff", encoding="utf-8")
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assert_failed_authority(report, reason="UNREADABLE")
+
+    def test_filename_content_mismatch_fails_sweep(self):
+        committed = self.commit()
+        src = self.root / committed["handoff_path"]
+        receipt_path = self.scan_dir() / "scan-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        listed_id = receipt["candidates"][0]
+        dst = src.parent / "breaking-candidate-000000000000000000000000.json"
+        src.rename(dst)
+        receipt["candidates"] = [dst.stem]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root,
+            overrides=self.overrides(
+                run_breaking_candidate=self.counting_runner()
+            ),
+        )
+        self.assertEqual(self.workflow_calls, 0)
+        self.assert_failed_authority(report, reason="FILENAME_CONTENT_MISMATCH")
+        self.assertNotEqual(listed_id, dst.stem)
+
+    def test_receipt_not_listing_handoff_lists_missing_fails(self):
+        committed = self.commit()
+        receipt_path = self.scan_dir() / "scan-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["candidates"] = ["breaking-candidate-aaaaaaaaaaaaaaaaaaaaaaaa"]
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root,
             overrides=self.overrides(
@@ -289,16 +320,28 @@ class BreakingConsumeTests(unittest.TestCase):
         )
         self.assertEqual(self.workflow_calls, 0)
         self.assertEqual(report["processed"], [])
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("CANDIDATE_FILE_MISSING", reasons)
+        # Unlisted orphan is non-authoritative skip; listed missing file fails.
+        self.assert_failed_authority(report, reason="CANDIDATE_FILE_MISSING")
+        skip_reasons = {entry["reason"] for entry in report["skipped_invalid"]}
+        self.assertIn("CANDIDATE_NOT_LISTED", skip_reasons)
+        self.assertTrue((self.root / committed["handoff_path"]).is_file())
 
-    def test_unlisted_extra_handoff_never_executed(self):
-        committed = self.commit("acme-widget-launch")
-        # Plant an extra handoff file not listed in the receipt.
-        extra = self.scan_dir() / "breaking-candidate-bbbbbbbbbbbbbbbbbbbbbbbb.json"
-        extra.write_text(
-            (self.root / committed["handoff_path"]).read_text(encoding="utf-8"),
-            encoding="utf-8",
+    def test_fake_scan_identity_rejected(self):
+        fake_id = "breaking-radar.fake-slot.v1@2026-09-08T07:30:00Z"
+        fake_dir = self.root / "social/ops/breaking-handoffs" / fake_id
+        fake_dir.mkdir(parents=True)
+        receipt = {
+            "schema": "nullone.breaking-radar-scan-receipt.v1",
+            "contract_version": "1.0.0",
+            "source_occurrence_id": fake_id,
+            "scheduled_for": "2026-09-08T07:30:00Z",
+            "source": "openclaw",
+            "status": "NO_MATERIAL_DEVELOPMENT",
+            "candidates": [],
+            "created_at": "2026-09-08T07:35:00Z",
+        }
+        (fake_dir / "scan-receipt.json").write_text(
+            json.dumps(receipt), encoding="utf-8"
         )
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root,
@@ -306,10 +349,47 @@ class BreakingConsumeTests(unittest.TestCase):
                 run_breaking_candidate=self.counting_runner()
             ),
         )
-        self.assertEqual(self.workflow_calls, 1)
+        self.assertEqual(self.workflow_calls, 0)
+        self.assert_failed_authority(report, reason="RECEIPT_IDENTITY_MISMATCH")
+
+    def test_registry_backed_scan_identity_helper(self):
+        validate_committed_scan_identity(
+            source="openclaw",
+            scheduled_for="2026-09-08T07:30:00Z",
+            source_occurrence_id=SCAN_ID,
+            scan_directory_name=SCAN_ID,
+        )
+        with self.assertRaises(BreakingScanAuthorityError):
+            validate_committed_scan_identity(
+                source="openclaw",
+                scheduled_for="2026-09-08T07:30:00Z",
+                source_occurrence_id="anything@2026-09-08T07:30:00Z",
+                scan_directory_name="anything@2026-09-08T07:30:00Z",
+            )
+
+    def test_orphan_recommit_then_consumer_processes_once(self):
+        t1 = "2026-09-08T07:35:00Z"
+        t2 = "2026-09-08T08:15:00Z"
+        staging = self.root / "social/ops/breaking-staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        staged = staging / "staged.json"
+        staged.write_text(json.dumps(make_assessment()), encoding="utf-8")
+        first = _scan.commit_assessment(
+            assessment_path=staged, source="openclaw", at=t1, workspace_root=self.root
+        )
+        (self.scan_dir() / "scan-receipt.json").unlink()
+        _scan.commit_assessment(
+            assessment_path=staged, source="openclaw", at=t2, workspace_root=self.root
+        )
+        preserved = json.loads(
+            (self.root / first["handoff_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(preserved["occurrence"]["triggered_at"], t1)
+        report = _consume.sweep_breaking_handoffs(
+            workspace_root=self.root, overrides=self.overrides()
+        )
+        self.assertEqual(report["sweep_status"], "COMPLETED")
         self.assertEqual(len(report["processed"]), 1)
-        reasons = {entry["reason"] for entry in report["skipped_invalid"]}
-        self.assertIn("CANDIDATE_NOT_LISTED", reasons)
 
     def test_unexpected_runner_crash_nonzero_cli_hides_marker(self):
         self.commit()
@@ -318,55 +398,21 @@ class BreakingConsumeTests(unittest.TestCase):
         def _boom(*_a, **_k):
             raise RuntimeError(marker)
 
-        # Direct sweep must fail closed without leaking the marker.
         report = _consume.sweep_breaking_handoffs(
             workspace_root=self.root,
             overrides=self.overrides(run_breaking_candidate=_boom),
         )
         self.assertEqual(report["sweep_status"], "FAILED")
         self.assertEqual(report["reason_code"], "SWEEP_RUNTIME_FAILED")
-        blob = json.dumps(report)
-        self.assertNotIn(marker, blob)
+        self.assertNotIn(marker, json.dumps(report))
         self.assertEqual(report["processed"], [])
 
-        # CLI path: non-zero exit, marker absent from stdout.
-        with mock.patch.object(
-            _consume, "sweep_breaking_handoffs", return_value=report
-        ):
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                with mock.patch.object(
-                    sys,
-                    "argv",
-                    ["nullone-breaking-consume.py", "sweep"],
-                ):
-                    # main() always runs production sweep; patch at module.
-                    code = _consume.main()
-            out = buf.getvalue()
-        # Re-run CLI against the real failing sweep for an end-to-end check.
-        with mock.patch.object(
-            _consume,
-            "sweep_breaking_handoffs",
-            return_value=report,
-        ):
-            buf2 = io.StringIO()
-            with redirect_stdout(buf2):
-                code = 0 if report.get("sweep_status") == "COMPLETED" else 1
-                print(json.dumps(report, indent=2, sort_keys=True))
-            out2 = buf2.getvalue()
-        self.assertNotEqual(code, 0)
-        self.assertNotIn(marker, out2)
-        self.assertNotIn(marker, out)
-
-        # End-to-end: invoke main with patched sweep that raises via overrides
-        # by patching WORKSPACE and the internal call path.
         real_sweep = _consume.sweep_breaking_handoffs
 
         def _failing_sweep(**kwargs):
             kwargs = dict(kwargs)
             overrides = dict(kwargs.get("overrides") or {})
             overrides["run_breaking_candidate"] = _boom
-            # Also inject test deps so admission reaches the runner.
             overrides.setdefault("story_writer", digit_free_writer)
             overrides.setdefault("story_verifier", numeric_scope_verifier)
             overrides.setdefault("draft_connector", FakeDraftConnector())
@@ -380,13 +426,13 @@ class BreakingConsumeTests(unittest.TestCase):
             return real_sweep(**kwargs)
 
         with mock.patch.object(_consume, "sweep_breaking_handoffs", _failing_sweep):
-            buf3 = io.StringIO()
-            with redirect_stdout(buf3):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
                 with mock.patch.object(
                     sys, "argv", ["nullone-breaking-consume.py", "sweep"]
                 ):
                     exit_code = _consume.main()
-            printed = buf3.getvalue()
+            printed = buf.getvalue()
         self.assertNotEqual(exit_code, 0)
         self.assertNotIn(marker, printed)
         self.assertIn("SWEEP_RUNTIME_FAILED", printed)

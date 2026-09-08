@@ -350,6 +350,66 @@ class BreakingRunnerTests(unittest.TestCase):
         self.assertEqual(draft.calls, 1)
         self.assertEqual(len(delivery.sent), 1)
 
+    def test_notifier_exception_fresh_and_replay_match(self):
+        marker = "FAKE_SECRET"
+        handoff = make_handoff()
+
+        def _boom(_result):
+            raise RuntimeError(marker)
+
+        fresh = run_breaking_candidate(
+            handoff, **self.base_kwargs(notifier=_boom)
+        )
+        self.assertEqual(fresh.application_execution, "FAILED")
+        self.assertEqual(fresh.reason_code, "NOTIFICATION_STATE_UNSAFE")
+        self.assertNotIn(marker, fresh.reason_text)
+        self.assertNotIn(marker, json.dumps(fresh.context))
+        self.assertTrue(any(p.suffix == ".json" for p in self.out.iterdir()))
+
+        replay = run_breaking_candidate(
+            handoff,
+            **self.base_kwargs(
+                story_writer=Exploding("writer"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+                notifier=_boom,
+            ),
+        )
+        self.assertEqual(replay.application_execution, "FAILED")
+        self.assertEqual(replay.reason_code, "NOTIFICATION_STATE_UNSAFE")
+        self.assertEqual(replay.reason_text, fresh.reason_text)
+        self.assertNotIn(marker, replay.reason_text)
+        self.assertNotIn(marker, json.dumps(replay.context))
+
+    def test_notifier_malformed_return_fresh_and_replay_match(self):
+        handoff = make_handoff()
+
+        def _bad(_result):
+            return {"status": "NOT_A_REAL_STATUS", "secret": "FAKE_SECRET"}
+
+        fresh = run_breaking_candidate(
+            handoff, **self.base_kwargs(notifier=_bad)
+        )
+        self.assertEqual(fresh.application_execution, "FAILED")
+        self.assertEqual(fresh.reason_code, "NOTIFICATION_RESULT_INVALID")
+        self.assertNotIn("FAKE_SECRET", fresh.reason_text)
+        self.assertNotIn("FAKE_SECRET", json.dumps(fresh.context))
+
+        replay = run_breaking_candidate(
+            handoff,
+            **self.base_kwargs(
+                story_writer=Exploding("writer"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+                notifier=_bad,
+            ),
+        )
+        self.assertEqual(replay.application_execution, "FAILED")
+        self.assertEqual(replay.reason_code, "NOTIFICATION_RESULT_INVALID")
+        self.assertEqual(replay.reason_text, fresh.reason_text)
+        self.assertEqual(replay.context, fresh.context)
+        self.assertNotIn("FAKE_SECRET", json.dumps(replay.context))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

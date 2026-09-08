@@ -10,15 +10,18 @@ sweeps that ignore the receipt are never executable authority.
 
 Per-scan isolation: each scan directory is admitted only after exactly
 one valid `scan-receipt.json` is strict-validated (schema, contract,
-identity, source, status, candidates). NO_MATERIAL_DEVELOPMENT executes
-zero handoffs (any handoff JSON is an inconsistency). CANDIDATES_EMITTED
-consumes only the exact listed external occurrence IDs.
+identity, source, status, candidates) AND proven against the real
+`breaking-radar` ScheduleSpec registry. NO_MATERIAL_DEVELOPMENT executes
+zero handoffs (any handoff JSON is an authoritative inconsistency).
+CANDIDATES_EMITTED consumes only the exact listed external occurrence IDs.
 
-Safely classified INPUT defects are recorded per-file as
-SKIPPED_INVALID and never block sibling candidates. Unexpected
-runtime/programming/orchestration exceptions fail the entire sweep
-(non-zero CLI; stable generic reason; raw exception text never exposed).
-Runner establishment failures are never ordinary "processed" candidates.
+Authoritative commit-record corruption (missing/corrupt/contradictory
+receipt or listed-candidate integrity failure) fails the entire sweep
+with a stable generic reason and non-zero CLI so scheduler-native
+failureAlert can own it. Unlisted extra junk is never executable and may
+remain a non-authoritative skipped input without granting false
+authority. Unexpected runtime exceptions likewise fail the sweep; raw
+exception text is never exposed.
 
 Desired production shape (DESIRED / NOT DEPLOYED): a static OpenClaw
 command job shortly after each Radar slot, e.g.
@@ -26,9 +29,7 @@ command job shortly after each Radar slot, e.g.
 
     python3 <repo>/workspace/social/ops/scripts/nullone-breaking-consume.py sweep
 
-No arguments, no dynamic interpolation, no secrets. Exit 0 means the
-sweep completed without establishment/runtime failure; scheduler-native
-failureAlert owns execution-level failure.
+No arguments, no dynamic interpolation, no secrets.
 """
 from __future__ import annotations
 
@@ -43,7 +44,10 @@ from nullone_breaking_candidate_runner import (
     run_breaking_candidate,
 )
 from nullone_breaking_radar_edge import HANDOFF_SCHEMA
-from nullone_breaking_scan_authority import BreakingScanAuthorityError
+from nullone_breaking_scan_authority import (
+    BreakingScanAuthorityError,
+    validate_committed_scan_identity,
+)
 from nullone_bridge_common import WORKSPACE
 from nullone_failure_notify import OpenClawTelegramTransport, notify_if_required
 from nullone_story_pipeline import (
@@ -70,29 +74,44 @@ ESTABLISHMENT_FAILURE_CODES = frozenset(
     }
 )
 
-# Per-file input defects that may be skipped without failing the sweep.
-INPUT_SKIP_CODES = frozenset(
+# Authoritative commit-record defects: impossible/unsafe after a valid
+# commit; fail the sweep (non-zero) so production cannot stick silently.
+AUTHORITATIVE_CORRUPTION_CODES = frozenset(
     {
-        "HANDOFF_REJECTED",
-        "CANDIDATE_ID_REJECTED",
-        "UNREADABLE",
-        "NOT_A_HANDOFF",
-        "FILENAME_CONTENT_MISMATCH",
         "RECEIPT_MISSING",
         "RECEIPT_REJECTED",
         "RECEIPT_SOURCE_UNSUPPORTED",
         "RECEIPT_IDENTITY_MISMATCH",
         "RECEIPT_INCONSISTENT",
-        "CANDIDATE_NOT_LISTED",
         "CANDIDATE_FILE_MISSING",
-        "CANDIDATE_FILE_AMBIGUOUS",
         "CANDIDATE_PATH_REJECTED",
+        "UNREADABLE",
+        "NOT_A_HANDOFF",
+        "FILENAME_CONTENT_MISMATCH",
+        "HANDOFF_REJECTED",
+        "CANDIDATE_ID_REJECTED",
     }
 )
 
+# Non-authoritative directory noise: never executable, never fails sweep.
+NON_AUTHORITATIVE_SKIP_CODES = frozenset({"CANDIDATE_NOT_LISTED"})
+
 SWEEP_RUNTIME_FAILED = "SWEEP_RUNTIME_FAILED"
 SWEEP_ESTABLISHMENT_FAILED = "SWEEP_ESTABLISHMENT_FAILED"
+SWEEP_AUTHORITY_CORRUPT = "SWEEP_AUTHORITY_CORRUPT"
 SWEEP_OK = "OK"
+
+SWEEP_AUTHORITY_CORRUPT_TEXT = (
+    "Breaking handoff sweep failed: authoritative spool record is "
+    "missing, corrupt, or inconsistent."
+)
+SWEEP_ESTABLISHMENT_FAILED_TEXT = (
+    "Breaking handoff sweep failed: runner could not establish a safe "
+    "domain outcome."
+)
+SWEEP_RUNTIME_FAILED_TEXT = (
+    "Breaking handoff sweep failed on an unexpected runtime error."
+)
 
 
 def _load_scan_module() -> Any:
@@ -108,12 +127,6 @@ def _load_scan_module() -> Any:
 
 
 _scan = _load_scan_module()
-
-
-def _scheduled_for_from_scan_id(source_occurrence_id: str) -> str | None:
-    if "@" not in source_occurrence_id:
-        return None
-    return source_occurrence_id.split("@", 1)[1]
 
 
 def _empty_report() -> dict[str, Any]:
@@ -140,10 +153,24 @@ def _fail_sweep(
     return report
 
 
+def _authority_fail(
+    report: dict[str, Any], *, path: str, reason: str
+) -> dict[str, Any]:
+    report["establishment_failed"].append({"path": path, "reason": reason})
+    return _fail_sweep(
+        report,
+        reason_code=SWEEP_AUTHORITY_CORRUPT,
+        reason_text=SWEEP_AUTHORITY_CORRUPT_TEXT,
+    )
+
+
 def _load_authoritative_receipt(
     scan_dir: Path, *, root: Path
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Return (receipt, skip_entry). Exactly one outcome is non-None."""
+    """Return (receipt, failure_entry). Exactly one outcome is non-None.
+
+    failure_entry.reason is always an AUTHORITATIVE_CORRUPTION code.
+    """
 
     receipt_path = scan_dir / RECEIPT_FILENAME
     rel = str(receipt_path.relative_to(root))
@@ -157,9 +184,11 @@ def _load_authoritative_receipt(
         return None, {"path": rel, "reason": "RECEIPT_REJECTED"}
 
     source_occurrence_id = scan_dir.name
-    scheduled_for = _scheduled_for_from_scan_id(source_occurrence_id)
-    if scheduled_for is None:
-        return None, {"path": rel, "reason": "RECEIPT_IDENTITY_MISMATCH"}
+    if not isinstance(data, dict) or "scheduled_for" not in data:
+        return None, {"path": rel, "reason": "RECEIPT_REJECTED"}
+    scheduled_for = data.get("scheduled_for")
+    if not isinstance(scheduled_for, str):
+        return None, {"path": rel, "reason": "RECEIPT_REJECTED"}
 
     try:
         receipt = _scan.validate_scan_receipt(
@@ -174,6 +203,17 @@ def _load_authoritative_receipt(
         return None, {"path": rel, "reason": "RECEIPT_SOURCE_UNSUPPORTED"}
     if receipt["source_occurrence_id"] != source_occurrence_id:
         return None, {"path": rel, "reason": "RECEIPT_IDENTITY_MISMATCH"}
+
+    try:
+        validate_committed_scan_identity(
+            source=str(receipt["source"]),
+            scheduled_for=str(receipt["scheduled_for"]),
+            source_occurrence_id=str(receipt["source_occurrence_id"]),
+            scan_directory_name=scan_dir.name,
+        )
+    except BreakingScanAuthorityError:
+        return None, {"path": rel, "reason": "RECEIPT_IDENTITY_MISMATCH"}
+
     return receipt, None
 
 
@@ -186,18 +226,6 @@ def _handoff_json_paths(scan_dir: Path) -> list[Path]:
         and p.suffix == ".json"
         and p.name != RECEIPT_FILENAME
     )
-
-
-def _candidate_path(scan_dir: Path, external_id: str) -> Path | None:
-    """Exactly one regular non-symlink `<id>.json`, or None if missing/ambiguous."""
-
-    expected = scan_dir / f"{external_id}.json"
-    if expected.is_symlink():
-        return None
-    if expected.is_file():
-        # Refuse if another listed-looking duplicate somehow exists.
-        return expected
-    return None
 
 
 def sweep_breaking_handoffs(
@@ -239,28 +267,25 @@ def sweep_breaking_handoffs(
         p for p in spool.iterdir() if p.is_dir() and not p.is_symlink()
     ):
         report["scans_seen"] += 1
-        receipt, skip = _load_authoritative_receipt(scan_dir, root=root)
-        if skip is not None:
-            report["skipped_invalid"].append(skip)
-            # Without a valid receipt, directory contents are never authority.
-            continue
+        receipt, failure = _load_authoritative_receipt(scan_dir, root=root)
+        if failure is not None:
+            return _authority_fail(
+                report, path=failure["path"], reason=failure["reason"]
+            )
 
         assert receipt is not None
         source = str(receipt["source"])
 
         if receipt["status"] == "NO_MATERIAL_DEVELOPMENT":
             leftovers = _handoff_json_paths(scan_dir)
-            for path in leftovers:
-                report["skipped_invalid"].append(
-                    {
-                        "path": str(path.relative_to(root)),
-                        "reason": "RECEIPT_INCONSISTENT",
-                    }
+            if leftovers:
+                return _authority_fail(
+                    report,
+                    path=str(leftovers[0].relative_to(root)),
+                    reason="RECEIPT_INCONSISTENT",
                 )
-            # Zero handoffs executed — receipt says empty.
             continue
 
-        # CANDIDATES_EMITTED: consume ONLY listed IDs.
         listed = list(receipt["candidates"])
         listed_set = set(listed)
         present = {p.stem: p for p in _handoff_json_paths(scan_dir)}
@@ -275,47 +300,28 @@ def sweep_breaking_handoffs(
                 )
 
         for external_id in listed:
-            path = _candidate_path(scan_dir, external_id)
-            if path is None:
-                report["skipped_invalid"].append(
-                    {
-                        "path": str(
-                            (scan_dir / f"{external_id}.json").relative_to(root)
-                        ),
-                        "reason": "CANDIDATE_FILE_MISSING",
-                    }
+            expected = scan_dir / f"{external_id}.json"
+            rel = str(expected.relative_to(root))
+            if expected.is_symlink():
+                return _authority_fail(
+                    report, path=rel, reason="CANDIDATE_PATH_REJECTED"
                 )
-                continue
-            if path.is_symlink() or not path.is_file():
-                report["skipped_invalid"].append(
-                    {
-                        "path": str(path.relative_to(root)),
-                        "reason": "CANDIDATE_PATH_REJECTED",
-                    }
+            if not expected.is_file():
+                return _authority_fail(
+                    report, path=rel, reason="CANDIDATE_FILE_MISSING"
                 )
-                continue
 
             try:
-                handoff = json.loads(path.read_text(encoding="utf-8"))
+                handoff = json.loads(expected.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                report["skipped_invalid"].append(
-                    {"path": str(path.relative_to(root)), "reason": "UNREADABLE"}
-                )
-                continue
+                return _authority_fail(report, path=rel, reason="UNREADABLE")
             if not isinstance(handoff, dict) or handoff.get("schema") != HANDOFF_SCHEMA:
-                report["skipped_invalid"].append(
-                    {"path": str(path.relative_to(root)), "reason": "NOT_A_HANDOFF"}
-                )
-                continue
+                return _authority_fail(report, path=rel, reason="NOT_A_HANDOFF")
             expected_name = _expected_filename(handoff)
-            if expected_name is not None and path.name != expected_name:
-                report["skipped_invalid"].append(
-                    {
-                        "path": str(path.relative_to(root)),
-                        "reason": "FILENAME_CONTENT_MISMATCH",
-                    }
+            if expected_name is not None and expected.name != expected_name:
+                return _authority_fail(
+                    report, path=rel, reason="FILENAME_CONTENT_MISMATCH"
                 )
-                continue
 
             try:
                 result: BreakingScheduledResult = deps["run_breaking_candidate"](
@@ -330,28 +336,19 @@ def sweep_breaking_handoffs(
                     source=source,
                 )
             except Exception:
-                # Unexpected runtime/programming/orchestration failure:
-                # fail the sweep closed. Never expose raw exception text.
                 return _fail_sweep(
                     report,
                     reason_code=SWEEP_RUNTIME_FAILED,
-                    reason_text=(
-                        "Breaking handoff sweep failed on an unexpected "
-                        "runtime error."
-                    ),
+                    reason_text=SWEEP_RUNTIME_FAILED_TEXT,
                 )
 
             if result.application_execution == "FAILED" and result.reason_code in (
                 "HANDOFF_REJECTED",
                 "CANDIDATE_ID_REJECTED",
             ):
-                report["skipped_invalid"].append(
-                    {
-                        "path": str(path.relative_to(root)),
-                        "reason": result.reason_code,
-                    }
+                return _authority_fail(
+                    report, path=rel, reason=result.reason_code
                 )
-                continue
 
             if (
                 result.application_execution == "FAILED"
@@ -359,7 +356,7 @@ def sweep_breaking_handoffs(
             ):
                 report["establishment_failed"].append(
                     {
-                        "path": str(path.relative_to(root)),
+                        "path": rel,
                         "reason": result.reason_code,
                         "candidate_id": result.candidate_id,
                         "run_id": result.run_id,
@@ -368,15 +365,12 @@ def sweep_breaking_handoffs(
                 return _fail_sweep(
                     report,
                     reason_code=SWEEP_ESTABLISHMENT_FAILED,
-                    reason_text=(
-                        "Breaking handoff sweep failed: runner could not "
-                        "establish a safe domain outcome."
-                    ),
+                    reason_text=SWEEP_ESTABLISHMENT_FAILED_TEXT,
                 )
 
             report["processed"].append(
                 {
-                    "path": str(path.relative_to(root)),
+                    "path": rel,
                     "candidate_id": result.candidate_id,
                     "domain_outcome": result.domain_outcome,
                     "run_id": result.run_id,
@@ -430,7 +424,26 @@ def self_test() -> int:
     assert report["processed"] == [], report
     assert report["skipped_invalid"] == [], report
     assert report["establishment_failed"] == [], report
-    assert INPUT_SKIP_CODES  # contract vocabulary retained for callers/docs
+    assert AUTHORITATIVE_CORRUPTION_CODES
+    assert NON_AUTHORITATIVE_SKIP_CODES == frozenset({"CANDIDATE_NOT_LISTED"})
+
+    # Registry-backed identity: reviewed slot accepted; fake rejected.
+    validate_committed_scan_identity(
+        source="openclaw",
+        scheduled_for="2026-09-08T07:30:00Z",
+        source_occurrence_id="breaking-radar.scan-1130.v1@2026-09-08T07:30:00Z",
+        scan_directory_name="breaking-radar.scan-1130.v1@2026-09-08T07:30:00Z",
+    )
+    try:
+        validate_committed_scan_identity(
+            source="openclaw",
+            scheduled_for="2026-09-08T07:30:00Z",
+            source_occurrence_id="breaking-radar.fake-slot.v1@2026-09-08T07:30:00Z",
+            scan_directory_name="breaking-radar.fake-slot.v1@2026-09-08T07:30:00Z",
+        )
+        raise AssertionError("fake scan identity was accepted")
+    except BreakingScanAuthorityError:
+        pass
 
     print("BREAKING_CONSUME_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

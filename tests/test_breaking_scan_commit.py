@@ -329,6 +329,62 @@ class CommitEdgeTests(unittest.TestCase):
         handoffs = [p for p in scan_dir.iterdir() if p.suffix == ".json" and p.name != "scan-receipt.json"]
         self.assertEqual(handoffs, [])
 
+    def test_orphan_recommit_across_triggered_at_repairs_receipt(self):
+        t1 = "2026-09-08T07:35:00Z"
+        t2 = "2026-09-08T08:15:00Z"
+        staged = self.stage(make_assessment())
+        first = commit_assessment(
+            assessment_path=staged, source="openclaw", at=t1, workspace_root=self.root
+        )
+        handoff_path = self.root / first["handoff_path"]
+        original = handoff_path.read_text(encoding="utf-8")
+        original_doc = json.loads(original)
+        self.assertEqual(original_doc["occurrence"]["triggered_at"], t1)
+        # Crash before receipt: delete receipt, leave orphan handoff.
+        (self.root / "social/ops/breaking-handoffs" / SCAN_ID / "scan-receipt.json").unlink()
+        repaired = commit_assessment(
+            assessment_path=staged, source="openclaw", at=t2, workspace_root=self.root
+        )
+        self.assertEqual(repaired["external_occurrence_id"], first["external_occurrence_id"])
+        self.assertEqual(handoff_path.read_text(encoding="utf-8"), original)
+        preserved = json.loads(handoff_path.read_text(encoding="utf-8"))
+        self.assertEqual(preserved["occurrence"]["triggered_at"], t1)
+        receipt = json.loads(
+            (
+                self.root
+                / "social/ops/breaking-handoffs"
+                / SCAN_ID
+                / "scan-receipt.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(receipt["status"], "CANDIDATES_EMITTED")
+        self.assertEqual(receipt["candidates"], [first["external_occurrence_id"]])
+
+    def test_orphan_recommit_changed_assessment_conflicts(self):
+        t1 = "2026-09-08T07:35:00Z"
+        t2 = "2026-09-08T08:15:00Z"
+        staged = self.stage(make_assessment())
+        first = commit_assessment(
+            assessment_path=staged, source="openclaw", at=t1, workspace_root=self.root
+        )
+        (
+            self.root / "social/ops/breaking-handoffs" / SCAN_ID / "scan-receipt.json"
+        ).unlink()
+        staged.write_text(
+            json.dumps(make_assessment(topic="Mutated topic")), encoding="utf-8"
+        )
+        with self.assertRaises(BreakingScanCommitError) as ctx:
+            commit_assessment(
+                assessment_path=staged,
+                source="openclaw",
+                at=t2,
+                workspace_root=self.root,
+            )
+        self.assertIn("COMMIT_CONFLICT", str(ctx.exception))
+        preserved = json.loads((self.root / first["handoff_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(preserved["occurrence"]["triggered_at"], t1)
+        self.assertEqual(preserved["assessment"]["topic"], "Acme Widget launch")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

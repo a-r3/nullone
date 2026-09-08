@@ -276,6 +276,15 @@ def commit_assessment(
     in a valid CANDIDATES_EMITTED receipt are consumable, so a crash
     between the two writes leaves an orphan that a recommit repairs.
 
+    Crash-recovery recommit across different `triggered_at`: if the
+    deterministic external-occurrence path already holds a handoff with
+    the same scan identity, same candidate_id, same exact assessment,
+    and same external occurrence ID, a later retry may differ only in
+    `occurrence.triggered_at`. The original committed handoff bytes are
+    preserved (triggered_at is never rewritten); the receipt listing is
+    repaired under the scan lock. Assessment mutation still
+    COMMIT_CONFLICTs.
+
     Everything mutating happens inside the per-scan fcntl lock: receipt
     state is re-read and strictly validated there, conflicts and
     idempotency are decided there, and only then are the handoff and
@@ -285,8 +294,8 @@ def commit_assessment(
 
     Returns the committed handoff path, candidate external occurrence ID,
     and scan identity. Identical recommit is idempotent (and repairs a
-    missing receipt listing); conflicting content for the same candidate
-    path is rejected (COMMIT_CONFLICT).
+    missing receipt listing); conflicting assessment content for the
+    same candidate path is rejected (COMMIT_CONFLICT).
     """
 
     reviewed_source = _require_m0_source(source)
@@ -360,18 +369,58 @@ def commit_assessment(
             raise BreakingScanCommitError("handoff target is a symlink; refusing commit")
         if target.is_file():
             try:
-                existing_handoff = json.loads(target.read_text(encoding="utf-8"))
+                existing_raw = target.read_text(encoding="utf-8")
+                existing_handoff = json.loads(existing_raw)
             except (OSError, ValueError) as exc:
                 raise BreakingScanCommitError(
                     "existing handoff unreadable; refusing overwrite"
                 ) from exc
-            if existing_handoff != handoff:
+            try:
+                existing_normalized = normalize_breaking_radar_handoff(
+                    existing_handoff, source=reviewed_source
+                )
+            except (
+                BreakingRadarEdgeError,
+                BreakingWorkflowInputError,
+                ValueError,
+                TypeError,
+            ) as exc:
+                raise BreakingScanCommitError(
+                    "existing handoff failed strict validation; refusing overwrite"
+                ) from exc
+
+            existing_occ = existing_handoff.get("occurrence")
+            if not isinstance(existing_occ, dict):
+                raise BreakingScanCommitError(
+                    "existing handoff occurrence missing; refusing overwrite"
+                )
+            if existing_occ.get("source_occurrence_id") != resolution.source_occurrence_id:
+                raise BreakingScanCommitError(
+                    "existing handoff names a different scan; refusing overwrite"
+                )
+            if existing_occ.get("scheduled_for") != resolution.scheduled_for:
+                raise BreakingScanCommitError(
+                    "existing handoff names a different slot; refusing overwrite"
+                )
+            existing_assessment = existing_handoff.get("assessment")
+            if existing_assessment != assessment:
                 raise BreakingScanCommitError(
                     "COMMIT_CONFLICT: a different handoff already occupies "
                     "this candidate path"
                 )
-
-        atomic_write_json(target, handoff)
+            if (
+                existing_normalized.trigger["external_occurrence_id"] != external_id
+                or existing_normalized.assessment.get("candidate_id")
+                != assessment.get("candidate_id")
+            ):
+                raise BreakingScanCommitError(
+                    "existing handoff identity does not match recommit; "
+                    "refusing overwrite"
+                )
+            # Preserve original committed bytes (including triggered_at).
+            # Receipt repair below makes the orphan consumable.
+        else:
+            atomic_write_json(target, handoff)
 
         known = (
             list(existing_receipt["candidates"])

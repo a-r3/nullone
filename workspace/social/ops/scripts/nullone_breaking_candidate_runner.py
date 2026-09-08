@@ -227,16 +227,27 @@ def run_breaking_candidate(
             notification_status: str | None = None
             if notifier is not None:
                 try:
-                    notification_status = validate_notification_outcome(
-                        notifier(persisted)
+                    notification_outcome = notifier(persisted)
+                except Exception:
+                    return _failed(
+                        reason_code="NOTIFICATION_STATE_UNSAFE",
+                        reason_text="Breaking notification orchestration unsafe.",
+                        occurrence_id=occurrence_id,
+                        run_id=expected_run_id,
+                        candidate_id=candidate_id,
                     )
-                except (ScheduledWorkflowSupportError, Exception):
+                try:
+                    notification_status = validate_notification_outcome(
+                        notification_outcome
+                    )
+                except ScheduledWorkflowSupportError:
                     return _failed(
                         reason_code="NOTIFICATION_RESULT_INVALID",
                         reason_text=NOTIFICATION_RESULT_INVALID_MESSAGE,
                         occurrence_id=occurrence_id,
                         run_id=expected_run_id,
                         candidate_id=candidate_id,
+                        context=safe_notification_result_context(notification_outcome),
                     )
             return BreakingScheduledResult(
                 application_execution="COMPLETED",
