@@ -158,6 +158,47 @@ class FailClosedTests(unittest.TestCase):
                 make_handoff(candidates=[make_candidate(verification="PARTIAL")])
             )
 
+    def test_eligible_requires_ready_status(self):
+        for status in ("DEFERRED", "REJECTED", "NEW", "RESEARCHING"):
+            with self.assertRaises(EditorialHandoffError, msg=status):
+                validate_handoff(
+                    make_handoff(
+                        candidates=[make_candidate(editorial_status=status)]
+                    )
+                )
+
+    def test_ready_but_not_eligible_is_valid_and_unselected(self):
+        snap = validate_handoff(
+            make_handoff(
+                candidates=[
+                    make_candidate(editorial_status="READY", story_eligible=False)
+                ]
+            )
+        )
+        self.assertEqual(story_eligible_candidates(snap), [])
+
+    def test_misbound_board_path_rejected(self):
+        with self.assertRaises(EditorialHandoffError):
+            validate_handoff(
+                make_handoff(
+                    candidates=[make_candidate()],
+                    board_path="social/research/daily/2026-09-07-editorial-board.md",
+                )
+            )
+        with self.assertRaises(EditorialHandoffError):
+            validate_handoff(
+                make_handoff(
+                    candidates=[make_candidate()],
+                    board_path="social/research/somewhere-else.json",
+                )
+            )
+
+    def test_impossible_calendar_date_rejected(self):
+        with self.assertRaises(EditorialHandoffError):
+            handoff_relative_path("2026-02-31")
+        with self.assertRaises(EditorialHandoffError):
+            validate_handoff(make_handoff(editorial_date="2026-02-31"))
+
     def test_bad_content_type_rejected(self):
         with self.assertRaises(EditorialHandoffError):
             validate_handoff(

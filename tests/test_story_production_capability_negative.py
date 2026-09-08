@@ -56,7 +56,9 @@ STORY_WIRING_MODULES = ("nullone_scheduled_run_dispatch.py",)
 
 FORBIDDEN_TRANSPORT_TOKENS = (
     "subprocess",
-    "openclaw",
+    "import openclaw",
+    "openclaw message send",
+    "OpenClawTelegramTransport",
     "call_tool(",
     "mcp__zernio",
     "posts_create",
@@ -88,10 +90,13 @@ FORBIDDEN_SCHEDULING_TOKENS = (
 )
 
 # Markdown source markers the production Story path must never read.
+# `board_relative_path()` legitimately *constructs* the canonical board
+# provenance string, so the ban targets actual Markdown reads: no
+# candidate-queue/topic-ledger literal anywhere, and no `.md` file ever
+# opened for reading.
 FORBIDDEN_MARKDOWN_SOURCES = (
     "candidate-queue",
     "topic-ledger",
-    "editorial-board.md",
 )
 
 
@@ -134,6 +139,13 @@ class StoryApplicationHasNoTransportCapabilityTests(unittest.TestCase):
                     source,
                     msg=f"{filename} must never read {forbidden!r}",
                 )
+            for lineno, line in enumerate(source.splitlines(), start=1):
+                if "read_text" in line or "read_bytes" in line or "open(" in line:
+                    self.assertNotIn(
+                        ".md",
+                        line,
+                        msg=f"{filename}:{lineno} must never open a Markdown file",
+                    )
 
     def test_no_secret_environment_access(self):
         for filename in STORY_APPLICATION_MODULES:

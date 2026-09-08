@@ -20,9 +20,9 @@ sys.path.insert(0, str(SCRIPTS))
 from nullone_editorial_candidate_handoff import (  # noqa: E402
     CONTRACT_VERSION,
     SCHEMA,
+    board_relative_path,
     handoff_relative_path,
 )
-from nullone_editorial_runtime import board_relative_path  # noqa: E402
 
 
 def write_morning_artifacts(

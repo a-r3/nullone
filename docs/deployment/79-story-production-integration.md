@@ -67,19 +67,30 @@ VERIFICATION: PASS, Story-suitable candidates). An empty candidate list
 is a valid truthful "no candidate" state; quota is never filled.
 
 Strict validator (`nullone_editorial_candidate_handoff.py`): exact
-schema/version, no unknown fields, unique IDs, unambiguous ranks,
-non-empty evidence, eligible ⟹ PASS, workspace-contained regular file
-(no symlink/escape), editorial_date must match the requested date.
+schema/version, real calendar date, no unknown fields, unique IDs,
+unambiguous ranks, non-empty evidence, eligible ⟹ verification PASS **and**
+editorial_status READY (PASS + DEFERRED/REJECTED/NEW/RESEARCHING with
+`story_eligible=true` is malformed, never upgraded), workspace-contained
+regular file (no symlink/escape), `editorial_date` matching the requested
+date, and `board_path` naming exactly the date's canonical board
+(single canonical helpers shared by Morning and Story, so the two sides
+cannot disagree).
 
 ## 4. Morning Editorial output change
 
 `run_morning_editorial` now requires BOTH artifacts (board + handoff) for
-a successful occurrence; a missing or malformed handoff fails closed as
-`HANDOFF_INVALID` (non-retryable — malformed output never earns another
-attempt). The provider is never re-invoked once both artifacts are
-complete. Bounded #28 retry (unreachable-only, same run identity) is
-unchanged. The desired prompt (`morning-editorial.md`) requires the agent
-to write both artifacts and never overwrite a completed handoff.
+a successful occurrence. Partial-output rule (#28 material-progress
+guard): once ANY provider-owned artifact exists for the occurrence, the
+editorial provider is never invoked again for it -- bounded retry (max 2,
+unreachable-only, same run id) survives solely for a genuinely empty
+first attempt. Partial sets fail closed without a second mutation:
+board-only → `HANDOFF_INCOMPLETE`; handoff-only →
+`PARTIAL_EDITORIAL_ARTIFACT_SET`; present-but-malformed →
+`HANDOFF_INVALID`. Morning success additionally proves exact date/board
+binding through the same canonical loader Story reads. The desired
+prompt (`morning-editorial.md`) requires the agent to write both
+artifacts, mark `story_eligible=true` only for PASS + READY + genuinely
+Story-suitable candidates, and never overwrite a completed handoff.
 
 ## 5. Availability + provider
 
@@ -88,11 +99,14 @@ One immutable snapshot per evaluation: `load_handoff_snapshot` →
 same snapshot object. No second scan, no Markdown, no model call.
 
 `StructuredHandoffStoryProvider` (real `StoryCandidateProvider`): keeps
-Morning-flagged eligible candidates in rank order, drops #33-inadmissible
-ones, drops review-attempt-consumed ones (STORY manifest with the same
-deterministic `story_request_id` and `create_attempts > 0`), returns at
-most the first remaining candidate. Zero remaining is truthful
-unavailability, never an error.
+Morning-flagged eligible candidates in rank order (READY-only,
+defense-in-depth), drops #33-inadmissible ones, drops
+review-attempt-consumed ones (STORY manifest with the same deterministic
+`story_request_id` and `create_attempts > 0`), returns at most the first
+remaining candidate. Zero remaining is truthful unavailability, never an
+error. Consumed-state reads fail closed (symlink/non-regular entries,
+malformed JSON, non-object JSON, identity-less STORY manifests, malformed
+review blocks all raise) so uncertainty never reads as unconsumed.
 
 ## 6. Production entrypoint
 
@@ -101,10 +115,18 @@ nullone-scheduled-wakeup.py story --source openclaw
 → resolve_scheduled_occurrence (story multi-slot)
 → nullone.scheduler-invocation.v1 (workflow_id=story)
 → run_story_trigger (nullone_story_scheduled_workflow.py)
+→ Morning #27 provenance proof (MORNING_SOURCE_UNPROVEN if absent)
 → run_story_workflow (cadence → provider → #33 → delivery)
 → #27 assess + emit under social/ops/run-outcomes/story
 → #30 notify once
 ```
+
+Before any candidate/provider/writer/draft/delivery work, Story proves
+the date's Morning occurrence established a valid persisted SUCCEEDED
+#27 result with correct deterministic identity declaring both artifacts;
+a valid handoff file left behind by a failed Morning cycle is never
+consumed (`MORNING_SOURCE_UNPROVEN`). No second health database, no
+scheduler stdout.
 
 Production wiring (`run_story_trigger` in
 `nullone_scheduled_run_dispatch.py`): `HaikuStoryWriter`,

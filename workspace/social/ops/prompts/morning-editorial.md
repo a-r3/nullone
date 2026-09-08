@@ -50,8 +50,10 @@ candidate list with each candidate's stable candidate_id, rank (Morning's
 own accepted ordering, unique positive integers), topic, topic_cluster,
 content_type, angle, verification status, evidence_refs (non-empty),
 source_attribution, source_urls, editorial_status, and explicit
-story_eligible boolean (true only for VERIFICATION: PASS candidates
-genuinely suitable for Story). On a quiet news day write a valid handoff
+story_eligible boolean. Set story_eligible=true only when ALL hold:
+VERIFICATION: PASS, editorial_status=READY, and the candidate is genuinely
+suitable for Story. Never mark NEW, RESEARCHING, DEFERRED, or REJECTED
+candidates Story-eligible. On a quiet news day write a valid handoff
 with an explicitly empty candidate list -- never fill quota with weak
 items. Never overwrite an already-completed handoff artifact for the same
 date with different content; if both artifacts already exist and are

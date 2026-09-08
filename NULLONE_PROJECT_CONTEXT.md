@@ -110,13 +110,17 @@ implementation is now in PR (OPEN until merge): dedicated Story wake-up
 DEPLOYED); four immutable Story schedule slots (10:30/13:30/18:30/21:30
 Asia/Baku) with latest-due-slot coalescing; structured Morning handoff
 `nullone.editorial-candidate-handoff.v1` per Baku date (Morning writes
-board + handoff, both required for Morning success); real
-`StructuredHandoffStoryProvider` (rank-ordered, consumed-suppressed,
-Markdown-free); exact production entrypoint with persisted #27 Story
-run outcomes; Draft Factory Story exclusivity (desired prompt change,
-not deployed). #79 remains OPEN until merge. #80 remains OPEN / blocked
-by #79. #81 remains OPEN (live DraftProvider proof still unresolved).
-#37 remains OPEN / BLOCKED. No production activation occurred.
+board + handoff; partial output never re-invokes the provider;
+HANDOFF_INCOMPLETE / PARTIAL_EDITORIAL_ARTIFACT_SET / HANDOFF_INVALID
+fail-closed; exact date/board binding; `story_eligible` requires PASS +
+READY); real `StructuredHandoffStoryProvider` (rank-ordered, READY-only,
+consumed-suppressed with fail-closed manifest reads, Markdown-free);
+exact production entrypoint with Morning #27 provenance gate
+(MORNING_SOURCE_UNPROVEN) and persisted #27 Story run outcomes; Draft
+Factory Story exclusivity (desired prompt change, not deployed). #79
+remains OPEN until merge. #80 remains OPEN / blocked by #79. #81 remains
+OPEN (live DraftProvider proof still unresolved). #37 remains OPEN /
+BLOCKED. No production activation occurred.
 
 1. Repository engineering for #61 is merged (PR #77). Do not start
    production secret provisioning from this context record alone.

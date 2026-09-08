@@ -90,19 +90,40 @@ class EditorialHandoffError(ValueError):
     """
 
 
+def _require_editorial_date(value: Any) -> str:
+    """Exact YYYY-MM-DD shape AND a real calendar date (rejects 2026-02-31)."""
+
+    from datetime import date
+
+    if not isinstance(value, str) or not _EDITORIAL_DATE_RE.fullmatch(value):
+        raise EditorialHandoffError(
+            f"editorial_date must be exact YYYY-MM-DD: {value!r}"
+        )
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise EditorialHandoffError(
+            f"editorial_date is not a real calendar date: {value!r}"
+        ) from exc
+    return value
+
+
+def board_relative_path(editorial_date: str) -> str:
+    """Canonical board artifact path for one Baku editorial date.
+
+    The single canonical helper Morning and Story both use, so the two
+    sides cannot disagree about which board a handoff belongs to.
+    """
+
+    _require_editorial_date(editorial_date)
+    return f"social/research/daily/{editorial_date}-editorial-board.md"
+
+
 def handoff_relative_path(editorial_date: str) -> str:
     """Canonical artifact path for one Baku editorial date."""
 
     _require_editorial_date(editorial_date)
     return f"social/research/daily/{editorial_date}-editorial-candidates.json"
-
-
-def _require_editorial_date(value: Any) -> str:
-    if not isinstance(value, str) or not _EDITORIAL_DATE_RE.fullmatch(value):
-        raise EditorialHandoffError(
-            f"editorial_date must be exact YYYY-MM-DD: {value!r}"
-        )
-    return value
 
 
 def _require_non_empty_str(mapping: dict[str, Any], field: str, *, what: str) -> str:
@@ -174,12 +195,18 @@ def _validate_candidate(raw: Any, *, index: int) -> dict[str, Any]:
                 f"candidate[{index}] evidence_refs must contain non-empty strings"
             )
 
-    if raw["story_eligible"] and raw["verification"] != "PASS":
-        # Upstream must never mark an unverified candidate Story-eligible;
-        # #33 would reject it anyway, but the contradiction itself is a
-        # malformed handoff, not a quiet filter.
+    if raw["story_eligible"] and (
+        raw["verification"] != "PASS" or raw["editorial_status"] != "READY"
+    ):
+        # Upstream must never mark a candidate Story-eligible unless it is
+        # both VERIFICATION: PASS and editorially READY; a PASS but
+        # DEFERRED/REJECTED/NEW candidate reaching production would bypass
+        # editorial gating. #33 would reject some of these anyway, but the
+        # contradiction itself is a malformed handoff, not a quiet filter.
+        # READY is never inferred or upgraded here.
         raise EditorialHandoffError(
-            f"candidate[{index}] story_eligible with verification != PASS"
+            f"candidate[{index}] story_eligible requires "
+            "verification PASS and editorial_status READY"
         )
 
     source_urls = raw.get("source_urls", [])
@@ -245,6 +272,11 @@ def validate_handoff(data: Any) -> dict[str, Any]:
     board_path = data.get("board_path")
     if not isinstance(board_path, str) or not board_path.strip():
         raise EditorialHandoffError("handoff missing non-empty board_path")
+    if board_path != board_relative_path(editorial_date):
+        raise EditorialHandoffError(
+            "handoff board_path must name exactly the editorial date's "
+            f"canonical board: {board_path!r}"
+        )
 
     raw_candidates = data.get("candidates")
     if not isinstance(raw_candidates, list):
@@ -340,11 +372,17 @@ def story_eligible_candidates(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Candidates flagged Story-eligible by Morning Editorial, in upstream order.
 
     Ordering is Morning's own accepted ranking (`rank` ascending) -- this
-    function never invents its own ordering.
+    function never invents its own ordering. Defense-in-depth: only
+    editorially READY candidates are ever returned, even if a snapshot
+    was built without strict validation.
     """
 
     return sorted(
-        (c for c in snapshot["candidates"] if c["story_eligible"]),
+        (
+            c
+            for c in snapshot["candidates"]
+            if c["story_eligible"] and c.get("editorial_status") == "READY"
+        ),
         key=lambda c: c["rank"],
     )
 
@@ -361,8 +399,19 @@ def find_consumed_story_request_ids(*, workspace_root: Path) -> frozenset[str]:
     Scans `social/ops/manifests/*.json` for STORY manifests carrying a
     `story_request_id` with `review.create_attempts > 0`. A consumed
     attempt is at-most-once: the production provider must never redraft
-    it. Unreadable files fail closed (raised, never skipped silently);
-    non-STORY manifests are ignored.
+    it. Uncertain state fails closed -- never silently skipped -- so no
+    candidate can ever appear safely unconsumed:
+
+    - symlink or non-regular `*.json` entries raise (they could hide
+      Story state; request IDs are never guessed from filenames);
+    - malformed JSON raises;
+    - non-object JSON raises;
+    - a STORY manifest with a missing/blank `story_request_id` raises,
+      whether or not attempts were consumed (identity-less Story state
+      cannot be represented in the consumed set);
+    - malformed `review`/`create_attempts` raises.
+
+    Non-STORY manifests are ignored.
     """
 
     root = _workspace_or_raise(workspace_root)
@@ -373,19 +422,27 @@ def find_consumed_story_request_ids(*, workspace_root: Path) -> frozenset[str]:
     consumed: set[str] = set()
     for path in sorted(manifest_dir.glob("*.json")):
         if path.is_symlink() or not path.is_file():
-            continue
+            raise EditorialHandoffError(
+                f"story manifest entry is not a regular file: {path.name}"
+            )
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise EditorialHandoffError(
                 f"story manifest unreadable: {path.name}"
             ) from exc
-        if not isinstance(data, dict) or data.get("format") != "STORY":
+        if not isinstance(data, dict):
+            raise EditorialHandoffError(
+                f"story manifest is not a JSON object: {path.name}"
+            )
+        if data.get("format") != "STORY":
             continue
         request_id = data.get("story_request_id")
-        review = data.get("review")
         if not isinstance(request_id, str) or not request_id:
-            continue
+            raise EditorialHandoffError(
+                f"STORY manifest missing story_request_id: {path.name}"
+            )
+        review = data.get("review")
         if not isinstance(review, dict):
             raise EditorialHandoffError(
                 f"story manifest has malformed review block: {path.name}"
@@ -489,6 +546,24 @@ def self_test() -> int:
     except EditorialHandoffError:
         pass
 
+    # 7b. story_eligible requires editorial_status READY too -- PASS but
+    #     DEFERRED/REJECTED/NEW is a malformed contradiction, never an
+    #     upgrade.
+    for status in ("DEFERRED", "REJECTED", "NEW", "RESEARCHING"):
+        try:
+            validate_handoff(
+                handoff(candidates=[candidate(editorial_status=status)])
+            )
+            raise AssertionError(f"eligible-but-{status} was not rejected")
+        except EditorialHandoffError:
+            pass
+
+    # 7c. READY + story_eligible=false is valid but never selected.
+    snap = validate_handoff(
+        handoff(candidates=[candidate(editorial_status="READY", story_eligible=False)])
+    )
+    assert story_eligible_candidates(snap) == []
+
     # 8. Unknown schema/version rejected.
     try:
         validate_handoff(handoff(schema="nullone.something-else.v1"))
@@ -538,13 +613,26 @@ def self_test() -> int:
         except EditorialHandoffError:
             pass
 
-    # 11. Bad editorial_date rejected everywhere.
-    for bad in ("2026-9-8", "08-09-2026", "", None):
+    # 11. Bad editorial_date rejected everywhere; impossible calendar
+    #     dates rejected too.
+    for bad in ("2026-9-8", "08-09-2026", "", None, "2026-02-31"):
         try:
             handoff_relative_path(bad)
             raise AssertionError(f"bad date accepted: {bad!r}")
         except EditorialHandoffError:
             pass
+
+    # 12. board_path must name exactly the date's canonical board.
+    try:
+        validate_handoff(
+            handoff(
+                candidates=[candidate()],
+                board_path="social/research/daily/2026-09-07-editorial-board.md",
+            )
+        )
+        raise AssertionError("misbound board_path was not rejected")
+    except EditorialHandoffError:
+        pass
 
     print("EDITORIAL_CANDIDATE_HANDOFF_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

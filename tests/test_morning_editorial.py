@@ -489,11 +489,105 @@ class MorningHandoffContractTests(unittest.TestCase):
                 output_root=root / "run-outcomes",
             )
             self.assertEqual(result["domain_outcome"], "FAILED")
-            self.assertEqual(result["reason_code"], "HANDOFF_INVALID")
-            # Malformed provider output never earns another attempt: the
-            # provider ran exactly once and the missing handoff failed
-            # closed without an unbounded retry loop.
+            self.assertEqual(result["reason_code"], "HANDOFF_INCOMPLETE")
+            # Partial output never earns another attempt: the provider ran
+            # exactly once and the missing handoff failed closed without
+            # a second editorial mutation.
             self.assertEqual(len(calls), 1)
+
+    def test_partial_output_never_retries_provider(self):
+        """Any material provider progress forbids a second invocation."""
+
+        def run_case(write_partial, expected_code):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                calls: list[int] = []
+
+                def partial_then_unreachable() -> None:
+                    calls.append(1)
+                    write_partial(root)
+                    raise ProviderUnreachableError("ENOTFOUND first attempt")
+
+                result = run_morning_editorial(
+                    occurrence_id="2026-09-05T08:30:00+04:00",
+                    board_date="2026-09-05",
+                    invoke_provider=partial_then_unreachable,
+                    sleep=lambda _s: None,
+                    artifact_root=root,
+                    output_root=root / "run-outcomes",
+                )
+                self.assertEqual(result["domain_outcome"], "FAILED")
+                self.assertEqual(result["reason_code"], expected_code)
+                self.assertEqual(len(calls), 1)
+
+        # Board only + unreachable: no retry, HANDOFF_INCOMPLETE.
+        run_case(lambda root: write_board_only(root, "2026-09-05"), "HANDOFF_INCOMPLETE")
+
+        # Handoff only + unreachable: no retry, PARTIAL_EDITORIAL_ARTIFACT_SET.
+        def handoff_only(root: Path) -> None:
+            handoff = root / "social/research/daily/2026-09-05-editorial-candidates.json"
+            handoff.parent.mkdir(parents=True, exist_ok=True)
+            handoff.write_text(
+                '{"schema":"nullone.editorial-candidate-handoff.v1",'
+                '"contract_version":"1.0.0",'
+                '"editorial_date":"2026-09-05",'
+                '"board_path":"social/research/daily/2026-09-05-editorial-board.md",'
+                '"candidates":[]}',
+                encoding="utf-8",
+            )
+
+        run_case(handoff_only, "PARTIAL_EDITORIAL_ARTIFACT_SET")
+
+        # Malformed handoff + unreachable: no retry, HANDOFF_INVALID.
+        def malformed_handoff(root: Path) -> None:
+            write_board_only(root, "2026-09-05")
+            handoff = root / "social/research/daily/2026-09-05-editorial-candidates.json"
+            handoff.write_text("{not json", encoding="utf-8")
+
+        run_case(malformed_handoff, "HANDOFF_INVALID")
+
+    def test_full_artifacts_then_late_failure_completes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            calls: list[int] = []
+
+            def complete_then_unreachable() -> None:
+                calls.append(1)
+                write_morning_artifacts(root, "2026-09-05", candidates=())
+                raise ProviderUnreachableError("late ENOTFOUND after completion")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-05T08:30:00+04:00",
+                board_date="2026-09-05",
+                invoke_provider=complete_then_unreachable,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "SUCCEEDED")
+            self.assertEqual(len(calls), 1)
+
+    def test_empty_first_attempt_still_gets_bounded_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            calls: list[int] = []
+
+            def unreachable_once_then_complete() -> None:
+                calls.append(1)
+                if len(calls) < 2:
+                    raise ProviderUnreachableError("ENOTFOUND first attempt")
+                write_morning_artifacts(root, "2026-09-05", candidates=())
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-05T08:30:00+04:00",
+                board_date="2026-09-05",
+                invoke_provider=unreachable_once_then_complete,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "SUCCEEDED")
+            self.assertEqual(len(calls), 2)
 
     def test_malformed_handoff_cannot_masquerade_as_success(self):
         with tempfile.TemporaryDirectory() as td:
@@ -532,6 +626,74 @@ class MorningHandoffContractTests(unittest.TestCase):
                 output_root=root / "run-outcomes",
             )
             self.assertEqual(result["domain_outcome"], "SUCCEEDED")
+
+    def test_stale_date_handoff_rejected(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_board_only(root, "2026-09-08")
+            handoff = root / "social/research/daily/2026-09-08-editorial-candidates.json"
+            handoff.write_text(
+                json.dumps(
+                    {
+                        "schema": "nullone.editorial-candidate-handoff.v1",
+                        "contract_version": "1.0.0",
+                        "editorial_date": "2026-09-07",
+                        "board_path": "social/research/daily/2026-09-07-editorial-board.md",
+                        "candidates": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def must_not_be_called() -> None:
+                raise AssertionError("provider must not be re-invoked")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-08T08:30:00+04:00",
+                board_date="2026-09-08",
+                invoke_provider=must_not_be_called,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "HANDOFF_INVALID")
+
+    def test_misbound_board_path_rejected(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_board_only(root, "2026-09-08")
+            handoff = root / "social/research/daily/2026-09-08-editorial-candidates.json"
+            handoff.write_text(
+                json.dumps(
+                    {
+                        "schema": "nullone.editorial-candidate-handoff.v1",
+                        "contract_version": "1.0.0",
+                        "editorial_date": "2026-09-08",
+                        "board_path": "social/research/daily/2026-09-07-editorial-board.md",
+                        "candidates": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def must_not_be_called() -> None:
+                raise AssertionError("provider must not be re-invoked")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-08T08:30:00+04:00",
+                board_date="2026-09-08",
+                invoke_provider=must_not_be_called,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "HANDOFF_INVALID")
 
     def test_completed_source_is_not_rewritten(self):
         with tempfile.TemporaryDirectory() as td:

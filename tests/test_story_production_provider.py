@@ -172,6 +172,45 @@ class ConsumedScanTests(unittest.TestCase):
                 find_consumed_story_request_ids(workspace_root=root), frozenset()
             )
 
+    def test_consumed_attempt_without_request_id_fails_closed(self):
+        from nullone_editorial_candidate_handoff import EditorialHandoffError
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "social/ops/manifests"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            doc = self._manifest("story-request-x", 2)
+            del doc["story_request_id"]
+            (manifest_dir / "a.json").write_text(json.dumps(doc), encoding="utf-8")
+            with self.assertRaises(EditorialHandoffError):
+                find_consumed_story_request_ids(workspace_root=root)
+
+    def test_symlink_entry_fails_closed(self):
+        from nullone_editorial_candidate_handoff import EditorialHandoffError
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "social/ops/manifests"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            real = manifest_dir / "real.json"
+            real.write_text(
+                json.dumps(self._manifest("story-request-x", 0)), encoding="utf-8"
+            )
+            (manifest_dir / "link.json").symlink_to(real)
+            with self.assertRaises(EditorialHandoffError):
+                find_consumed_story_request_ids(workspace_root=root)
+
+    def test_non_object_json_fails_closed(self):
+        from nullone_editorial_candidate_handoff import EditorialHandoffError
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "social/ops/manifests"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            (manifest_dir / "a.json").write_text("[1, 2]", encoding="utf-8")
+            with self.assertRaises(EditorialHandoffError):
+                find_consumed_story_request_ids(workspace_root=root)
+
 
 class NoMarkdownInfluenceTests(unittest.TestCase):
     def test_board_queue_ledger_content_cannot_steer_selection(self):

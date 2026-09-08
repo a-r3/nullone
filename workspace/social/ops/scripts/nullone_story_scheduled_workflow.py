@@ -37,13 +37,14 @@ import fcntl
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from nullone_bridge_common import WORKSPACE as DEFAULT_WORKSPACE_ROOT
 from nullone_editorial_candidate_handoff import (
     EditorialHandoffError,
+    board_relative_path,
     find_consumed_story_request_ids,
     handoff_relative_path,
     load_handoff_snapshot,
@@ -72,6 +73,10 @@ from nullone_story_production_provider import (
 from nullone_story_workflow import STORY_WORKFLOW_ID, run_story_workflow
 
 STORY_RUN_OUTCOME_SUBPATH = Path("social/ops/run-outcomes/story")
+MORNING_RUN_OUTCOME_SUBPATH = Path("social/ops/run-outcomes/morning-editorial")
+
+MORNING_WORKFLOW_ID = "morning-editorial"
+MORNING_SOURCE = "openclaw"
 
 APPLICATION_EXECUTION_STATES = frozenset({"COMPLETED", "FAILED"})
 
@@ -136,6 +141,77 @@ def _failed(
     )
 
 
+def _morning_source_proven(
+    *,
+    workspace_root: Path,
+    morning_output_root: Path,
+    editorial_date: str,
+) -> bool:
+    """Prove the date's Morning occurrence established a SUCCEEDED #27 result.
+
+    A structurally valid handoff file alone is not production authority: a
+    Morning cycle may have written both artifacts and then failed. This
+    checks the exact persisted `nullone.run-outcome.v1` record for the
+    deterministic Morning occurrence of this Baku date -- correct
+    workflow/occurrence/run identity, `domain_outcome == SUCCEEDED`, and
+    `required_artifacts` declaring BOTH the board and the handoff. Uses
+    only the existing schedule registry, #65 identity, and #27 helpers;
+    no second health database, no scheduler stdout. Anything else fails
+    closed (returns False, never raises for malformed state).
+    """
+
+    from zoneinfo import ZoneInfo
+
+    from nullone_schedule_registry import get_schedule
+    from nullone_scheduler_invocation import compute_occurrence_id
+
+    try:
+        spec = get_schedule(MORNING_WORKFLOW_ID)
+        local_tz = ZoneInfo(spec.timezone_name)
+        year, month, day = (int(part) for part in editorial_date.split("-"))
+        slot = spec.local_time_of_day()
+        local_instant = datetime(
+            year, month, day, slot.hour, slot.minute, slot.second, tzinfo=local_tz
+        )
+        # The slot must belong to the requested Baku date (never borrow a
+        # neighboring date's occurrence, in either direction).
+        if local_instant.strftime("%Y-%m-%d") != editorial_date:
+            return False
+        scheduled_for = local_instant.astimezone(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except Exception:
+        return False
+    external_occurrence_id = f"{spec.schedule_id}@{scheduled_for}"
+    try:
+        occurrence_id = compute_occurrence_id(
+            MORNING_WORKFLOW_ID, MORNING_SOURCE, external_occurrence_id, scheduled_for
+        )
+        run_id = make_run_id(
+            workflow_id=MORNING_WORKFLOW_ID, occurrence_id=occurrence_id
+        )
+        result_file = result_path(morning_output_root, run_id)
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        validate_result_structure(result)
+    except Exception:
+        return False
+
+    if (
+        result.get("workflow_id") != MORNING_WORKFLOW_ID
+        or result.get("occurrence_id") != occurrence_id
+        or result.get("run_id") != run_id
+        or result.get("domain_outcome") != "SUCCEEDED"
+    ):
+        return False
+
+    required = result.get("required_artifacts")
+    if not isinstance(required, list):
+        return False
+    board_rel = board_relative_path(editorial_date)
+    handoff_rel = handoff_relative_path(editorial_date)
+    return board_rel in required and handoff_rel in required
+
+
 def _occurrence_lock_path(output_root: Path, run_id: str) -> Path:
     return output_root.resolve() / f"{run_id}.lock"
 
@@ -162,6 +238,7 @@ def run_story_trigger(
     notifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     workspace_root: Path = DEFAULT_WORKSPACE_ROOT,
     output_root: Path | None = None,
+    morning_output_root: Path | None = None,
     timezone_name: str = "Asia/Baku",
     now: datetime | None = None,
 ) -> StoryScheduledResult:
@@ -201,6 +278,33 @@ def run_story_trigger(
         if output_root is not None
         else workspace_root / STORY_RUN_OUTCOME_SUBPATH
     )
+
+    # Source provenance BEFORE any candidate/provider/writer/draft/delivery
+    # work: today's handoff is consumable only if the corresponding Morning
+    # Editorial occurrence established a valid persisted SUCCEEDED #27
+    # result declaring both artifacts. A valid handoff file left behind by
+    # a failed Morning cycle must never be consumed.
+    resolved_morning_output_root = (
+        morning_output_root
+        if morning_output_root is not None
+        else workspace_root / MORNING_RUN_OUTCOME_SUBPATH
+    )
+    if not _morning_source_proven(
+        workspace_root=workspace_root,
+        morning_output_root=resolved_morning_output_root,
+        editorial_date=editorial_date,
+    ):
+        return _failed(
+            reason_code="MORNING_SOURCE_UNPROVEN",
+            reason_text=(
+                "No proven SUCCEEDED Morning Editorial result for this date; "
+                "refusing to consume the handoff."
+            ),
+            occurrence_id=occurrence_id,
+            run_id=expected_run_id,
+            editorial_date=editorial_date,
+        )
+
     resolved_output_root.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(
         str(_occurrence_lock_path(resolved_output_root, expected_run_id)),
@@ -541,7 +645,8 @@ def self_test() -> int:
         assert result.application_execution == "FAILED", result
         assert result.reason_code == "TRIGGER_REJECTED", result
 
-        # 2. Missing handoff snapshot -> FAILED/SOURCE_HANDOFF_MISSING.
+        # 2. No Morning #27 result -> MORNING_SOURCE_UNPROVEN, zero calls,
+        #    even with no handoff present either.
         trigger = make_trigger()
         result = run_story_trigger(
             trigger,
@@ -554,9 +659,9 @@ def self_test() -> int:
             notifier=lambda _r: {"status": "NOT_REQUIRED"},
         )
         assert result.application_execution == "FAILED", result
-        assert result.reason_code == "SOURCE_HANDOFF_MISSING", result
+        assert result.reason_code == "MORNING_SOURCE_UNPROVEN", result
 
-        # 3. Malformed handoff -> FAILED/SOURCE_HANDOFF_INVALID.
+        # 3. Malformed handoff still gates on provenance first.
         research = root / "social/research/daily"
         research.mkdir(parents=True, exist_ok=True)
         (research / "2026-09-08-editorial-candidates.json").write_text(
@@ -573,7 +678,7 @@ def self_test() -> int:
             notifier=lambda _r: {"status": "NOT_REQUIRED"},
         )
         assert result.application_execution == "FAILED", result
-        assert result.reason_code == "SOURCE_HANDOFF_INVALID", result
+        assert result.reason_code == "MORNING_SOURCE_UNPROVEN", result
 
     print("STORY_SCHEDULED_WORKFLOW_SELF_TEST=PASS")
     print("NO_NETWORK=TRUE")

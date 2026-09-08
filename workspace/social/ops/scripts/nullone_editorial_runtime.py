@@ -12,7 +12,9 @@ from typing import Any, Callable
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_candidate_handoff import (
     EditorialHandoffError,
-    validate_handoff,
+    board_relative_path,
+    handoff_relative_path,
+    load_handoff_snapshot,
 )
 from nullone_run_outcome import (
     assess_run,
@@ -158,22 +160,6 @@ def classify_provider_failure(exc: BaseException) -> tuple[str, str]:
     )
 
 
-def board_relative_path(board_date: str) -> str:
-    return f"social/research/daily/{board_date}-editorial-board.md"
-
-
-def handoff_relative_path(board_date: str) -> str:
-    """Structured machine-readable candidate handoff for one editorial date (#79).
-
-    Machine-authored directly by the Morning Editorial cycle alongside the
-    board Markdown -- never parsed out of it later. A successful Morning
-    occurrence always produces both artifacts, including an explicitly
-    empty candidate list on a quiet news day (never quota-filled).
-    """
-
-    return f"social/research/daily/{board_date}-editorial-candidates.json"
-
-
 def _artifact_ready(artifact_root: Path, relative: str) -> bool:
     path = (artifact_root / relative).resolve()
     return path.is_file() and path.stat().st_size > 0
@@ -183,18 +169,20 @@ def _all_artifacts_ready(artifact_root: Path, required: tuple[str, ...]) -> bool
     return all(_artifact_ready(artifact_root, rel) for rel in required)
 
 
-def _handoff_valid(artifact_root: Path, relative: str) -> bool:
-    """The handoff artifact parses and passes strict contract validation.
+def _handoff_valid_for_date(artifact_root: Path, board_date: str) -> bool:
+    """The date's handoff artifact parses, validates, and binds exactly.
 
-    Presence alone never counts as a healthy machine-readable cycle: a
-    malformed handoff fails closed here (non-retryable) instead of
-    masquerading as success. Never infers from Markdown.
+    Uses the same canonical loader Story reads (`load_handoff_snapshot`
+    with the expected board_date), so Morning success proves the exact
+    date/board binding -- not merely generic handoff shape. Presence
+    alone never counts as a healthy machine-readable cycle: a missing,
+    stale, misbound, or malformed handoff fails closed here
+    (non-retryable) instead of masquerading as success. Never infers
+    from Markdown.
     """
 
-    path = (artifact_root / relative).resolve()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        validate_handoff(data)
+        load_handoff_snapshot(workspace_root=artifact_root, editorial_date=board_date)
     except (OSError, json.JSONDecodeError, EditorialHandoffError):
         return False
     return True
@@ -267,9 +255,7 @@ def run_morning_editorial(
             # this is what prevents a retry, a re-entry, or a genuinely
             # concurrent second invocation from producing a second
             # editorial board/handoff or a second queue/state mutation
-            # for the same occurrence. (A partial artifact set still
-            # re-invokes: only the provider can complete its own cycle,
-            # and the per-attempt artifact gate below keeps that bounded.)
+            # for the same occurrence.
             if _all_artifacts_ready(artifact_root, required_artifacts):
                 break
 
@@ -279,6 +265,18 @@ def run_morning_editorial(
             except Exception as exc:
                 reason_code, reason_text = classify_provider_failure(exc)
                 retryable = reason_code == "PROVIDER_UNREACHABLE"
+
+                # #28 material-progress guard: once ANY provider-owned
+                # artifact for this occurrence exists, the attempt made
+                # material progress (board write and queue/ledger mutation
+                # may already have happened) -- never invoke the editorial
+                # provider again for this occurrence, even when the
+                # failure itself looks retryable. Bounded retry survives
+                # only for a genuinely empty first attempt.
+                if _artifact_ready(
+                    artifact_root, required_artifacts[0]
+                ) or _artifact_ready(artifact_root, required_artifacts[1]):
+                    break
 
                 if not retryable or attempt == max_attempts:
                     plural = "s" if attempts_made != 1 else ""
@@ -306,19 +304,30 @@ def run_morning_editorial(
                 )
                 continue
 
-        # A successful Morning occurrence always produces a healthy
-        # machine-readable cycle too: a missing handoff is caught by the
-        # required-artifact gate inside assess_run, but a present yet
-        # malformed handoff must equally fail closed here (non-retryable --
-        # malformed provider output never earns another attempt).
-        if not _handoff_valid(artifact_root, required_artifacts[1]):
+        # A successful Morning occurrence always produces a complete,
+        # healthy machine-readable cycle. Partial artifact sets fail
+        # closed with stable codes (non-retryable -- partial or malformed
+        # provider output never earns another attempt):
+        # - board present, handoff missing -> HANDOFF_INCOMPLETE;
+        # - handoff present, board missing -> PARTIAL_EDITORIAL_ARTIFACT_SET;
+        # - handoff present but malformed -> HANDOFF_INVALID.
+        board_ready = _artifact_ready(artifact_root, required_artifacts[0])
+        handoff_ready = _artifact_ready(artifact_root, required_artifacts[1])
+        partial_code: str | None = None
+        if board_ready and not handoff_ready:
+            partial_code = "HANDOFF_INCOMPLETE"
+        elif handoff_ready and not board_ready:
+            partial_code = "PARTIAL_EDITORIAL_ARTIFACT_SET"
+        elif handoff_ready and not _handoff_valid_for_date(artifact_root, board_date):
+            partial_code = "HANDOFF_INVALID"
+        if partial_code is not None:
             result = assess_run(
                 workflow_id=WORKFLOW_ID,
                 occurrence_id=occurrence_id,
                 scheduler_status="succeeded",
                 domain_outcome="FAILED",
-                reason_code="HANDOFF_INVALID",
-                reason_text="Structured candidate handoff missing or malformed.",
+                reason_code=partial_code,
+                reason_text="Structured Morning artifact set incomplete or invalid.",
             )
             emit_result_once(
                 output_root,
