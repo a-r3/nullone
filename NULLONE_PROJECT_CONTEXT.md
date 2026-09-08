@@ -129,50 +129,72 @@ NOT DEPLOYED — no Story job exists, no live handoff, no Story production
 run proof, no Zernio draft created, no Telegram preview sent, no OpenClaw
 changes.
 
-#80 is OPEN with its previous #79 dependency now satisfied:
-NEXT_ENGINEERING_TASK = #80 (Breaking production structured handoff).
-#81 is OPEN: DraftProvider live scheduled path remains UNPROVEN and still
+#80 is CLOSED/COMPLETED (PR #85 squash-merged as `879e04b2db5adda9e0370d10771f626ef6c951ed`; repository implementation is MERGED; NOT DEPLOYED).
+NEXT_ENGINEERING_TASK = #81 (DraftProvider resolution/proof).
+#81 is OPEN: DraftProvider live scheduled path remains `LIVE_SCHEDULED_PATH_UNPROVEN` and still
 blocks READY. #37 is OPEN / BLOCKED; do not rerun yet.
 
-### #80 Breaking Radar production integration — IN PR (not merged, not deployed)
+### #80 Breaking Radar production integration — CLOSED / COMPLETED
 
 #84 merged at `8b1245b62b2bdd0aa7e93df6a88ad9989d886c3c`. #79 is CLOSED.
-#80 repository implementation is now in PR (OPEN until merge): live Radar
-job verified read-only (`texbrif-breaking-radar`,
-`30 11,14,17,20,23 * * * Asia/Baku`, prompt-only agent job — preserved
-slots 11:30/14:30/17:30/20:30/23:30); deterministic scan-slot authority
-with latest-due coalescing; candidate-ID **shape** enforced at commit
-(stable-anchor derivation required by Radar prompt contract; semantic
-slug provenance not independently recomputed); exact
-`nullone.breaking-radar-handoff.v1` envelopes committed atomically by the
-deterministic edge under canonical staging-root and spool-root
-containment (symlink-mediated canonical-root escape fails closed; the
-scan receipt is the authoritative commit record — orphan handoffs are not
-executable; a later recommit with a different retry `triggered_at`
-preserves the original orphan handoff and repairs the receipt, while
-assessment mutation still conflicts; missing/corrupt/contradictory
-authoritative spool state fails the consumer sweep non-zero with no
-source fallback; every listed handoff is bound to the exact authoritative
-receipt scan before workflow invocation — mismatches fail as
-`HANDOFF_SCAN_IDENTITY_MISMATCH`; scan identity is registry-backed via
-`resolve_radar_scan`); spool
-`social/ops/breaking-handoffs/<scan>/<candidate>.json`; static consumer
-sweep (desired `45 11,14,17,20,23 * * * Asia/Baku`, NOT DEPLOYED) that
-consumes only receipt-listed candidates, fails closed on authoritative
-corruption and unexpected runner crashes (non-zero CLI), and never
-treats establishment failures as ordinary processed work; Story-first
-preserved with no main provider; Radar/LLM dependency attestation is not
-dispatch-time recheck (production #80 passes no fake recheck; #81
-remains OPEN). Fresh/replay #27 reason and notification-error
-classification semantics are identical. #80 remains OPEN until merge.
-#37 remains OPEN / BLOCKED. No production activation occurred; no
-synthetic Breaking event. **NOT DEPLOYED.**
+#80 is CLOSED/COMPLETED: PR #85 squash-merged on `main` as
+`879e04b2db5adda9e0370d10771f626ef6c951ed` (`Closes #80`). Repository
+implementation is MERGED. Implementation remains **NOT DEPLOYED** — no
+production activation occurred, no synthetic Breaking event was created,
+and live OpenClaw jobs/schedules/secrets remain untouched.
+
+Finalized repository architecture:
+- Live Radar verified read-only (`texbrif-breaking-radar`,
+  `30 11,14,17,20,23 * * * Asia/Baku`, prompt-only agent job — preserved
+  slots 11:30/14:30/17:30/20:30/23:30);
+- Markdown remains non-authoritative;
+- Authoritative schema: `nullone.breaking-radar-handoff.v1`;
+- Deterministic scan-slot authority with latest-due coalescing (no backfill);
+- Candidate-ID **shape** enforced deterministically at commit (stable-anchor
+  semantic derivation remains Radar prompt contract; semantic slug provenance
+  is not independently recomputed);
+- Exact `nullone.breaking-radar-handoff.v1` envelopes committed atomically by
+  the deterministic edge under canonical staging-root and spool-root containment
+  (`social/ops/breaking-staging` and `social/ops/breaking-handoffs`); direct and
+  parent-component symlink-mediated escapes fail closed before any mutation;
+- Scan-directory symlinks fail closed;
+- Scan receipt is the authoritative commit record — orphan handoff alone is not
+  executable; crash-before-receipt recommit preserves original orphan handoff
+  bytes across different retry `triggered_at` and repairs receipt listing, while
+  assessment mutation conflicts (`COMMIT_CONFLICT`);
+- Registry-backed scan identity (`validate_committed_scan_identity` /
+  `resolve_radar_scan`): fabricated schedule IDs fail even when a receipt
+  mirrors them; historical scans validate without wall clock;
+- Handoff-to-receipt scan binding: every listed handoff is bound to the exact
+  authoritative receipt scan before any workflow call — `source_occurrence_id`
+  and `scheduled_for` must match the receipt exactly, and the computed candidate
+  external ID must match the receipt-listed ID and filename;
+- Authoritative mismatch, missing receipt, corrupt spool state, or scan-directory
+  symlink fails the consumer sweep closed as `FAILED` / non-zero CLI
+  (`SWEEP_AUTHORITY_CORRUPT`, `HANDOFF_SCAN_IDENTITY_MISMATCH`) with no source
+  fallback;
+- Static spool consumer (desired `45 11,14,17,20,23 * * * Asia/Baku`, NOT
+  DEPLOYED) consumes only receipt-listed candidates, fails closed on
+  unexpected runner crashes (non-zero CLI), and never treats establishment
+  failures as ordinary processed work;
+- Story-first preserved, no main provider (`BLOCKED_BEFORE_ATTEMPT`), no
+  publication capability;
+- Production #80 supplies no fake `dependency_recheck` (Radar/LLM dependency
+  attestation is editorial evidence only, not dispatch-time recheck); #81 still
+  owns real DraftProvider/live dependency readiness (`LIVE_SCHEDULED_PATH_UNPROVEN`);
+- Fresh/replay #27 reason and notification-error classification semantics are
+  identical.
+
+#80 is CLOSED. #81 is OPEN: DraftProvider live scheduled path remains
+`LIVE_SCHEDULED_PATH_UNPROVEN` and still blocks READY. #37 remains OPEN /
+BLOCKED. No production activation occurred; no synthetic Breaking event.
+**NOT DEPLOYED (MERGED != DEPLOYED).** Current live production remains the
+old/current baseline.
 
 Current required order:
 
 ```text
-#80 Breaking production integration
-→ #81 DraftProvider resolution/proof
+#81 DraftProvider resolution/proof
 → NEW read-only #37 preflight
 → READY_FOR_CONTROLLED_DEPLOYMENT?
 → controlled deployment only if READY
@@ -193,9 +215,7 @@ are preserved unchanged.
 Required order:
 
 ```text
-Story production integration
-→ Breaking production integration
-→ resolve DraftProvider production-path proof
+#81 DraftProvider resolution/proof
 → NEW read-only #37 preflight
 → READY_FOR_CONTROLLED_DEPLOYMENT?
 → only then controlled deployment
@@ -1427,7 +1447,7 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current Git desired-state M0 execution order — after #79 merge (PR #83)
+### Current Git desired-state M0 execution order — after #80 merge (PR #85)
 
 1. #59 is CLOSED/COMPLETED: PR #75 squash-merged as
    `03603698291b2f6e5c0775067f15abb33f87fa63` (foundation PR #73
@@ -1441,17 +1461,22 @@ rewrite historical production evidence or authorize deployment.
    production-integration blockers #79/#80 and readiness gate #81. Do not
    provision secrets or mutate production from this context record alone.
 3. #79 is CLOSED/COMPLETED: PR #83 squash-merged as
-   `3d88d142c0757f4cdb70ae3e7c5861e1efe115bf`. NEXT_ENGINEERING_TASK =
-   #80 Breaking production integration (previous #79 dependency
-   satisfied) → #81 DraftProvider production-path resolution/proof (#81
-   may be investigated in parallel where technically independent, but
-   must be resolved before READY) → NEW strictly read-only #37 preflight
-   (the historical 2026-09-07 preflight remains preserved as historical
-   evidence).
-4. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
+   `3d88d142c0757f4cdb70ae3e7c5861e1efe115bf` (`Closes #79`). Production
+   Story repository integration complete; NOT DEPLOYED.
+4. #80 is CLOSED/COMPLETED: PR #85 squash-merged on `main` as
+   `879e04b2db5adda9e0370d10771f626ef6c951ed` (`Closes #80`). Production
+   Breaking Radar structured handoff repository integration complete.
+   Implementation is MERGED; remains NOT DEPLOYED; no production activation
+   or synthetic Breaking event occurred.
+5. NEXT_ENGINEERING_TASK = #81 DraftProvider production-path resolution/proof
+   (`LIVE_SCHEDULED_PATH_UNPROVEN`; #81 remains OPEN and must be resolved before
+   READY) → NEW strictly read-only #37 preflight (the historical 2026-09-07 and
+   2026-09-08 preflights remain preserved as historical evidence; DO NOT rerun
+   #37 yet).
+6. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
    deployment under #37; otherwise report the exact blockers with no deploy.
-   No ad-hoc deployment is permitted.
-5. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
+   No ad-hoc deployment is permitted (MERGED != DEPLOYED).
+7. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
 
 #37 remains OPEN under its unchanged acceptance criteria. Once its
 integration dependencies are merged and preflight permits deployment, it
