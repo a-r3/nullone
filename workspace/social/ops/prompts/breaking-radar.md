@@ -114,24 +114,59 @@ Those belong to Morning Editorial.
 
 Keep reports compact.
 
-## Desired machine-readable handoff (repository contract; not deployed)
+## Machine-readable handoff (AUTHORITATIVE for Breaking dispatch)
 
-Status: `DESIRED / NOT DEPLOYED`.
+Status: repository contract reviewed in #80; NOT DEPLOYED until #37.
 
-The current operational Radar output remains the Markdown research report at
-`social/research/daily/YYYY-MM-DD-breaking-HHMM.md`. That report is not a
-safety-critical application command and must not be heuristically parsed.
+The Markdown report above remains a HUMAN/audit artifact. It is
+NON-AUTHORITATIVE: DO NOT construct safety-critical application input by
+reading the Markdown report back. The structured handoff and the Markdown
+report are sibling outputs from the same Radar assessment -- both are
+authored explicitly from your findings, never parsed from each other.
 
-A future reviewed OpenClaw Radar job integration may produce zero, one, or
-several exact `nullone.breaking-radar-handoff.v1` envelopes from one scheduled
-scan, one envelope per candidate. Each contains the stable raw scan
-`source_occurrence_id`, timestamps, and a complete
-`nullone.breaking-workflow-input.v1` assessment. The edge deterministically
-binds the raw scan identity to `candidate_id`, so every candidate becomes its
-own stable scheduler occurrence without using retry time or mutable assessment
-text. The
-executable field contract and validation live in
-`social/ops/scripts/nullone_breaking_radar_edge.py` and
-`social/ops/scripts/nullone_breaking_workflow_input.py`. The handoff supplies
-structured evidence and editorial findings only; NullOne remains responsible
-for fresh-state identity, routing, capacity, durable dispatch, and outcomes.
+For every qualifying NEWS/BREAKING candidate, write ONE staged
+assessment JSON file (exact `nullone.breaking-workflow-input.v1` shape),
+then commit it with the deterministic helper:
+
+  python3 workspace/social/ops/scripts/nullone-breaking-scan.py current-scan
+  python3 workspace/social/ops/scripts/nullone-breaking-scan.py commit --assessment <staged-file>.json
+
+If no candidate qualifies, record the truthful empty scan (never force quota):
+
+  python3 workspace/social/ops/scripts/nullone-breaking-scan.py record-empty
+
+The commit helper resolves the current scan slot, stamps occurrence
+metadata, strictly validates the whole envelope, and atomically commits
+it. Never invent `source_occurrence_id`, `scheduled_for`, or file paths
+yourself; never write handoff files directly.
+
+Assessment rules (validator-exact; violations are rejected at commit):
+
+- candidate_id: stable lowercase slug, 2-8 hyphen segments, max 80 chars,
+  built from a stable anchor (primary announcement/source identity +
+  topic slug), e.g. `acme-widget-2-launch`. Never rank/title/timestamp
+  derived. Same real development later keeps the same candidate_id.
+- content_type: NEWS or BREAKING only.
+- verification.state: UNVERIFIED, PARTIAL, PASS, or BLOCKED (never FAIL).
+  Non-PASS stays fail-closed before any draft work. PASS requires
+  evidence_refs exactly matching evidence refs in order.
+- severity_assessment.classification: NORMAL, MATERIAL_BREAKING, or
+  EXCEPTIONAL_BREAKING (required when PASS; null unless PASS; reason
+  required for breaking severities). main_assessment only for
+  EXCEPTIONAL_BREAKING.
+- evidence: non-empty list of {ref, supported_claim} plus source fields
+  where known (source_url, announcement_id, product/version/region,
+  availability_stage, numeric value/unit/population/period).
+- recent_coverage: related_coverage_exists, incremental_value_present,
+  assessment_ref, freshness_ref.
+- story_safety: quality_pass + quality_ref, dependencies_available +
+  dependencies_ref.
+- topic, topic_cluster, assessment_ref, state_snapshot_ref,
+  source_attribution, limitations (may be empty list only if genuinely
+  none -- prefer explicit limits), product_version_region
+  {product, version, region}, source_image or null,
+  candidate_version or null, follow_up_delta or null.
+
+Radar must NOT directly: choose publication action, publish, approve,
+bypass identity/routing, create drafts, send Telegram, call publisher,
+or mutate the publish ledger. Breaking stops at human review preview.

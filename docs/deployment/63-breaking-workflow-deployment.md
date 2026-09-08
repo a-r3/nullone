@@ -153,18 +153,27 @@ exact `nullone.run-outcome.v1` artifact and scheduler health is reserved for
 the future production edge; #63 does not create a competing persistence
 system.
 
-## Current live limitations
+## Current live limitations (updated by #80 repository decision)
 
 The repository Breaking Radar prompt remains `DELTA_MONITORING_ONLY` and its
 current operational output is
-`social/research/daily/YYYY-MM-DD-breaking-HHMM.md`. It does not prove that a
-production job emits the strict machine-readable handoff above. That handoff
-is **DESIRED / NOT DEPLOYED**; arbitrary Radar Markdown must never be scraped
-heuristically into safety-critical #35/#36 fields.
+`social/research/daily/YYYY-MM-DD-breaking-HHMM.md`. RESOLVED by #79/#80
+as a repository decision (DESIRED / NOT DEPLOYED until #37): the Radar
+agent additionally authors exact `nullone.breaking-radar-handoff.v1`
+envelopes through the deterministic commit edge
+(`nullone-breaking-scan.py`), which stamps scan occurrence metadata,
+strict-validates, and atomically commits to
+`social/ops/breaking-handoffs/<scan>/<candidate>.json` with a scan
+receipt. The Markdown report stays a non-authoritative human artifact;
+arbitrary Radar Markdown is never scraped heuristically into
+safety-critical #35/#36 fields. Details:
+`docs/deployment/80-breaking-radar-production-integration.md`.
 
-No reviewed structured authoritative production Breaking candidate source is
-currently proven. No Story-specific live OpenClaw job is proven or deployed.
-The scheduled-session Zernio DraftProvider bootstrap remains
-`LIVE_SCHEDULED_PATH_UNPROVEN`. Natural live Breaking proof remains
-`UNPROVEN_LIVE / DEFERRED_TO_#37`; no synthetic production event may be used
-to manufacture it.
+The reviewed structured authoritative production Breaking candidate
+source is the #80 commit edge + spool described above (repository
+decision, DESIRED / NOT DEPLOYED). No Story-specific live OpenClaw job
+is proven or deployed. The scheduled-session Zernio DraftProvider
+bootstrap remains `LIVE_SCHEDULED_PATH_UNPROVEN` (owned by #81, untouched
+by #80). Natural live Breaking proof remains `UNPROVEN_LIVE /
+DEFERRED_TO_#37`; no synthetic production event may be used to
+manufacture it.
