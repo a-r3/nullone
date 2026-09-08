@@ -48,6 +48,17 @@ SECRET_ID_ZERNIO_ANALYTICS_BEARER = "zernio.analytics.bearer"
 # Nothing outside this module needs (or may) know it.
 ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN = "ZERNIO_ANALYTICS_API_TOKEN"
 
+# DISTINCT draft/write credential identity (#81).
+#
+# Deliberately separate from `zernio.analytics.bearer`. The analytics
+# credential is read-only and must never be reused for draft creation,
+# media presign, or any write surface. The draft credential is the only
+# identity the direct Zernio DraftProvider may use.
+SECRET_ID_ZERNIO_DRAFTS_BEARER = "zernio.drafts.bearer"
+
+# Sole environment-variable binding for the drafts bearer secret.
+ENV_VAR_ZERNIO_DRAFT_API_TOKEN = "ZERNIO_DRAFT_API_TOKEN"
+
 # Fixed, value-free rendering produced by every non-revealing
 # representation of a SecretValue.
 SECRET_REDACTED_RENDER = "<redacted>"
@@ -158,6 +169,7 @@ class EnvironmentSecretProvider:
 
     ENV_VAR_BY_SECRET_ID: Mapping[str, str] = {
         SECRET_ID_ZERNIO_ANALYTICS_BEARER: ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN,
+        SECRET_ID_ZERNIO_DRAFTS_BEARER: ENV_VAR_ZERNIO_DRAFT_API_TOKEN,
     }
 
     def __init__(self, environ: Mapping[str, str] | None = None) -> None:

@@ -46,6 +46,8 @@ COMMANDS = [
     [sys.executable, "tests/test_analytics_provider_factory.py"],
     [sys.executable, "tests/test_secret_provider.py"],
     [sys.executable, "tests/test_scheduled_workflows_capability_negative.py"],
+    [sys.executable, "tests/test_zernio_draft_adapter.py"],
+    [sys.executable, "tests/test_draft_provider_factory.py"],
     [sys.executable, "tests/test_scheduled_run_cli.py"],
     [sys.executable, "tests/test_schedule_registry.py"],
     [sys.executable, "tests/test_scheduled_occurrence_authority.py"],
