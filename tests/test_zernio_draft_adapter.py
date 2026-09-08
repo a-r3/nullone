@@ -753,6 +753,96 @@ class PreflightTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Media identity binding tests (§1: response bound to exact manifest item)
+# ---------------------------------------------------------------------------
+
+
+class MediaBindingTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir_ctx.name)
+        self.addCleanup(self._tmpdir_ctx.cleanup)
+
+    def _blocked_run(self, media_body):
+        """Run a full draft flow with one media-validation body; return manifest + transport."""
+        manifest_path, _ = make_manifest(self.tmp_path)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        transport.post_responses["/tools/validate/media"] = (200, media_body)
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftPreflightBlockedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        return m, transport
+
+    def _assert_blocked_before_create(self, m, transport):
+        self.assertEqual(m["review"]["create_attempts"], 0)
+        self.assertEqual(m["review"]["state"], "NOT_CREATED")
+        self.assertIsNone(m["review"]["zernio_draft_id"])
+        self.assertEqual(
+            len([c for c in transport.post_calls if c[0] == "/posts"]), 0
+        )
+
+    def test_exact_valid_media_succeeds(self):
+        manifest_path, _ = make_manifest(self.tmp_path)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        provider = make_provider(transport)
+        provider.create_review_draft(manifest_path)
+
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "DRAFT_CREATED")
+
+    def test_response_url_mismatch_blocks_before_create(self):
+        body = media_validation_success(url="https://cdn.example.com/other.png")[1]
+        m, transport = self._blocked_run(body)
+        self._assert_blocked_before_create(m, transport)
+
+    def test_response_media_type_mismatch_blocks_before_create(self):
+        body = dict(media_validation_success()[1])
+        body["type"] = "video"
+        m, transport = self._blocked_run(body)
+        self._assert_blocked_before_create(m, transport)
+
+    def test_response_content_type_mismatch_blocks_before_create(self):
+        body = dict(media_validation_success()[1])
+        body["contentType"] = "image/jpeg"
+        m, transport = self._blocked_run(body)
+        self._assert_blocked_before_create(m, transport)
+
+    def test_instagram_within_limit_false_blocks_before_create(self):
+        body = dict(media_validation_success()[1])
+        body["platformLimits"] = {
+            "instagram": {
+                "limit": 8388608,
+                "limitFormatted": "8.0 MB",
+                "withinLimit": False,
+            }
+        }
+        m, transport = self._blocked_run(body)
+        self._assert_blocked_before_create(m, transport)
+
+    def test_jpg_alias_matches_jpeg_manifest(self):
+        # The only documented alias: image/jpg ≡ image/jpeg.
+        self.assertEqual(
+            adapter._normalize_content_type("image/jpg"), "image/jpeg"
+        )
+        manifest_path, m = make_manifest(self.tmp_path)
+        m["media"][0]["content_type"] = "image/jpeg"
+        atomic_write_json(manifest_path, m)
+        transport = FakeTransport()
+        setup_valid_transport(transport)
+        body = dict(media_validation_success()[1])
+        body["contentType"] = "image/jpg"
+        transport.post_responses["/tools/validate/media"] = (200, body)
+        provider = make_provider(transport)
+        provider.create_review_draft(manifest_path)
+
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "DRAFT_CREATED")
+
+
+# ---------------------------------------------------------------------------
 # Payload tests
 # ---------------------------------------------------------------------------
 
@@ -1011,7 +1101,14 @@ class ContractShapeTests(unittest.TestCase):
         for key in ("valid", "url", "contentType", "size", "type", "platformLimits"):
             self.assertIn(key, body)
         self.assertNotIn("status", body)
-        self.assertTrue(adapter._validate_media_response(body, what="media validation"))
+        self.assertTrue(
+            adapter._validate_media_response(
+                body,
+                what="media validation",
+                expected_url=PUBLIC_URL_1,
+                expected_content_type="image/png",
+            )
+        )
 
     def test_c_actual_post_validation_success_envelope(self):
         body = post_validation_success()[1]
@@ -1087,6 +1184,8 @@ class ContractShapeTests(unittest.TestCase):
             adapter._validate_media_response(
                 {"status": "READY", "valid": True, "error": ""},
                 what="media validation",
+                expected_url=PUBLIC_URL_1,
+                expected_content_type="image/png",
             )
         # Legacy post validation envelope with invented status.
         with self.assertRaises(adapter.DraftAdapterError):
@@ -1609,6 +1708,183 @@ class ReadbackTests(unittest.TestCase):
 
             post_calls = [c for c in transport.post_calls if c[0] == "/posts"]
             self.assertEqual(len(post_calls), 1, f"scenario {scenario} had extra POSTs")
+
+
+# ---------------------------------------------------------------------------
+# Readback exact target-set tests (§2: platforms must be exactly the one
+# intended target)
+# ---------------------------------------------------------------------------
+
+
+class ReadbackTargetSetTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir_ctx.name)
+        self.addCleanup(self._tmpdir_ctx.cleanup)
+
+    def _run_with_platforms(self, platforms):
+        manifest_path, _ = make_manifest(self.tmp_path, fmt="FEED")
+        transport = FakeTransport()
+        setup_valid_transport(transport, post_id="draft-123", fmt="FEED")
+        transport.get_responses["/posts/draft-123"] = (
+            200,
+            {"post": {"_id": "draft-123", "status": "draft", "platforms": platforms}},
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["create_attempts"], 1)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+        post_calls = [c for c in transport.post_calls if c[0] == "/posts"]
+        self.assertEqual(len(post_calls), 1)
+        return m
+
+    def _instagram_entry(self, account_id=CANONICAL_ACCOUNT_ID):
+        return {"platform": "instagram", "accountId": account_id}
+
+    def test_extra_twitter_target_rejected(self):
+        self._run_with_platforms(
+            [self._instagram_entry(), {"platform": "twitter", "accountId": "other"}]
+        )
+
+    def test_second_instagram_account_rejected(self):
+        self._run_with_platforms(
+            [self._instagram_entry(), self._instagram_entry(account_id="other")]
+        )
+
+    def test_duplicate_instagram_targets_rejected(self):
+        self._run_with_platforms([self._instagram_entry(), self._instagram_entry()])
+
+    def test_correct_platform_wrong_account_rejected(self):
+        self._run_with_platforms([self._instagram_entry(account_id="wrong-account")])
+
+    def test_empty_platforms_rejected(self):
+        self._run_with_platforms([])
+
+
+# ---------------------------------------------------------------------------
+# Transport POST allowlist tests (§3: exact-path capability boundary)
+# ---------------------------------------------------------------------------
+
+
+class TransportCapabilityTests(unittest.TestCase):
+    def _real_transport(self):
+        return adapter.build_authenticated_transport(
+            token=SecretValue(MARKER + "-transport")
+        )
+
+    def _canned_urlopen(self, calls):
+        class CannedResponse:
+            status = 200
+
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req)
+            return CannedResponse()
+
+        return fake_urlopen
+
+    def test_exact_post_allowlist(self):
+        self.assertEqual(
+            adapter.ALLOWED_POST_PATHS,
+            frozenset(
+                {
+                    "/media/presign",
+                    "/tools/validate/media",
+                    "/tools/validate/post",
+                    "/posts",
+                }
+            ),
+        )
+
+    def test_all_four_exact_paths_reach_request_handling(self):
+        transport = self._real_transport()
+        for path in sorted(adapter.ALLOWED_POST_PATHS):
+            calls = []
+            with patch.object(
+                adapter.urllib_request, "urlopen", side_effect=self._canned_urlopen(calls)
+            ):
+                status, body = transport.post(path, json_body={"probe": True})
+            self.assertEqual(status, 200)
+            self.assertEqual(body, {})
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(calls[0].full_url.endswith(path))
+
+    def test_posts_subpath_rejected_before_network(self):
+        transport = self._real_transport()
+        for forbidden in ("/posts/anything", "/posts/anything/retry", "/publish", "/v1/posts"):
+            calls = []
+            with patch.object(
+                adapter.urllib_request,
+                "urlopen",
+                side_effect=AssertionError("network must not be attempted"),
+            ):
+                with self.assertRaises(adapter.DraftAdapterError):
+                    transport.post(forbidden, json_body={"probe": True})
+            self.assertEqual(calls, [])
+
+    def test_rejection_exposes_no_credential(self):
+        transport = self._real_transport()
+        try:
+            transport.post("/posts/anything/retry", json_body={})
+        except adapter.DraftAdapterError as exc:
+            self.assertNotIn(MARKER, str(exc))
+        else:
+            self.fail("forbidden POST path did not fail closed")
+
+    def test_transport_exposes_no_publish_retry_method(self):
+        public_callable = sorted(
+            name
+            for name in dir(adapter.UrllibDraftTransport)
+            if not name.startswith("_")
+            and callable(getattr(adapter.UrllibDraftTransport, name))
+        )
+        self.assertEqual(public_callable, ["get", "post", "put"])
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI required-field discipline tests (§4)
+# ---------------------------------------------------------------------------
+
+
+class RequiredFieldDisciplineTests(unittest.TestCase):
+    """Current OpenAPI (3.1.0 / 1.0.4) declares NO `required[]` entry on the
+    presign, validate/media, or validate/post success schemas. key,
+    expiresIn, message, and warnings are therefore OPTIONAL and must not be
+    invented as requirements. This class pins that decision: responses
+    omitting those fields still validate."""
+
+    def test_presign_without_key_and_expires_in_passes(self):
+        upload_url, public_url = adapter._validate_presign_response(
+            {"uploadUrl": UPLOAD_URL_1, "publicUrl": PUBLIC_URL_1}
+        )
+        self.assertEqual(upload_url, UPLOAD_URL_1)
+        self.assertEqual(public_url, PUBLIC_URL_1)
+
+    def test_post_validation_without_message_warnings_passes(self):
+        self.assertTrue(
+            adapter._validate_post_response({"valid": True}, what="post validation")
+        )
+
+    def test_media_validation_without_optional_metadata_passes(self):
+        self.assertTrue(
+            adapter._validate_media_response(
+                {"valid": True, "type": "image", "contentType": "image/png"},
+                what="media validation",
+                expected_url=PUBLIC_URL_1,
+                expected_content_type="image/png",
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

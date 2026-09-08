@@ -102,6 +102,10 @@ Success response (`getMediaPresignedUrl`; no `status`/`error` envelope):
 Both URLs must be HTTPS. The upload URL stays memory-only; only the public
 URL is persisted, and only after a confirmed `PUT` success.
 
+Required-field discipline (verified against the current schema): the
+presign success schema declares no `required[]` set, so `key`/`expiresIn`
+are optional and never enforced.
+
 ### 4.2 POST /tools/validate/media
 
 Request (exact — `url` only):
@@ -132,6 +136,21 @@ with a non-empty `contentType`), and an acceptable Instagram limit result
 whenever the documented `platformLimits.instagram` field is present.
 Failure stays before create (`create_attempts=0`, `NOT_CREATED`, zero
 `POST /posts`).
+
+Identity binding (the response must belong to the exact manifest item):
+the response `url` carries no documented canonicalization rule, so a
+present `url` must equal the requested public URL exactly; returned `type`
+must agree with the expected `MediaItem.type` derived from the manifest
+MIME by the same authority used for the create payload (e.g. a
+`video/mp4` item answered as `image` fails closed); returned `contentType`
+must agree under the narrow rule of lowercase/strip plus the single
+documented alias `image/jpg` ≡ `image/jpeg`. Any contradiction fails
+closed before create.
+
+Required-field discipline (verified against the current schema): the
+validate/media success schema declares no `required[]` set, so absent
+optional metadata alone is never the failure — but identity binding
+above still applies.
 
 ### 4.3 POST /tools/validate/post and POST /posts (one canonical payload)
 
@@ -175,6 +194,10 @@ Post-validation success (`validatePost`; no `status`/`error` envelope):
 
 Requires `valid is True`; malformed responses fail closed before create.
 
+Required-field discipline (verified against the current schema): the
+validate/post success schema declares no `required[]` set, so `message`/
+`warnings` are optional and never enforced.
+
 ### 4.4 POST /posts success envelope
 
 Only HTTP `201` with the documented `post` envelope (`PostCreateResponse`)
@@ -216,14 +239,25 @@ ambiguity: `create_attempts=1`, `REVIEW_UNKNOWN`, zero retry.
 ```
 
 No top-level `platform`/`accountId`/`platformSpecificData` is required.
-Requires `post._id` equal to the created id, `post.status` of `draft`, an
-Instagram platform entry whose account resolves to the canonical id (plain
-string or expanded `{_id, ...}` object), Story data matching wherever the
-contract exposes it, and exact content/media identity wherever GET exposes
-those fields. Unexposed fields are never invented as proof; any
+Requires `post._id` equal to the created id, `post.status` of `draft`, and
+`post.platforms` to be exactly the one intended target (length 1, platform
+`instagram`, account resolving to the canonical id as a plain string or an
+expanded `{_id, ...}` object — an extra Twitter target, a second account,
+or duplicates all fail closed), Story data matching wherever the contract
+exposes it, and exact content/media identity wherever GET exposes those
+fields. Unexposed fields are never invented as proof; any
 insufficient/contradictory readback is `REVIEW_UNKNOWN` with no retry.
 
-### 4.6 x-request-id
+### 4.6 Transport POST allowlist
+
+The real transport enforces an exact-path allowlist before any network
+request is constructed or sent: authenticated POST is permitted only to
+`/media/presign`, `/tools/validate/media`, `/tools/validate/post`, and
+`/posts`. Any other POST path (e.g. `/posts/foo`, `/posts/foo/retry`,
+`/publish`) fails locally with a capability error — no HTTP attempt, no
+credential use. Presigned PUT stays unauthenticated and unchanged.
+
+### 4.7 x-request-id
 
 Sent as `X-Request-ID` on the single `POST /posts`. A valid UUID string
 (per current docs, `format: uuid`, one value per logical request),

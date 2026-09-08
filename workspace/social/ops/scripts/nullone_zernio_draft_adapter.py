@@ -80,6 +80,21 @@ from nullone_secret_provider import (
 # variable; build_authenticated_transport uses it as the default.
 DEFAULT_BASE_URL = "https://zernio.com/api/v1"
 
+# Exact-path allowlist for authenticated POST at the real transport
+# boundary (#81 capability contract). The direct review-draft transport may
+# issue authenticated POST only to these four review-draft paths. Any other
+# path fails locally before any request is constructed or sent: no HTTP
+# attempt, no credential use, no raw provider call. Exact matching only —
+# no prefix matching, so "/posts/foo" or "/posts/foo/retry" never pass.
+ALLOWED_POST_PATHS = frozenset(
+    {
+        "/media/presign",
+        "/tools/validate/media",
+        "/tools/validate/post",
+        "/posts",
+    }
+)
+
 # Canonical Instagram platform value used by Zernio REST.
 INSTAGRAM_PLATFORM = "instagram"
 
@@ -280,6 +295,12 @@ class UrllibDraftTransport:
         headers: dict[str, str] | None = None,
         idempotency_key: str | None = None,
     ) -> tuple[int, Any]:
+        if path not in ALLOWED_POST_PATHS:
+            # Capability boundary: reject before constructing or sending any
+            # request. No urlopen call, no credential use, no provider call.
+            raise DraftAdapterError(
+                f"POST path {path!r} is outside the review-draft capability"
+            )
         url = f"{self.base_url}{path}"
         data = (
             json.dumps(json_body).encode("utf-8") if json_body is not None else None
@@ -469,14 +490,53 @@ def _validate_account_list(body: Any, *, account_id: str) -> dict[str, Any]:
     raise DraftPreflightBlockedError(PREFLIGHT_ACCOUNT_FAILED_REASON)
 
 
-def _validate_media_response(body: Any, *, what: str) -> bool:
-    """Validate a media validation response envelope (validateMedia).
+def _normalize_content_type(content_type: Any) -> str | None:
+    """Narrow MIME normalization for media identity binding.
+
+    Lowercase + strip, with exactly one documented alias: image/jpg is the
+    same registration as image/jpeg (both appear in the OpenAPI
+    MediaContentType enum). Every other value must match exactly. Returns
+    None when the value is not a usable MIME string.
+    """
+    if not isinstance(content_type, str):
+        return None
+    normalized = content_type.strip().lower()
+    if not normalized or "/" not in normalized:
+        return None
+    if normalized == "image/jpg":
+        return "image/jpeg"
+    return normalized
+
+
+def _validate_media_response(
+    body: Any,
+    *,
+    what: str,
+    expected_url: str,
+    expected_content_type: Any,
+) -> bool:
+    """Validate a media validation response envelope (validateMedia) bound
+    to the exact manifest item under validation.
 
     Current contract (OpenAPI 1.0.4): {valid, url, error, contentType, size,
-    sizeFormatted, type, platformLimits}. There is no `status` field.
-    Requires valid is True, a trustworthy structure (type image/video with a
-    non-empty contentType), and an acceptable Instagram platform-limit result
-    whenever the documented platformLimits.instagram field is present.
+    sizeFormatted, type, platformLimits}. There is no `status` field, and
+    none of the success fields carries a `required[]` entry, so key/extra
+    metadata absence alone is never the failure — but identity binding is:
+
+    - URL: the response `url` carries no documented canonicalization rule
+      (bare `{type: string, format: uri}`, no description), so a present
+      `url` must equal the requested public URL exactly. An unrelated URL
+      is never silently accepted.
+    - TYPE: the returned `type` must agree with the expected Zernio
+      MediaItem.type derived from the manifest content_type by the same
+      deterministic authority used for the create payload.
+    - CONTENT-TYPE: the returned `contentType` must agree with the manifest
+      media content_type under the narrow normalization rule above.
+    - LIMIT: platformLimits.instagram.withinLimit must be true whenever
+      that documented field is supplied.
+
+    Any identity/metadata contradiction returns False (preflight blocked
+    with attempts untouched). Structurally unusable envelopes raise.
     """
     if not isinstance(body, dict):
         raise DraftAdapterError(f"{what} response was not a JSON object")
@@ -498,17 +558,27 @@ def _validate_media_response(body: Any, *, what: str) -> bool:
     if not valid:
         return False
 
-    media_type = body.get("type")
-    if media_type not in ("image", "video"):
-        raise DraftAdapterError(
-            f"{what} response field 'type' was not a supported media type"
-        )
+    # TYPE binding against the exact manifest item.
+    expected_type = _media_item_type(expected_content_type)
+    if body.get("type") != expected_type:
+        return False
 
-    content_type = body.get("contentType")
-    if not isinstance(content_type, str) or not content_type.strip():
+    # CONTENT-TYPE binding against the exact manifest item.
+    expected_normalized = _normalize_content_type(expected_content_type)
+    returned_normalized = _normalize_content_type(body.get("contentType"))
+    if expected_normalized is None or returned_normalized is None:
         raise DraftAdapterError(
-            f"{what} response field 'contentType' was not a non-empty string"
+            f"{what} response field 'contentType' was not a usable MIME type"
         )
+    if returned_normalized != expected_normalized:
+        return False
+
+    # URL binding: exact equality when the response carries a url (the
+    # schema documents no canonicalization rule, so only exact equality
+    # proves the response belongs to this item).
+    returned_url = body.get("url")
+    if returned_url is not None and returned_url != expected_url:
+        return False
 
     platform_limits = body.get("platformLimits")
     if isinstance(platform_limits, dict) and "instagram" in platform_limits:
@@ -670,8 +740,8 @@ def _validate_readback_response(
     Requires exact documented evidence that:
     - post._id is the created id
     - post.status is draft
-    - the intended Instagram platform entry exists and its account resolves
-      to the canonical account id
+    - post.platforms is exactly the one intended target: a single entry,
+      platform instagram, account resolving to the canonical account id
     - Story platformSpecificData matches wherever the contract exposes it
     - exact content/media identity matches wherever GET exposes those fields
 
@@ -695,19 +765,17 @@ def _validate_readback_response(
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
     platforms = post.get("platforms")
-    if not isinstance(platforms, list) or not platforms:
+    if not isinstance(platforms, list) or len(platforms) != 1:
+        # The adapter creates exactly one intended target. Any extra,
+        # duplicate, or missing target contradicts the created draft.
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
-    instagram_entry: dict[str, Any] | None = None
-    for entry in platforms:
-        if not isinstance(entry, dict):
-            raise DraftReadbackFailedError(READBACK_FAILED_REASON)
-        platform = entry.get("platform")
-        if isinstance(platform, str) and platform.lower() == INSTAGRAM_PLATFORM:
-            instagram_entry = entry
-            break
+    instagram_entry = platforms[0]
+    if not isinstance(instagram_entry, dict):
+        raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
-    if instagram_entry is None:
+    platform = instagram_entry.get("platform")
+    if not isinstance(platform, str) or platform.lower() != INSTAGRAM_PLATFORM:
         raise DraftReadbackFailedError(READBACK_FAILED_REASON)
 
     resolved = _resolve_account_id(instagram_entry.get("accountId"))
@@ -1019,7 +1087,7 @@ class ZernioDraftProvider:
 
     def _preflight_media(self, m: dict) -> None:
         """Validate every final public media URL with the documented
-        media validation endpoint.
+        media validation endpoint, bound to the exact manifest item.
         """
         for item in m["media"]:
             public_url = item.get("public_url")
@@ -1052,7 +1120,12 @@ class ZernioDraftProvider:
                 raise DraftPreflightBlockedError(PREFLIGHT_MEDIA_FAILED_REASON)
 
             try:
-                valid = _validate_media_response(body, what="media validation")
+                valid = _validate_media_response(
+                    body,
+                    what="media validation",
+                    expected_url=public_url,
+                    expected_content_type=item.get("content_type"),
+                )
             except DraftAdapterError:
                 raise
             except Exception as exc:
