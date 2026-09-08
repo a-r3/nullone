@@ -74,8 +74,16 @@ def compute_candidate_external_occurrence_id(
     return f"breaking-candidate-{digest}"
 
 
-def normalize_breaking_radar_handoff(value: Any) -> NormalizedBreakingHandoff:
-    """Return one validated scheduler invocation plus one validated assessment."""
+def normalize_breaking_radar_handoff(
+    value: Any, *, source: str = "openclaw"
+) -> NormalizedBreakingHandoff:
+    """Return one validated scheduler invocation plus one validated assessment.
+
+    `source` is the trigger-adapter namespace owning this handoff (#65:
+    NullOne owns semantics, adapters are replaceable). The default
+    preserves the reviewed OpenClaw production path; alternate sources
+    mint distinct, non-colliding occurrence identities for the same scan.
+    """
 
     handoff = _exact_object(value, "handoff", _HANDOFF_FIELDS)
     if handoff["schema"] != HANDOFF_SCHEMA:
@@ -84,6 +92,8 @@ def normalize_breaking_radar_handoff(value: Any) -> NormalizedBreakingHandoff:
         raise BreakingRadarEdgeError(
             f"contract_version must be {HANDOFF_CONTRACT_VERSION!r}"
         )
+    if not isinstance(source, str) or not source.strip():
+        raise BreakingRadarEdgeError("source must be a non-empty string")
     occurrence = _exact_object(
         handoff["occurrence"], "handoff.occurrence", _OCCURRENCE_FIELDS
     )
@@ -97,7 +107,7 @@ def normalize_breaking_radar_handoff(value: Any) -> NormalizedBreakingHandoff:
             "schema": INVOCATION_SCHEMA,
             "contract_version": INVOCATION_CONTRACT_VERSION,
             "workflow_id": "breaking",
-            "source": "openclaw",
+            "source": source,
             "external_occurrence_id": external_occurrence_id,
             "scheduled_for": occurrence["scheduled_for"],
             "triggered_at": occurrence["triggered_at"],

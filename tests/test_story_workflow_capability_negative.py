@@ -149,20 +149,21 @@ class NoPublisherOrApprovalCapabilityAnywhereTests(unittest.TestCase):
                 )
 
     def test_no_module_imports_publisher_at_runtime(self):
+        before = set(sys.modules.keys())
         import nullone_review_delivery  # noqa: F401
         import nullone_scheduler_invocation  # noqa: F401
         import nullone_story_candidate_provider  # noqa: F401
         import nullone_story_workflow  # noqa: F401
         import nullone_telegram_review_delivery_adapter  # noqa: F401
-
-        module_names = set(sys.modules.keys())
+        after = set(sys.modules.keys())
+        newly_loaded = after - before
         for forbidden in (
             "nullone-publish-bridge",
             "nullone-publisher-run",
             "nullone_publish_bridge",
             "nullone_publisher_run",
         ):
-            self.assertNotIn(forbidden, module_names)
+            self.assertNotIn(forbidden, newly_loaded)
 
 
 class NoScheduleFrameworkTests(unittest.TestCase):

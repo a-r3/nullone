@@ -134,6 +134,40 @@ NEXT_ENGINEERING_TASK = #80 (Breaking production structured handoff).
 #81 is OPEN: DraftProvider live scheduled path remains UNPROVEN and still
 blocks READY. #37 is OPEN / BLOCKED; do not rerun yet.
 
+### #80 Breaking Radar production integration — IN PR (not merged, not deployed)
+
+#84 merged at `8b1245b62b2bdd0aa7e93df6a88ad9989d886c3c`. #79 is CLOSED.
+#80 repository implementation is now in PR (OPEN until merge): live Radar
+job verified read-only (`texbrif-breaking-radar`,
+`30 11,14,17,20,23 * * * Asia/Baku`, prompt-only agent job — preserved
+slots 11:30/14:30/17:30/20:30/23:30); deterministic scan-slot authority
+with latest-due coalescing; candidate-ID **shape** enforced at commit
+(stable-anchor derivation required by Radar prompt contract; semantic
+slug provenance not independently recomputed); exact
+`nullone.breaking-radar-handoff.v1` envelopes committed atomically by the
+deterministic edge under canonical staging-root and spool-root
+containment (symlink-mediated canonical-root escape fails closed; the
+scan receipt is the authoritative commit record — orphan handoffs are not
+executable; a later recommit with a different retry `triggered_at`
+preserves the original orphan handoff and repairs the receipt, while
+assessment mutation still conflicts; missing/corrupt/contradictory
+authoritative spool state fails the consumer sweep non-zero with no
+source fallback; every listed handoff is bound to the exact authoritative
+receipt scan before workflow invocation — mismatches fail as
+`HANDOFF_SCAN_IDENTITY_MISMATCH`; scan identity is registry-backed via
+`resolve_radar_scan`); spool
+`social/ops/breaking-handoffs/<scan>/<candidate>.json`; static consumer
+sweep (desired `45 11,14,17,20,23 * * * Asia/Baku`, NOT DEPLOYED) that
+consumes only receipt-listed candidates, fails closed on authoritative
+corruption and unexpected runner crashes (non-zero CLI), and never
+treats establishment failures as ordinary processed work; Story-first
+preserved with no main provider; Radar/LLM dependency attestation is not
+dispatch-time recheck (production #80 passes no fake recheck; #81
+remains OPEN). Fresh/replay #27 reason and notification-error
+classification semantics are identical. #80 remains OPEN until merge.
+#37 remains OPEN / BLOCKED. No production activation occurred; no
+synthetic Breaking event. **NOT DEPLOYED.**
+
 Current required order:
 
 ```text

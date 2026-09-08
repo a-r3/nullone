@@ -29,6 +29,11 @@ COMMANDS = [
     [sys.executable, "tests/test_breaking_dispatch.py"],
     [sys.executable, "tests/test_breaking_workflow.py"],
     [sys.executable, "tests/test_breaking_workflow_capability_negative.py"],
+    [sys.executable, "tests/test_breaking_scan_authority.py"],
+    [sys.executable, "tests/test_breaking_scan_commit.py"],
+    [sys.executable, "tests/test_breaking_candidate_runner.py"],
+    [sys.executable, "tests/test_breaking_consume.py"],
+    [sys.executable, "tests/test_breaking_production_capability_negative.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
     [sys.executable, "tests/test_behavioral_regressions.py"],
     [sys.executable, "tests/test_approval_publication_instruction_safety.py"],
@@ -183,7 +188,27 @@ COMMANDS = [
     ],
     [
         sys.executable,
-        "workspace/social/ops/scripts/nullone_story_scheduled_workflow.py",
+        "workspace/social/ops/scripts/nullone_story_workflow.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_breaking_scan_authority.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-breaking-scan.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_breaking_candidate_runner.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-breaking-consume.py",
         "self-test",
     ],
 ]

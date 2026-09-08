@@ -35,10 +35,15 @@ from dataclasses import dataclass
 from datetime import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-# The M0-supported workflow_ids -- a strict subset of
-# `nullone_scheduler_invocation.ALLOWED_WORKFLOW_IDS` (which also includes
-# `"breaking"`, which has no NullOne-owned schedule slot in M0).
-SUPPORTED_WORKFLOW_IDS = frozenset({"morning-editorial", "daily-analytics", "story"})
+# NullOne-owned schedule namespaces. Morning/Daily/Story are scheduler-
+# invocation workflows (a subset of
+# `nullone_scheduler_invocation.ALLOWED_WORKFLOW_IDS`, which additionally
+# includes `"breaking"` -- dispatched per handoff, never on a fixed slot).
+# `breaking-radar` is a raw-scan slot namespace resolved only by
+# `nullone_breaking_scan_authority.py`, never by a wake-up CLI.
+SUPPORTED_WORKFLOW_IDS = frozenset(
+    {"morning-editorial", "daily-analytics", "story", "breaking-radar"}
+)
 
 # Workflows with exactly one daily slot. `get_schedule()` serves these;
 # Morning/Daily resolution behavior is byte-for-behavior unchanged by #79.
@@ -172,6 +177,36 @@ _REGISTRY = _build_registry(
             timezone_name="Asia/Baku",
             local_time="21:30:00",
         ),
+        ScheduleSpec(
+            workflow_id="breaking-radar",
+            schedule_id="breaking-radar.scan-1130.v1",
+            timezone_name="Asia/Baku",
+            local_time="11:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="breaking-radar",
+            schedule_id="breaking-radar.scan-1430.v1",
+            timezone_name="Asia/Baku",
+            local_time="14:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="breaking-radar",
+            schedule_id="breaking-radar.scan-1730.v1",
+            timezone_name="Asia/Baku",
+            local_time="17:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="breaking-radar",
+            schedule_id="breaking-radar.scan-2030.v1",
+            timezone_name="Asia/Baku",
+            local_time="20:30:00",
+        ),
+        ScheduleSpec(
+            workflow_id="breaking-radar",
+            schedule_id="breaking-radar.scan-2330.v1",
+            timezone_name="Asia/Baku",
+            local_time="23:30:00",
+        ),
     )
 )
 
@@ -230,6 +265,23 @@ def self_test() -> int:
         "21:30:00",
     ]
     assert all(spec.timezone_name == "Asia/Baku" for spec in story_specs)
+
+    radar_specs = get_schedules("breaking-radar")
+    assert [spec.schedule_id for spec in radar_specs] == [
+        "breaking-radar.scan-1130.v1",
+        "breaking-radar.scan-1430.v1",
+        "breaking-radar.scan-1730.v1",
+        "breaking-radar.scan-2030.v1",
+        "breaking-radar.scan-2330.v1",
+    ]
+    assert [spec.local_time for spec in radar_specs] == [
+        "11:30:00",
+        "14:30:00",
+        "17:30:00",
+        "20:30:00",
+        "23:30:00",
+    ]
+    assert all(spec.timezone_name == "Asia/Baku" for spec in radar_specs)
 
     try:
         _build_registry(
