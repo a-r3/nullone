@@ -1,6 +1,6 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-07 Asia/Baku
+Last updated: 2026-09-08 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
 ## Identity
@@ -207,18 +207,22 @@ Relevant issues:
     n61-secure-analytics-secret-wiring`, pending review — `Closes #61`);
     implemented the reviewed secret boundary
     (`nullone_secret_provider.py`: `SecretValue`, `EnvironmentSecretProvider`,
-    presence probe/readback) and the real production factory
+    presence probe/readback, exact `lstat`-based file/dir mode enforcement
+    0600/0700 with parent-symlink rejection) and the real production factory
     (`build_production_analytics_provider` → #29 `ZernioReadOnlyAnalyticsConnector`
     with canonical account id); missing/blank/rejected credential →
-    `ConnectorUnauthorizedError` → `BLOCKED`, unavailable secret source →
-    `ConnectorUnavailableError` → `BLOCKED`; missing-secret is a graceful
-    blocked domain outcome (scheduled CLI exit 0), never a crash; **NOT
-    DEPLOYED** — no credential provisioned, no systemd drop-in applied, no
-    OpenClaw job created; production injection mechanism (systemd user
-    `EnvironmentFile` → Gateway process env → child commands) verified
-    read-only on the host 2026-09-08 and documented in
-    `docs/deployment/61-secure-analytics-secret-injection.md`. Only-remaining
-    M0 blocker until merged.
+    `ConnectorUnauthorizedError` → `BLOCKED`, typed `SecretUnavailableError` →
+    `ConnectorUnavailableError` → `BLOCKED`; unexpected programming defects
+    (`RuntimeError`, `TypeError`, `AttributeError`, `AssertionError`) from
+    the provider now propagate as `RUNTIME_CRASHED`; `SecretValue` is
+    deliberately unhashable; missing-secret is a graceful blocked domain
+    outcome (scheduled CLI exit 0), never a crash; **NOT DEPLOYED** — no
+    credential provisioned, no systemd drop-in applied, no OpenClaw job
+    created; production injection mechanism (systemd user `EnvironmentFile`
+    → Gateway process env → child commands) verified read-only on the host
+    2026-09-08 and documented in `docs/deployment/61-secure-analytics-secret-injection.md`.
+    Canonical default secret path fixed to `~/.config/nullone/secrets/zernio-analytics.env`.
+    Only-remaining M0 blocker until merged.
 - #62 `StoryWorkflow` and shared review-delivery adapter — CLOSED/COMPLETED; PR #70 squash-merged as `8d6d9844f0c494e3a813180fb7e83e87f713e745`; live scheduled Zernio/Telegram proof remains unproven
 - #63 `BreakingWorkflow` orchestration — CLOSED/COMPLETED; PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`; repository-level implementation is complete and preserves the exact #34/#36 verification vocabulary, defers optional-main preparation until after Story review delivery succeeds, derives candidate-level Radar occurrences, and emits contract-safe #27 mappings; no production activation occurred, strict Radar handoff remains `DESIRED / NOT DEPLOYED`, natural Breaking live proof remains `UNPROVEN_LIVE / DEFERRED_TO_#37`, and the scheduled Zernio path remains `LIVE_SCHEDULED_PATH_UNPROVEN`
 - #65 NullOne Application Runtime architecture — CLOSED/COMPLETED; the accepted contract establishes NullOne workflow ownership and replaceable provider adapters

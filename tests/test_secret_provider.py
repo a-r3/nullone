@@ -60,14 +60,16 @@ class SecretValueRenderSafetyTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             SecretValue(123)  # type: ignore[arg-type]
 
-    def test_equality_and_hash_compare_wrapped_values_only(self):
+    def test_equality_compares_wrapped_values_only(self):
         self.assertEqual(SecretValue(MARKER), SecretValue(MARKER))
         self.assertNotEqual(SecretValue(MARKER), SecretValue("other"))
         self.assertNotEqual(SecretValue(MARKER), MARKER)
-        self.assertEqual(
-            hash(SecretValue(MARKER)),
-            hash(SecretValue(MARKER)),
-        )
+
+    def test_secret_value_is_unhashable(self):
+        with self.assertRaises(TypeError):
+            hash(SecretValue(MARKER))
+        with self.assertRaises(TypeError):
+            {SecretValue(MARKER)}
 
 
 class EnvironmentSecretProviderTests(unittest.TestCase):
@@ -168,21 +170,21 @@ class SecretFileControlReportTests(unittest.TestCase):
         self.assertFalse(report.secure)
         self.assertIn("FILE_MISSING", report.reason_codes)
 
-    def test_symlink_is_rejected_without_following(self):
+    def test_secret_file_symlink_is_rejected(self):
         td, _secret_file, uid = self._layout()
         self.addCleanup(td.cleanup)
         link = Path(td.name) / "link.env"
         link.symlink_to("/etc/hostname")
         report = secret_file_control_report(link, expected_uid=uid)
         self.assertFalse(report.secure)
-        self.assertIn("SYMLINK", report.reason_codes)
+        self.assertIn("SECRET_FILE_SYMLINK", report.reason_codes)
 
     def test_directory_is_rejected_as_non_regular(self):
         td, secret_file, uid = self._layout()
         self.addCleanup(td.cleanup)
         report = secret_file_control_report(secret_file.parent, expected_uid=uid)
         self.assertFalse(report.secure)
-        self.assertIn("NOT_REGULAR_FILE", report.reason_codes)
+        self.assertIn("SECRET_FILE_NOT_REGULAR_FILE", report.reason_codes)
 
     def test_overly_open_file_mode_is_rejected(self):
         td, secret_file, uid = self._layout()
@@ -191,6 +193,63 @@ class SecretFileControlReportTests(unittest.TestCase):
         report = secret_file_control_report(secret_file, expected_uid=uid)
         self.assertFalse(report.secure)
         self.assertIn("FILE_MODE_NOT_0600", report.reason_codes)
+
+    def test_file_mode_0400_is_rejected(self):
+        td, secret_file, uid = self._layout()
+        self.addCleanup(td.cleanup)
+        os.chmod(secret_file, 0o400)
+        report = secret_file_control_report(secret_file, expected_uid=uid)
+        self.assertFalse(report.secure)
+        self.assertIn("FILE_MODE_NOT_0600", report.reason_codes)
+
+    def test_file_mode_0700_is_rejected(self):
+        td, secret_file, uid = self._layout()
+        self.addCleanup(td.cleanup)
+        os.chmod(secret_file, 0o700)
+        report = secret_file_control_report(secret_file, expected_uid=uid)
+        self.assertFalse(report.secure)
+        self.assertIn("FILE_MODE_NOT_0600", report.reason_codes)
+
+    def test_parent_dir_mode_0500_is_rejected(self):
+        td, secret_file, uid = self._layout()
+        self.addCleanup(td.cleanup)
+        os.chmod(secret_file.parent, 0o500)
+        report = secret_file_control_report(secret_file, expected_uid=uid)
+        self.assertFalse(report.secure)
+        self.assertIn("PARENT_DIR_MODE_NOT_0700", report.reason_codes)
+
+    def test_parent_dir_mode_0755_is_rejected(self):
+        td, secret_file, uid = self._layout()
+        self.addCleanup(td.cleanup)
+        os.chmod(secret_file.parent, 0o755)
+        report = secret_file_control_report(secret_file, expected_uid=uid)
+        self.assertFalse(report.secure)
+        self.assertIn("PARENT_DIR_MODE_NOT_0700", report.reason_codes)
+
+    def test_parent_dir_symlink_is_rejected(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        uid = os.getuid()
+        real_dir = Path(td.name) / "real_secrets"
+        real_dir.mkdir(mode=0o700)
+        secret_file = real_dir / "zernio-analytics.env"
+        secret_file.touch(mode=0o600)
+        link_dir = Path(td.name) / "link_secrets"
+        link_dir.symlink_to(real_dir)
+        linked_secret = link_dir / "zernio-analytics.env"
+        report = secret_file_control_report(linked_secret, expected_uid=uid)
+        self.assertFalse(report.secure)
+        self.assertIn("PARENT_DIR_SYMLINK", report.reason_codes)
+
+    def test_parent_dir_not_directory_is_rejected(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        not_a_dir = Path(td.name) / "not_a_dir"
+        not_a_dir.touch(mode=0o600)
+        secret_file = not_a_dir / "zernio-analytics.env"
+        report = secret_file_control_report(secret_file, expected_uid=os.getuid())
+        self.assertFalse(report.secure)
+        self.assertIn("PARENT_DIR_NOT_DIRECTORY", report.reason_codes)
 
 
 class ReadbackCliTests(unittest.TestCase):

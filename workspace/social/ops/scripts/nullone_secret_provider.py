@@ -53,11 +53,11 @@ ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN = "ZERNIO_ANALYTICS_API_TOKEN"
 SECRET_REDACTED_RENDER = "<redacted>"
 
 # Expected secret file layout for deployment-edge readback below the
-# user's home: <home>/nullone/secrets/zernio-analytics.env, directory
+# user's home: <home>/.config/nullone/secrets/zernio-analytics.env, directory
 # 0700, file 0600, owned by the systemd user-unit owner. Only the
 # deployment doc and offline validation refer to it; the runtime secret
 # path is purely the inherited environment variable.
-SECRETS_DIR_RELATIVE = Path("nullone").joinpath("secrets")
+SECRETS_DIR_RELATIVE = Path(".config").joinpath("nullone").joinpath("secrets")
 SECRET_FILE_NAME = "zernio-analytics.env"
 
 
@@ -122,8 +122,7 @@ class SecretValue:
             return self._value == other._value
         return NotImplemented
 
-    def __hash__(self) -> int:
-        return hash(self._value)
+    __hash__ = None
 
     def __bool__(self) -> bool:
         return bool(self._value)
@@ -219,7 +218,7 @@ def default_secret_file_path() -> Path:
 class SecretFileControlReport:
     """Metadata-only readback of the expected secret file layout (#24).
 
-    Built exclusively from `lstat`/`stat` metadata; the file value is
+    Built exclusively from `lstat` metadata; the file value is
     never opened, read, or echoed.
     """
 
@@ -241,9 +240,11 @@ def secret_file_control_report(
 ) -> SecretFileControlReport:
     """Deployment-edge validation of the secret file layout.
 
-    Rejects a missing file, a symlink, a non-regular file, an unexpected
-    owner, and any group/world permission bit (file 0600 / directory
-    0700). Never reads the value.
+    Rejects a missing file, a symlink (file or parent), a non-regular
+    file, a non-directory parent, an unexpected owner, and any mode
+    other than file 0600 / directory 0700. Never reads the value.
+    Uses lstat() for both file and parent so symlinks are rejected,
+    not followed.
     """
     if expected_uid is None:
         expected_uid = os.getuid()
@@ -264,35 +265,66 @@ def secret_file_control_report(
             secure=False,
             reason_codes=("FILE_MISSING",),
         )
+    except NotADirectoryError:
+        return SecretFileControlReport(
+            exists=False,
+            regular_file=False,
+            symlink_absent=False,
+            owner_matches=False,
+            owner_uid=-1,
+            file_mode_secure=False,
+            parent_dir_secure=False,
+            secure=False,
+            reason_codes=("PARENT_DIR_NOT_DIRECTORY",),
+        )
 
     if stat.S_ISLNK(st.st_mode):
-        reasons.append("SYMLINK")
+        reasons.append("SECRET_FILE_SYMLINK")
     if not stat.S_ISREG(st.st_mode):
-        reasons.append("NOT_REGULAR_FILE")
+        reasons.append("SECRET_FILE_NOT_REGULAR_FILE")
 
     owner_matches = st.st_uid == expected_uid
     if not owner_matches:
         reasons.append("OWNER_MISMATCH")
-    file_mode_secure = bool(st.st_mode & 0o077) == 0
-    if not file_mode_secure:
+
+    file_mode_exact = stat.S_IMODE(st.st_mode) == 0o600
+    if not file_mode_exact:
         reasons.append("FILE_MODE_NOT_0600")
 
     parent_dir_secure = False
     try:
-        pst = secret_file.parent.stat()
-        parent_dir_secure = (
-            stat.S_ISDIR(pst.st_mode)
-            and pst.st_uid == expected_uid
-            and bool(pst.st_mode & 0o077) == 0
-        )
+        pst = secret_file.parent.lstat()
     except FileNotFoundError:
         reasons.append("PARENT_DIR_MISSING")
-    if not parent_dir_secure and "PARENT_DIR_MISSING" not in reasons:
-        reasons.append("PARENT_DIR_NOT_0700")
+        pst = None
+    except NotADirectoryError:
+        reasons.append("PARENT_DIR_NOT_DIRECTORY")
+        pst = None
+
+    if pst is not None:
+        if stat.S_ISLNK(pst.st_mode):
+            reasons.append("PARENT_DIR_SYMLINK")
+        if not stat.S_ISDIR(pst.st_mode):
+            reasons.append("PARENT_DIR_NOT_DIRECTORY")
+
+        parent_owner_matches = pst.st_uid == expected_uid
+        if not parent_owner_matches:
+            reasons.append("OWNER_MISMATCH")
+
+        parent_mode_exact = stat.S_IMODE(pst.st_mode) == 0o700
+        if not parent_mode_exact:
+            reasons.append("PARENT_DIR_MODE_NOT_0700")
+
+        parent_dir_secure = (
+            stat.S_ISDIR(pst.st_mode)
+            and not stat.S_ISLNK(pst.st_mode)
+            and parent_owner_matches
+            and parent_mode_exact
+        )
 
     secure = (
         owner_matches
-        and file_mode_secure
+        and file_mode_exact
         and parent_dir_secure
         and not stat.S_ISLNK(st.st_mode)
         and stat.S_ISREG(st.st_mode)
@@ -304,7 +336,7 @@ def secret_file_control_report(
         symlink_absent=not stat.S_ISLNK(st.st_mode),
         owner_matches=owner_matches,
         owner_uid=st.st_uid,
-        file_mode_secure=file_mode_secure,
+        file_mode_secure=file_mode_exact,
         parent_dir_secure=parent_dir_secure,
         secure=secure,
         reason_codes=tuple(reasons) if not secure else (),

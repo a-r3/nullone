@@ -92,18 +92,20 @@ class UnavailableSecretSemanticsTests(unittest.TestCase):
 
         self._assert_sanitized(UnavailableProvider())
 
-    def test_generic_run_error_is_normal_unavailability_not_crash(self):
+    def test_unexpected_runtime_error_propagates_as_crash(self):
         class BrokenProvider:
             def get_required(self, secret_id):
                 raise RuntimeError("secret daemon died at 10.0.0.7")
 
-        self._assert_sanitized(BrokenProvider())
+        with self.assertRaises(RuntimeError) as ctx:
+            build_production_analytics_provider(secret_provider=BrokenProvider())
+        self.assertIn("secret daemon died", str(ctx.exception))
 
     def test_raw_provider_message_never_surfaces(self):
         marker_msg = f"leaked {MARKER} during readback fail"
         class VerboseBrokenProvider:
             def get_required(self, secret_id):
-                raise SecretProviderError(marker_msg)
+                raise SecretUnavailableError(marker_msg)
 
         self._assert_sanitized(VerboseBrokenProvider())
 
@@ -234,6 +236,164 @@ class ProductionSeamToWorkflowTests(unittest.TestCase):
                 persisted["reason_code"], "ZERNIO_ANALYTICS_UNAUTHORIZED"
             )
             self.assertNotIn(MARKER, persisted["reason_text"])
+
+
+class ExceptionClassificationRegressionTests(unittest.TestCase):
+    """Regression tests for provider exception classification (#61 hardening).
+
+    A. EnvironmentSecretProvider OSError -> SecretUnavailableError -> ConnectorUnavailableError -> BLOCKED
+    B. Injected SecretUnavailableError with marker -> ConnectorUnavailableError (marker sanitized)
+    C. Injected RuntimeError -> propagates -> RUNTIME_CRASHED -> FAILED + non-zero CLI
+    D. Wrong SecretValue return type -> TypeError propagates (not BLOCKED)
+    """
+
+    MARKER = "FAKE_SECRET_MARKER_DO_NOT_LEAK_XYZ"
+
+    def test_env_provider_oserror_becomes_blocked(self):
+        """A. EnvironmentSecretProvider source .get() raises OSError
+        -> EnvironmentSecretProvider wraps as SecretUnavailableError
+        -> factory ConnectorUnavailableError
+        -> domain BLOCKED
+        -> application COMPLETED
+        -> no raw OSError message leak.
+        """
+        import json
+        import os
+        from unittest import mock
+
+        from nullone_analytics_workflow import run_analytics_workflow
+        from nullone_secret_provider import EnvironmentSecretProvider
+        from nullone_zernio_analytics_adapter import ConnectorUnavailableError
+
+        class ExplodingEnviron:
+            def get(self, key):
+                raise OSError("disk gone")
+
+        class BrokenEnvProvider(EnvironmentSecretProvider):
+            def __init__(self):
+                self._environ = ExplodingEnviron()
+
+        def make_trigger(**overrides):
+            from nullone_scheduler_invocation import compute_occurrence_id
+            base = {
+                "schema": "nullone.scheduler-invocation.v1",
+                "contract_version": "1.0.0",
+                "workflow_id": "daily-analytics",
+                "source": "openclaw",
+                "external_occurrence_id": "occ-exc-class-a",
+                "scheduled_for": "2026-09-08T23:20:00Z",
+                "triggered_at": "2026-09-08T23:20:02Z",
+            }
+            base.update(overrides)
+            base["occurrence_id"] = compute_occurrence_id(
+                base["workflow_id"], base["source"], base["external_occurrence_id"], base["scheduled_for"]
+            )
+            return base
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = run_analytics_workflow(
+                make_trigger(),
+                provider_factory=lambda: build_production_analytics_provider(secret_provider=BrokenEnvProvider()),
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result.application_execution, "COMPLETED")
+            self.assertEqual(result.domain_outcome, "BLOCKED")
+            self.assertEqual(result.reason_code, "OK")
+            self.assertNotIn("disk gone", result.reason_text)
+            self.assertNotIn(self.MARKER, result.reason_text)
+
+            from nullone_run_outcome import make_run_id, result_path
+            persisted = json.loads(
+                result_path(
+                    root / "run-outcomes",
+                    make_run_id(
+                        workflow_id="daily-analytics",
+                        occurrence_id=make_trigger()["occurrence_id"],
+                    ),
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(persisted["reason_code"], "ZERNIO_ANALYTICS_UNAVAILABLE")
+            self.assertNotIn("disk gone", persisted["reason_text"])
+
+    def test_injected_secret_unavailable_error_sanitized(self):
+        """B. injected provider deliberately raises SecretUnavailableError containing fake marker
+        -> ConnectorUnavailableError
+        -> marker absent.
+        """
+        from nullone_secret_provider import SecretUnavailableError
+        from nullone_zernio_analytics_adapter import ConnectorUnavailableError
+
+        marker = self.MARKER
+
+        class MarkerUnavailableProvider:
+            def get_required(self, secret_id):
+                raise SecretUnavailableError(f"store down with {marker}")
+
+        with self.assertRaises(ConnectorUnavailableError) as ctx:
+            build_production_analytics_provider(secret_provider=MarkerUnavailableProvider())
+        self.assertEqual(str(ctx.exception), CREDENTIAL_UNAVAILABLE_REASON)
+        self.assertNotIn(marker, str(ctx.exception))
+
+    def test_injected_runtime_error_becomes_runtime_crashed(self):
+        """C. injected provider raises RuntimeError("FAKE_SECRET...")
+        -> RuntimeError propagates out of factory
+        -> through AnalyticsWorkflow becomes RUNTIME_CRASHED
+        -> application FAILED
+        -> CLI non-zero
+        -> FAKE_SECRET marker absent from reason_text/context/stdout.
+        -> No persisted result file for RUNTIME_CRASHED (by design).
+        """
+        from nullone_analytics_workflow import run_analytics_workflow
+
+        class FakeSecretRuntimeErrorProvider:
+            def get_required(self, secret_id):
+                raise RuntimeError(f"{self.MARKER} crashed")
+
+        def make_trigger(**overrides):
+            from nullone_scheduler_invocation import compute_occurrence_id
+            base = {
+                "schema": "nullone.scheduler-invocation.v1",
+                "contract_version": "1.0.0",
+                "workflow_id": "daily-analytics",
+                "source": "openclaw",
+                "external_occurrence_id": "occ-exc-class-c",
+                "scheduled_for": "2026-09-08T23:20:00Z",
+                "triggered_at": "2026-09-08T23:20:02Z",
+            }
+            base.update(overrides)
+            base["occurrence_id"] = compute_occurrence_id(
+                base["workflow_id"], base["source"], base["external_occurrence_id"], base["scheduled_for"]
+            )
+            return base
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = run_analytics_workflow(
+                make_trigger(),
+                provider_factory=lambda: build_production_analytics_provider(secret_provider=FakeSecretRuntimeErrorProvider()),
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+            self.assertEqual(result.application_execution, "FAILED")
+            self.assertEqual(result.reason_code, "RUNTIME_CRASHED")
+            self.assertIsNone(result.domain_outcome)
+            self.assertIsNone(result.result_file)
+            self.assertNotIn(self.MARKER, result.reason_text)
+            self.assertNotIn(self.MARKER, str(result.context))
+
+    def test_wrong_return_type_propagates_type_error(self):
+        """D. wrong SecretValue return type
+        -> TypeError propagates
+        -> not converted to domain BLOCKED.
+        """
+        class WrongTypeProvider:
+            def get_required(self, secret_id):
+                return "raw-string-not-a-SecretValue"
+
+        with self.assertRaises(TypeError):
+            build_production_analytics_provider(secret_provider=WrongTypeProvider())
 
 
 if __name__ == "__main__":

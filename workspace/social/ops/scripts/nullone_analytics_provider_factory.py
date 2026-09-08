@@ -43,6 +43,7 @@ from nullone_secret_provider import (
     EnvironmentSecretProvider,
     SecretNotConfiguredError,
     SecretProvider,
+    SecretUnavailableError,
 )
 from nullone_zernio_analytics_adapter import (
     ConnectorUnauthorizedError,
@@ -80,7 +81,7 @@ def build_production_analytics_provider(
         token = provider.get_required(SECRET_ID_ZERNIO_ANALYTICS_BEARER)
     except SecretNotConfiguredError:
         raise ConnectorUnauthorizedError(CREDENTIAL_MISSING_REASON) from None
-    except Exception:
+    except SecretUnavailableError:
         raise ConnectorUnavailableError(CREDENTIAL_UNAVAILABLE_REASON) from None
 
     transport = build_authenticated_transport(token=token)
@@ -92,7 +93,7 @@ def build_production_analytics_provider(
 
 
 def self_test() -> int:
-    from nullone_secret_provider import SecretProviderError, SecretValue
+    from nullone_secret_provider import SecretUnavailableError, SecretValue
 
     marker = "FAKE_ZERNIO_SECRET_DO_NOT_LOG_123"
 
@@ -111,11 +112,11 @@ def self_test() -> int:
 
     assert type(_fails_closed_as(UnknownIdProvider(), ConnectorUnauthorizedError)) is ConnectorUnauthorizedError
 
-    # Unavailable source -> ConnectorUnavailableError (BLOCKED), sanitized:
+    # Typed SecretUnavailableError -> ConnectorUnavailableError (BLOCKED), sanitized:
     # the fake secret-like payload must never appear.
     class UnavailableProvider:
         def get_required(self, secret_id):
-            raise SecretProviderError(
+            raise SecretUnavailableError(
                 f"credential store unreachable with value {marker}"
             )
 
@@ -123,14 +124,17 @@ def self_test() -> int:
     assert str(unavailable) == CREDENTIAL_UNAVAILABLE_REASON
     assert marker not in str(unavailable)
 
-    # Generic exception escaping the provider -> ConnectorUnavailableError
-    # (a normal runtime secret-availability failure, never an app crash).
+    # Unexpected programming defect (RuntimeError) -> propagates out of factory.
     class BrokenProvider:
         def get_required(self, secret_id):
             raise RuntimeError("secret daemon died")
 
-    broken = _fails_closed_as(BrokenProvider(), ConnectorUnavailableError)
-    assert str(broken) == CREDENTIAL_UNAVAILABLE_REASON
+    try:
+        build_production_analytics_provider(secret_provider=BrokenProvider())
+    except RuntimeError as exc:
+        assert "secret daemon died" in str(exc)
+    else:
+        raise AssertionError("factory swallowed RuntimeError")
 
     # Present secret -> connector constructed with the canonical account
     # id; the value never leaks through any rendering.
