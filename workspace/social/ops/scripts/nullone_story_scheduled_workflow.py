@@ -6,6 +6,10 @@ into a truthful, persisted, observable scheduled run:
 
     validated trigger
     -> Baku editorial date derived from `scheduled_for`
+    -> FIRST: exact persisted Story #27 result (replay authority -- a
+       completed replay never re-proves provenance or re-invokes anything)
+    -> only then, before a first execution: Morning #27 provenance proof
+       for this invocation's own source namespace
     -> load/validate ONE structured handoff snapshot (fail-closed source)
     -> derive `story_quality_candidate_available` from that same snapshot
     -> production provider bound to that same snapshot
@@ -76,7 +80,6 @@ STORY_RUN_OUTCOME_SUBPATH = Path("social/ops/run-outcomes/story")
 MORNING_RUN_OUTCOME_SUBPATH = Path("social/ops/run-outcomes/morning-editorial")
 
 MORNING_WORKFLOW_ID = "morning-editorial"
-MORNING_SOURCE = "openclaw"
 
 APPLICATION_EXECUTION_STATES = frozenset({"COMPLETED", "FAILED"})
 
@@ -146,6 +149,7 @@ def _morning_source_proven(
     workspace_root: Path,
     morning_output_root: Path,
     editorial_date: str,
+    source: str,
 ) -> bool:
     """Prove the date's Morning occurrence established a SUCCEEDED #27 result.
 
@@ -158,6 +162,11 @@ def _morning_source_proven(
     only the existing schedule registry, #65 identity, and #27 helpers;
     no second health database, no scheduler stdout. Anything else fails
     closed (returns False, never raises for malformed state).
+
+    `source` is the validated scheduler invocation's own source namespace
+    (#65 architecture: NullOne owns semantics, the trigger adapter is
+    replaceable -- the Morning occurrence for THIS source is the proof,
+    never a hard-coded adapter name).
     """
 
     from zoneinfo import ZoneInfo
@@ -185,7 +194,7 @@ def _morning_source_proven(
     external_occurrence_id = f"{spec.schedule_id}@{scheduled_for}"
     try:
         occurrence_id = compute_occurrence_id(
-            MORNING_WORKFLOW_ID, MORNING_SOURCE, external_occurrence_id, scheduled_for
+            MORNING_WORKFLOW_ID, source, external_occurrence_id, scheduled_for
         )
         run_id = make_run_id(
             workflow_id=MORNING_WORKFLOW_ID, occurrence_id=occurrence_id
@@ -279,32 +288,12 @@ def run_story_trigger(
         else workspace_root / STORY_RUN_OUTCOME_SUBPATH
     )
 
-    # Source provenance BEFORE any candidate/provider/writer/draft/delivery
-    # work: today's handoff is consumable only if the corresponding Morning
-    # Editorial occurrence established a valid persisted SUCCEEDED #27
-    # result declaring both artifacts. A valid handoff file left behind by
-    # a failed Morning cycle must never be consumed.
-    resolved_morning_output_root = (
-        morning_output_root
-        if morning_output_root is not None
-        else workspace_root / MORNING_RUN_OUTCOME_SUBPATH
-    )
-    if not _morning_source_proven(
-        workspace_root=workspace_root,
-        morning_output_root=resolved_morning_output_root,
-        editorial_date=editorial_date,
-    ):
-        return _failed(
-            reason_code="MORNING_SOURCE_UNPROVEN",
-            reason_text=(
-                "No proven SUCCEEDED Morning Editorial result for this date; "
-                "refusing to consume the handoff."
-            ),
-            occurrence_id=occurrence_id,
-            run_id=expected_run_id,
-            editorial_date=editorial_date,
-        )
-
+    # Replay authority FIRST: the exact persisted #27 result is
+    # authoritative for an already-established occurrence. A completed
+    # Story replay never re-proves Morning provenance, never re-reads the
+    # handoff, and never re-invokes provider/writer/draft/delivery -- so a
+    # later missing/corrupt Morning result cannot fail an already-completed
+    # Story replay.
     resolved_output_root.mkdir(parents=True, exist_ok=True)
     lock_fd = os.open(
         str(_occurrence_lock_path(resolved_output_root, expected_run_id)),
@@ -324,6 +313,21 @@ def run_story_trigger(
                 return _failed(
                     reason_code="RESULT_MISSING_OR_CORRUPT",
                     reason_text="Persisted #27 Story result is missing or corrupt.",
+                    occurrence_id=occurrence_id,
+                    run_id=expected_run_id,
+                    editorial_date=editorial_date,
+                )
+            if (
+                persisted.get("workflow_id") != STORY_WORKFLOW_ID
+                or persisted.get("occurrence_id") != occurrence_id
+                or persisted.get("run_id") != expected_run_id
+            ):
+                return _failed(
+                    reason_code="RESULT_IDENTITY_MISMATCH",
+                    reason_text=(
+                        "Persisted #27 Story result identity does not match "
+                        "this occurrence; refusing to start a fresh attempt."
+                    ),
                     occurrence_id=occurrence_id,
                     run_id=expected_run_id,
                     editorial_date=editorial_date,
@@ -360,6 +364,34 @@ def run_story_trigger(
                     else persisted["reason_text"]
                 ),
                 story_outcome=None,
+                editorial_date=editorial_date,
+            )
+
+        # Source provenance only before a FIRST execution: today's handoff
+        # is consumable only if the corresponding Morning Editorial
+        # occurrence (for THIS invocation's own source namespace)
+        # established a valid persisted SUCCEEDED #27 result declaring both
+        # artifacts. A valid handoff file left behind by a failed Morning
+        # cycle must never be consumed.
+        resolved_morning_output_root = (
+            morning_output_root
+            if morning_output_root is not None
+            else workspace_root / MORNING_RUN_OUTCOME_SUBPATH
+        )
+        if not _morning_source_proven(
+            workspace_root=workspace_root,
+            morning_output_root=resolved_morning_output_root,
+            editorial_date=editorial_date,
+            source=trigger["source"],
+        ):
+            return _failed(
+                reason_code="MORNING_SOURCE_UNPROVEN",
+                reason_text=(
+                    "No proven SUCCEEDED Morning Editorial result for this date; "
+                    "refusing to consume the handoff."
+                ),
+                occurrence_id=occurrence_id,
+                run_id=expected_run_id,
                 editorial_date=editorial_date,
             )
 

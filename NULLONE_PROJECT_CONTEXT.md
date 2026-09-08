@@ -116,7 +116,9 @@ fail-closed; exact date/board binding; `story_eligible` requires PASS +
 READY); real `StructuredHandoffStoryProvider` (rank-ordered, READY-only,
 consumed-suppressed with fail-closed manifest reads, Markdown-free);
 exact production entrypoint with Morning #27 provenance gate
-(MORNING_SOURCE_UNPROVEN) and persisted #27 Story run outcomes; Draft
+(MORNING_SOURCE_UNPROVEN; replay authority first; provenance follows the
+invocation's own source namespace, never a hard-coded adapter); persisted
+#27 Story run outcomes; Draft
 Factory Story exclusivity (desired prompt change, not deployed). #79
 remains OPEN until merge. #80 remains OPEN / blocked by #79. #81 remains
 OPEN (live DraftProvider proof still unresolved). #37 remains OPEN /

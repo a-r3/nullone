@@ -57,11 +57,12 @@ def make_candidate(**overrides):
 
 
 def make_trigger(**overrides):
+    source = overrides.pop("source", "openclaw")
     base = {
         "schema": "nullone.scheduler-invocation.v1",
         "contract_version": "1.0.0",
         "workflow_id": "story",
-        "source": "openclaw",
+        "source": source,
         "external_occurrence_id": "story.check-1330.v1@2026-09-08T09:30:00Z",
         "scheduled_for": "2026-09-08T09:30:00Z",
         "triggered_at": "2026-09-08T09:30:02Z",
@@ -107,11 +108,11 @@ class Exploding:
         raise AssertionError(f"{self.name} must not be called")
 
 
-def morning_ids_for(date: str):
+def morning_ids_for(date: str, source: str = "openclaw"):
     scheduled_for = f"{date}T04:30:00Z"  # 08:30 Asia/Baku, UTC+4, no DST
     external = f"morning-editorial.daily.v1@{scheduled_for}"
     occurrence_id = compute_occurrence_id(
-        "morning-editorial", "openclaw", external, scheduled_for
+        "morning-editorial", source, external, scheduled_for
     )
     return scheduled_for, occurrence_id, make_run_id(
         workflow_id="morning-editorial", occurrence_id=occurrence_id
@@ -145,11 +146,12 @@ class StoryScheduledBoundaryTests(unittest.TestCase):
         candidates,
         domain_outcome: str = "SUCCEEDED",
         declare_handoff: bool = True,
+        source: str = "openclaw",
     ):
         """Persist a Morning #27 result with artifacts the provenance gate reads."""
 
         write_morning_artifacts(self.root, date, candidates=tuple(candidates))
-        _, occurrence_id, run_id = morning_ids_for(date)
+        _, occurrence_id, run_id = morning_ids_for(date, source)
         required = [board_relative_path(date)]
         if declare_handoff:
             required.append(handoff_relative_path(date))
@@ -272,6 +274,73 @@ class StoryScheduledBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(result.application_execution, "FAILED")
         self.assertEqual(result.reason_code, "SOURCE_HANDOFF_MISSING")
+
+    def test_completed_replay_survives_deleted_morning_result(self):
+        self.write_morning_result("2026-09-08", [make_candidate()])
+        trigger = make_trigger()
+        first = run_story_trigger(trigger, **self.base_kwargs())
+        self.assertEqual(first.domain_outcome, "SUCCEEDED")
+
+        # Upstream Morning result disappears afterward: the completed Story
+        # replay must still succeed from its own persisted authority.
+        _, _, morning_run_id = morning_ids_for("2026-09-08")
+        (self.morning_out / f"{morning_run_id}.json").unlink()
+        (self.root / "social/research/daily/2026-09-08-editorial-candidates.json").unlink()
+
+        second = run_story_trigger(
+            trigger,
+            **self.base_kwargs(
+                writer=Exploding("writer"),
+                verifier=Exploding("verifier"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+                notifier=lambda _r: {"status": "ALREADY_SENT"},
+            ),
+        )
+        self.assertEqual(second.application_execution, "COMPLETED")
+        self.assertEqual(second.run_id, first.run_id)
+        self.assertEqual(second.domain_outcome, "SUCCEEDED")
+        self.assertNotEqual(second.reason_code, "MORNING_SOURCE_UNPROVEN")
+
+    def test_corrupt_persisted_story_result_fails_closed(self):
+        self.write_morning_result("2026-09-08", [make_candidate()])
+        trigger = make_trigger()
+        first = run_story_trigger(trigger, **self.base_kwargs())
+        self.assertEqual(first.domain_outcome, "SUCCEEDED")
+
+        Path(first.result_file).write_text("{corrupt", encoding="utf-8")
+        second = run_story_trigger(
+            trigger,
+            **self.base_kwargs(
+                writer=Exploding("writer"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+            ),
+        )
+        self.assertEqual(second.application_execution, "FAILED")
+        self.assertEqual(second.reason_code, "RESULT_MISSING_OR_CORRUPT")
+
+    def test_alternate_source_proves_own_morning_occurrence(self):
+        self.write_morning_result("2026-09-08", [], source="systemd-timer")
+        result = run_story_trigger(
+            make_trigger(source="systemd-timer"), **self.base_kwargs()
+        )
+        self.assertEqual(result.application_execution, "COMPLETED")
+        self.assertEqual(result.domain_outcome, "SUCCEEDED")
+        self.assertEqual(result.story_outcome, "NO_ACTION")
+
+    def test_mismatched_sources_do_not_cross_authorize(self):
+        self.write_morning_result("2026-09-08", [], source="openclaw")
+        result = run_story_trigger(
+            make_trigger(source="systemd-timer"),
+            **self.base_kwargs(
+                writer=Exploding("writer"),
+                draft_connector=Exploding("draft"),
+                review_delivery=Exploding("delivery"),
+            ),
+        )
+        self.assertEqual(result.application_execution, "FAILED")
+        self.assertEqual(result.reason_code, "MORNING_SOURCE_UNPROVEN")
 
 
 class MorningProvenanceGateTests(unittest.TestCase):

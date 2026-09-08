@@ -125,8 +125,14 @@ Before any candidate/provider/writer/draft/delivery work, Story proves
 the date's Morning occurrence established a valid persisted SUCCEEDED
 #27 result with correct deterministic identity declaring both artifacts;
 a valid handoff file left behind by a failed Morning cycle is never
-consumed (`MORNING_SOURCE_UNPROVEN`). No second health database, no
-scheduler stdout.
+consumed (`MORNING_SOURCE_UNPROVEN`). Replay authority comes first: an
+already-established Story occurrence replays from its own persisted
+result (identity-checked) without re-proving provenance or re-invoking
+anything; a corrupt persisted result fails closed instead of starting a
+fresh attempt. Provenance follows the validated invocation's own source
+namespace (OpenClaw today; e.g. `systemd-timer` works unchanged) --
+application semantics never hard-code an adapter name. No second health
+database, no scheduler stdout.
 
 Production wiring (`run_story_trigger` in
 `nullone_scheduled_run_dispatch.py`): `HaikuStoryWriter`,
