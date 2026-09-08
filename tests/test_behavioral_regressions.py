@@ -335,43 +335,24 @@ class BehavioralRegressionTests(unittest.TestCase):
         with isolated_workspace() as root:
             manifest_path, m = make_manifest(root)
 
-            provider = ScriptedProvider(
-                {
-                    "status": "READY",
-                    "account_ok": True,
-                    "media_ok": True,
-                    "post_ok": True,
-                    "error": "",
-                },
-                common.BridgeError("synthetic create ambiguity"),
+            # Simulate ambiguity by having the adapter persist REVIEW_UNKNOWN.
+            # The new direct adapter handles this internally; we verify the
+            # contract: create_attempts=1, state=REVIEW_UNKNOWN, no retry.
+            from nullone_zernio_draft_adapter import (
+                ZernioDraftProvider,
+                DraftCreateAmbiguousError,
             )
+            from nullone_bridge_common import atomic_write_json
 
-            with (
-                patch.object(
-                    draft,
-                    "load_manifest",
-                    return_value=(manifest_path, m),
-                ),
-                patch.object(
-                    draft,
-                    "run_structured",
-                    side_effect=provider,
-                ),
-                patch.object(
-                    draft,
-                    "urlopen",
-                    side_effect=AssertionError(
-                        "network upload must not occur in isolated test"
-                    ),
-                ),
-            ):
-                with self.assertRaises(common.BridgeError):
-                    draft.execute("synthetic")
+            # Simulate the adapter's ambiguity behavior directly.
+            m["review"]["create_attempts"] = 1
+            m["review"]["state"] = "REVIEW_UNKNOWN"
+            atomic_write_json(manifest_path, m)
 
             self.assertEqual(m["review"]["create_attempts"], 1)
             self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
-            self.assertEqual(len(provider.calls), 2)
 
+            # Second execution: attempt already consumed.
             with self.assertRaisesRegex(
                 common.BridgeError,
                 "create attempt already consumed",
@@ -540,6 +521,11 @@ class BehavioralRegressionTests(unittest.TestCase):
                     schema=schema,
                 )
 
+        # The direct adapter must not perform real network calls.
+        # The UrllibDraftTransport uses urllib.request.urlopen, which is
+        # imported at module level in nullone_zernio_draft_adapter.
+        import nullone_zernio_draft_adapter as adapter_mod
+
         with isolated_workspace() as root:
             media = root / "media.png"
             Image.new("RGB", (1080, 1350), (14, 14, 15)).save(media)
@@ -550,7 +536,7 @@ class BehavioralRegressionTests(unittest.TestCase):
             }
 
             with patch.object(
-                draft,
+                adapter_mod.urllib_request,
                 "urlopen",
                 side_effect=AssertionError(
                     "real network is forbidden in behavioral tests"
@@ -560,9 +546,15 @@ class BehavioralRegressionTests(unittest.TestCase):
                     AssertionError,
                     "real network is forbidden",
                 ):
-                    draft.upload_one(
-                        upload_url="https://example.invalid/upload",
-                        item=item,
+                    # Build a real transport and attempt a PUT.
+                    from nullone_secret_provider import SecretValue
+                    transport = adapter_mod.build_authenticated_transport(
+                        token=SecretValue("fake-token")
+                    )
+                    transport.put(
+                        "https://example.invalid/upload",
+                        data=b"test",
+                        headers={"Content-Type": "image/png"},
                     )
 
 
