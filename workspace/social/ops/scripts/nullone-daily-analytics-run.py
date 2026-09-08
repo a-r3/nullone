@@ -5,26 +5,25 @@ import argparse
 import tempfile
 from pathlib import Path
 
+from nullone_analytics_provider_factory import build_production_analytics_provider
 from nullone_bridge_common import BridgeError, CANONICAL_ACCOUNT_ID
 from nullone_analytics_runtime import run_daily_analytics
-from nullone_zernio_analytics_adapter import (
-    ZernioReadOnlyAnalyticsConnector,
-    build_default_transport,
-)
+from nullone_zernio_analytics_adapter import ZernioReadOnlyAnalyticsConnector
 
 
 def _default_build_connector() -> ZernioReadOnlyAnalyticsConnector:
-    """Build the real read-only Zernio analytics connector.
+    """Build the production read-only Zernio analytics connector.
 
-    Not exercised by any test in this repository: tests inject a fake
-    `build_connector` into `run_daily_analytics` instead. Production
-    wiring of this default path — and any real scheduled invocation of
-    this script — has not been deployed; controlled production
-    activation remains a separate, later step (issue #37).
+    Delegates to the reviewed AnalyticsProvider factory (#61), which reads
+    the credential from the inherited process environment and constructs
+    the #29 connector with the canonical account id. Not exercised by any
+    test in this repository: tests inject a fake `build_connector` into
+    `run_daily_analytics` instead. Production wiring of this default path
+    has not been deployed; controlled production activation remains a
+    separate, later step (issue #37).
     """
 
-    transport = build_default_transport()
-    return ZernioReadOnlyAnalyticsConnector(transport, account_id=CANONICAL_ACCOUNT_ID)
+    return build_production_analytics_provider()
 
 
 def execute(occurrence_id: str, analytics_date: str | None) -> int:

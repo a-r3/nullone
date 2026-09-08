@@ -36,20 +36,22 @@ use -- those wrappers are unchanged by #59 (see their own docstrings/tests)
 and are not the new application orchestration contract.
 
 Daily Analytics production boundary (#61): the production
-`AnalyticsProvider` factory (`nullone_analytics_provider_factory
-.build_production_analytics_provider`) is a fail-closed placeholder that
-never reads `ZERNIO_ANALYTICS_API_TOKEN` -- see that module's docstring.
-Running `analytics` against a real trigger today, without #61, always
-yields `application_execution=FAILED`, `reason_code=RUNTIME_CRASHED`,
-`context.error_type=ProviderSecretWiringPendingError` (the raised
-placeholder's own exception message is never included in `reason_text` or
-`context` -- only its stable `type(exc).__name__` -- since a future real
-credential/provider failure at this same seam must never be assumed safe
-to echo into operator-facing output; the static fact that this is
-specifically the pending-#61 seam is documented here and in
-`nullone_analytics_provider_factory.py`, not recovered from raw exception
-text). It never fabricates a Zernio bootstrap attempt.
-"""
+    `AnalyticsProvider` factory (`nullone_analytics_provider_factory
+    .build_production_analytics_provider`) reads the credential only
+    through the reviewed secret boundary
+    (`nullone_secret_provider.EnvironmentSecretProvider`), which owns the
+    sole environment-variable mapping -- see that module's docstring.
+    Running `analytics` against a real trigger with #61 implemented and no
+    credential configured yields `domain_outcome=BLOCKED`,
+    `reason_code=ZERNIO_ANALYTICS_UNAUTHORIZED`, `application_execution=
+    COMPLETED`, and hence scheduler-level exit 0 -- the missing-secret
+    condition is a graceful blocked domain outcome, never a crash. An
+    unexpected provider/factory crash (not one of #29's typed connector
+    errors) is still reported as `RUNTIME_CRASHED`, and the exception's
+    class name alone (`type(exc).__name__`) is echoed, never its message
+    text, since a real credential/provider failure message must never be
+    assumed safe to interpolate into operator-facing output.
+    """
 from __future__ import annotations
 
 import argparse

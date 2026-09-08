@@ -597,14 +597,27 @@ class DailyAnalyticsRuntimeTests(unittest.TestCase):
             self.assertNotIn(FAKE_SECRET, result["reason_text"])
             self.assertFalse((root / "social/analytics").exists())
 
-    def test_build_default_transport_blocks_when_credential_missing(self):
-        backup = os.environ.pop(analytics_adapter.CREDENTIAL_ENV_VAR, None)
-        try:
-            with self.assertRaises(ConnectorUnauthorizedError):
-                analytics_adapter.build_default_transport()
-        finally:
-            if backup is not None:
-                os.environ[analytics_adapter.CREDENTIAL_ENV_VAR] = backup
+    def test_build_authenticated_transport_rejects_blank_secret(self):
+        from nullone_secret_provider import SecretValue
+
+        with self.assertRaises(ConnectorUnauthorizedError):
+            analytics_adapter.build_authenticated_transport(token=SecretValue("   "))
+
+    def test_build_authenticated_transport_requires_secret_value(self):
+        with self.assertRaises(TypeError):
+            analytics_adapter.build_authenticated_transport(  # type: ignore[arg-type]
+                token="raw-string-token-must-be-rejected"
+            )
+
+    def test_transport_repr_never_renders_secret(self):
+        from nullone_secret_provider import SecretValue
+
+        marker = "fake-test-secret-do-not-leak-abc123"
+        transport = analytics_adapter.build_authenticated_transport(token=SecretValue(marker))
+        self.assertNotIn(marker, repr(transport))
+        self.assertNotIn(marker, str(transport))
+        self.assertIn("redacted", repr(transport))
+        self.assertIsInstance(transport.token, SecretValue)
 
     def test_malformed_payload_is_non_success_without_partial_artifacts(self):
         responses = _full_success_responses()

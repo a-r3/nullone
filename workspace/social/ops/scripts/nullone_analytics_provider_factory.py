@@ -1,94 +1,176 @@
 #!/usr/bin/env python3
-"""AnalyticsProvider production factory boundary (#59/#61 seam).
+"""Production AnalyticsProvider factory boundary (#59/#61 seam).
 
 `AnalyticsWorkflow` (#59, `nullone_analytics_workflow.py`) depends only on
 an injected `provider_factory` callable matching #29's existing
 `run_daily_analytics(build_connector=...)` signature exactly. This module
-supplies the *production* factory boundary that a real, secret-backed
-`AnalyticsProvider` (the #29 `ZernioReadOnlyAnalyticsConnector`) would be
-constructed behind, wired in only at the CLI layer
-(`nullone-scheduled-run.py`) -- never inside `nullone_analytics_workflow.py`
-itself.
+supplies the *production* factory boundary: it constructs the #29
+`ZernioReadOnlyAnalyticsConnector` behind the reviewed secret boundary
+(`nullone_secret_provider.py`), wired in only at the CLI layer
+(`nullone-scheduled-run.py`, `nullone-daily-analytics-run.py`) -- never
+inside `nullone_analytics_workflow.py` itself.
 
-Issue #61 (secure scheduled `ZERNIO_ANALYTICS_API_TOKEN` injection) has not
-been implemented. This module therefore, deliberately:
+Construction performs no network calls and writes nothing to disk. The
+only effect of calling it is binding the canonical account id from
+`nullone_bridge_common` to a GET-only connector whose transport was
+created from the injected secret.
 
-- never reads `ZERNIO_ANALYTICS_API_TOKEN` or any other environment
-  variable;
-- never implements systemd/environment secret loading;
-- never creates, reads, or provisions any secret file;
-- never constructs a real Zernio connector or calls Zernio.
+Secret failure semantics (#28):
+- missing / blank / whitespace-only secret (typed
+  `SecretNotConfiguredError`) -> `ConnectorUnauthorizedError` (domain
+  `BLOCKED`), with the fixed reason text below;
+- unreadable secret source or any exception escaping the provider
+  (`SecretUnavailableError` or anything else) -> `ConnectorUnavailableError`
+  (domain `BLOCKED`), sanitized -- the provider's own message is never
+  propagated;
+- unknown secret id -> treated as missing (`ConnectorUnauthorizedError`).
 
-It fails closed with a distinct, honestly-labeled error instead of faking a
-connector attempt. #61 completes real production wiring behind this exact
-seam (`build_production_analytics_provider`'s call site in
-`nullone-scheduled-run.py`); `AnalyticsWorkflow` and its tests do not need
-to change when it does.
+Truly unexpected programming defects below the provider call (for example
+in transport construction) are never swallowed: they propagate so the
+workflow reports them as `RUNTIME_CRASHED`.
+
+The environment-variable binding for the credential exists only inside
+`nullone_secret_provider.py`; this module requests the logical id
+`zernio.analytics.bearer` and never mentions an environment variable.
 """
 from __future__ import annotations
 
-from typing import Any
+import argparse
 
-REASON_CODE_PROVIDER_SECRET_WIRING_PENDING = "PROVIDER_SECRET_WIRING_PENDING_61"
+from nullone_bridge_common import CANONICAL_ACCOUNT_ID
+from nullone_secret_provider import (
+    SECRET_ID_ZERNIO_ANALYTICS_BEARER,
+    EnvironmentSecretProvider,
+    SecretNotConfiguredError,
+    SecretProvider,
+)
+from nullone_zernio_analytics_adapter import (
+    ConnectorUnauthorizedError,
+    ConnectorUnavailableError,
+    ZernioReadOnlyAnalyticsConnector,
+    build_authenticated_transport,
+)
+
+# Fixed, generic reason texts. Never derived from a provider exception.
+CREDENTIAL_MISSING_REASON = "Zernio analytics credential is missing or was rejected."
+CREDENTIAL_UNAVAILABLE_REASON = (
+    "Zernio analytics secret could not be read from its runtime source."
+)
 
 
-class ProviderSecretWiringPendingError(RuntimeError):
-    """Raised instead of constructing a real production AnalyticsProvider.
+def build_production_analytics_provider(
+    *,
+    secret_provider: SecretProvider | None = None,
+) -> ZernioReadOnlyAnalyticsConnector:
+    """Construct the production `AnalyticsProvider` (#29 connector).
 
-    Deliberately NOT one of `nullone_zernio_analytics_adapter`'s connector
-    errors (`ConnectorUnauthorizedError`/`ConnectorUnavailableError`/...):
-    those are caught inside `run_daily_analytics` and become a domain
-    `BLOCKED` #27 result, which would misleadingly report that a *real*
-    Zernio bootstrap attempt was made. This is a distinct, uncaught
-    orchestration condition instead -- `AnalyticsWorkflow` reports it as a
-    scheduler/application execution-level failure
-    (`reason_code=RUNTIME_CRASHED`, `context.error_type=
-    ProviderSecretWiringPendingError`), never as a domain outcome, and no
-    #27 result is fabricated. This exception's own message (constructed
-    below) is never included in that reported `reason_text`/`context` --
-    only the exception's stable class name is -- so the exact pending-#61
-    fact is documented statically here and at the CLI docstring, never
-    recovered through raw exception text.
+    `secret_provider` defaults to `EnvironmentSecretProvider`, which reads
+    the credential from the inherited process environment -- the runtime
+    source proven for the OpenClaw Gateway's child commands (issue #61,
+    branch A). The logical secret id requested here is
+    `zernio.analytics.bearer`; the environment-variable mapping is owned by
+    `nullone_secret_provider.py`.
     """
 
+    provider: SecretProvider = (
+        secret_provider if secret_provider is not None else EnvironmentSecretProvider()
+    )
 
-def build_production_analytics_provider() -> Any:
-    """Fail-closed placeholder for the real production `AnalyticsProvider`.
+    try:
+        token = provider.get_required(SECRET_ID_ZERNIO_ANALYTICS_BEARER)
+    except SecretNotConfiguredError:
+        raise ConnectorUnauthorizedError(CREDENTIAL_MISSING_REASON) from None
+    except Exception:
+        raise ConnectorUnavailableError(CREDENTIAL_UNAVAILABLE_REASON) from None
 
-    Never exercised by any test in this repository (tests inject a fake
-    `provider_factory` into `run_analytics_workflow` instead). Completing
-    this function to actually construct a
-    `nullone_zernio_analytics_adapter.ZernioReadOnlyAnalyticsConnector`
-    backed by a securely-injected credential is issue #61's job, not #59's.
-    """
+    transport = build_authenticated_transport(token=token)
 
-    raise ProviderSecretWiringPendingError(
-        "Daily Analytics production AnalyticsProvider construction is "
-        f"{REASON_CODE_PROVIDER_SECRET_WIRING_PENDING}: pending issue #61 "
-        "(secure scheduled secret injection). This placeholder "
-        "intentionally never reads any secret, environment variable, or "
-        "credential file, and never calls Zernio."
+    return ZernioReadOnlyAnalyticsConnector(
+        transport,
+        account_id=CANONICAL_ACCOUNT_ID,
     )
 
 
 def self_test() -> int:
-    try:
-        build_production_analytics_provider()
-        raise AssertionError("production factory placeholder did not fail closed")
-    except ProviderSecretWiringPendingError as exc:
-        assert REASON_CODE_PROVIDER_SECRET_WIRING_PENDING in str(exc)
+    from nullone_secret_provider import SecretProviderError, SecretValue
+
+    marker = "FAKE_ZERNIO_SECRET_DO_NOT_LOG_123"
+
+    # Missing/blank secret -> ConnectorUnauthorizedError (BLOCKED), fixed text.
+    class MissingProvider:
+        def get_required(self, secret_id):
+            raise SecretNotConfiguredError("not configured")
+
+    missing = _fails_closed_as(MissingProvider(), ConnectorUnauthorizedError)
+    assert str(missing) == CREDENTIAL_MISSING_REASON
+
+    # Unknown secret id -> missing-secret (BLOCKED).
+    class UnknownIdProvider:
+        def get_required(self, secret_id):
+            raise SecretNotConfiguredError("unknown secret id")
+
+    assert type(_fails_closed_as(UnknownIdProvider(), ConnectorUnauthorizedError)) is ConnectorUnauthorizedError
+
+    # Unavailable source -> ConnectorUnavailableError (BLOCKED), sanitized:
+    # the fake secret-like payload must never appear.
+    class UnavailableProvider:
+        def get_required(self, secret_id):
+            raise SecretProviderError(
+                f"credential store unreachable with value {marker}"
+            )
+
+    unavailable = _fails_closed_as(UnavailableProvider(), ConnectorUnavailableError)
+    assert str(unavailable) == CREDENTIAL_UNAVAILABLE_REASON
+    assert marker not in str(unavailable)
+
+    # Generic exception escaping the provider -> ConnectorUnavailableError
+    # (a normal runtime secret-availability failure, never an app crash).
+    class BrokenProvider:
+        def get_required(self, secret_id):
+            raise RuntimeError("secret daemon died")
+
+    broken = _fails_closed_as(BrokenProvider(), ConnectorUnavailableError)
+    assert str(broken) == CREDENTIAL_UNAVAILABLE_REASON
+
+    # Present secret -> connector constructed with the canonical account
+    # id; the value never leaks through any rendering.
+    class PresentEnv(EnvironmentSecretProvider):
+        def __init__(self):
+            self._environ = {
+                EnvironmentSecretProvider.bound_env_var(
+                    SECRET_ID_ZERNIO_ANALYTICS_BEARER
+                ): marker,
+            }
+
+    connector = build_production_analytics_provider(secret_provider=PresentEnv())
+    assert connector._account_id == CANONICAL_ACCOUNT_ID
+    assert marker not in repr(connector)
+    assert marker not in repr(connector._transport)
+    assert "redacted" in repr(connector._transport)
+    assert type(connector._transport.token) is SecretValue
 
     print("ANALYTICS_PROVIDER_FACTORY_SELF_TEST=PASS")
-    print("NO_SECRET_READ=TRUE")
+    print("SECRET_REDACTED=TRUE")
     print("NO_NETWORK=TRUE")
     return 0
 
 
-def main() -> int:
-    import argparse
+def _fails_closed_as(provider, expected_error):
+    """Offline self-test helper: normalize the expected typed failure."""
+    try:
+        build_production_analytics_provider(secret_provider=provider)
+    except expected_error as exc:
+        return exc
+    raise AssertionError(
+        f"factory did not fail closed into {expected_error.__name__}"
+    )
 
+
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="NullOne AnalyticsProvider production factory boundary (#59/#61 seam)"
+        description=(
+            "NullOne AnalyticsProvider production factory boundary (#59/#61 seam)"
+        )
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("self-test")

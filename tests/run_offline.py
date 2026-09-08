@@ -34,6 +34,8 @@ COMMANDS = [
     [sys.executable, "tests/test_openclaw_scheduler_adapter.py"],
     [sys.executable, "tests/test_morning_workflow.py"],
     [sys.executable, "tests/test_analytics_workflow.py"],
+    [sys.executable, "tests/test_analytics_provider_factory.py"],
+    [sys.executable, "tests/test_secret_provider.py"],
     [sys.executable, "tests/test_scheduled_workflows_capability_negative.py"],
     [sys.executable, "tests/test_scheduled_run_cli.py"],
     [sys.executable, "tests/test_schedule_registry.py"],
@@ -113,6 +115,11 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_scheduled_occurrence_authority.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_secret_provider.py",
         "self-test",
     ],
     [

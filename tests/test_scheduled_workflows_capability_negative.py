@@ -11,14 +11,15 @@ rather than bare architectural vocabulary, since these modules' own
 docstrings legitimately *describe* the OpenClaw/Zernio/Claude boundary they
 must not cross.
 
-Infrastructure adapter files (Claude CLI invocation, the AnalyticsProvider
-production-factory placeholder, and the OpenClaw scheduler edge) are
-explicitly excluded from the "no subprocess/no provider names" checks --
-that capability (or, for the factory placeholder, that *documentation* of
-the pending secret name) is their entire purpose -- but are still checked
-for the narrower "never publish/schedule/process approval callbacks"
-guarantee every #59 module must uphold, and the factory placeholder is
-separately checked for the stronger "never actually reads the secret"
+Infrastructure adapter files (Claude CLI invocation, the
+AnalyticsProvider production factory and its reviewed secret boundary,
+and the OpenClaw scheduler edge) are explicitly excluded from the "no
+subprocess/no provider names" checks -- that capability is their entire
+purpose -- but are still checked for the narrower "never
+publish/schedule/process approval callbacks" guarantee every #59 module
+must uphold, and the secret boundary is separately checked for the
+stronger "the exact secret environment-variable name is bound in exactly
+one module and is never leaked by any factory/transport rendering"
 guarantee.
 """
 from __future__ import annotations
@@ -57,14 +58,15 @@ APPLICATION_MODULES = (
     "nullone_scheduled_occurrence_authority.py",
 )
 
-# Infrastructure adapters -- legitimately shell out / document the pending
-# secret name (that is each one's entire purpose) -- checked separately,
-# only for the narrower publish/schedule/approval-callback-processing
-# guarantee (and, for the factory placeholder, the stronger "never actually
-# reads the secret" guarantee below).
+# Infrastructure adapters -- legitimately shell out / know provider-secret
+# details (that is each one's entire purpose) -- checked separately, only
+# for the narrower publish/schedule/approval-callback-processing guarantee
+# (and the #61 secret boundary, for the stronger env-var-ownership and
+# never-leak guarantees below).
 INFRASTRUCTURE_ADAPTER_MODULES = (
     "nullone_claude_editorial_provider.py",
     "nullone_analytics_provider_factory.py",
+    "nullone_secret_provider.py",
     "nullone_openclaw_scheduler_adapter.py",
     "nullone-scheduled-run.py",
     "nullone_scheduled_run_dispatch.py",
@@ -212,9 +214,15 @@ class NoPublisherOrApprovalCapabilityAnywhereTests(unittest.TestCase):
             self.assertNotIn(forbidden, module_names)
 
 
-class ProviderSecretPlaceholderNeverReadsSecretTests(unittest.TestCase):
-    """The #61 seam placeholder must document, but never actually read, the
-    real secret -- checked at both source and runtime-behavior level."""
+class ReviewedSecretBoundaryGuardTests(unittest.TestCase):
+    """#61: the production AnalyticsProvider reads the production secret
+    only through the reviewed secret boundary, which never renders it.
+
+    The exact environment-variable name is bound in exactly one script
+    module (`nullone_secret_provider.py`); neither the Zernio adapter nor
+    the factory may re-bind it, and no rendering of the factory, connector,
+    or transport may ever contain the value.
+    """
 
     def test_factory_module_never_calls_os_environ(self):
         source = code_only(
@@ -223,17 +231,60 @@ class ProviderSecretPlaceholderNeverReadsSecretTests(unittest.TestCase):
         self.assertNotIn("os.environ", source)
         self.assertNotIn("getenv", source)
 
-    def test_factory_placeholder_raises_without_reading_environment(self):
+    def test_env_var_name_bound_only_in_secret_provider(self):
+        for filename in (
+            "nullone_zernio_analytics_adapter.py",
+            "nullone_analytics_provider_factory.py",
+        ):
+            source = (SCRIPTS / filename).read_text(encoding="utf-8")
+            self.assertEqual(
+                source.count(ANALYTICS_SECRET_ENV_VAR),
+                0,
+                msg=f"{filename} must never bind or reference the exact env-var name",
+            )
+
+        secret_provider_source = (SCRIPTS / "nullone_secret_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertGreaterEqual(
+            secret_provider_source.count(ANALYTICS_SECRET_ENV_VAR),
+            1,
+            msg="the reviewed secret boundary must own the exact env-var name",
+        )
+
+    def test_legacy_key_alias_not_introduced_in_new_secret_code(self):
+        source = code_only(
+            (SCRIPTS / "nullone_secret_provider.py").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("ZERNIO_API_KEY", source)
+
+    def test_factory_reads_secret_only_via_boundary_and_redacts(self):
+        import os
+        from unittest import mock
+
+        import nullone_analytics_provider_factory as factory
+        from nullone_bridge_common import CANONICAL_ACCOUNT_ID
+
+        marker = "should-never-appear-in-output"
+        with mock.patch.dict(os.environ, {ANALYTICS_SECRET_ENV_VAR: marker}):
+            connector = factory.build_production_analytics_provider()
+            self.assertEqual(connector._account_id, CANONICAL_ACCOUNT_ID)
+            self.assertNotIn(marker, repr(connector))
+            self.assertNotIn(marker, repr(connector._transport))
+            self.assertNotIn(marker, str(connector._transport))
+            self.assertIn("redacted", repr(connector._transport))
+
+    def test_factory_missing_secret_fails_closed_to_unauthorized(self):
         import os
         from unittest import mock
 
         import nullone_analytics_provider_factory as factory
 
-        with mock.patch.dict(os.environ, {"ZERNIO_ANALYTICS_API_TOKEN": "should-never-be-read"}):
-            with self.assertRaises(factory.ProviderSecretWiringPendingError) as ctx:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(factory.ConnectorUnauthorizedError) as ctx:
                 factory.build_production_analytics_provider()
-            self.assertIn("PROVIDER_SECRET_WIRING_PENDING_61", str(ctx.exception))
-            self.assertNotIn("should-never-be-read", str(ctx.exception))
+            self.assertIn("missing or was rejected", str(ctx.exception))
+            self.assertNotIn(ANALYTICS_SECRET_ENV_VAR, str(ctx.exception))
 
 
 class NoScheduleFrameworkTests(unittest.TestCase):

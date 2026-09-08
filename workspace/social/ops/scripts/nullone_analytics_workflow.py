@@ -27,7 +27,8 @@ insights, post analytics) `nullone_zernio_analytics_adapter` already
 defines. It never reads the production analytics credential environment
 variable or any other environment variable, never touches systemd, and
 never constructs a Zernio connector itself; the real secret-backed factory
-is issue #61's job, wired in only at the CLI/production layer
+is #61's implementation (`nullone_analytics_provider_factory.py` +
+`nullone_secret_provider.py`), wired in only at the CLI/production layer
 (`nullone-scheduled-run.py`), never inside this module.
 
 Critical dependency rule (restated, enforced by
@@ -185,9 +186,13 @@ def run_analytics_workflow(
     `provider_factory` is called at most once, lazily, from inside
     `run_analytics` (the real #29 runtime) -- never speculatively by this
     function. If it raises anything other than the #29-typed connector
-    errors `run_analytics` already catches (e.g. the #61
-    `ProviderSecretWiringPendingError` placeholder), that propagates here
-    and is reported as `RUNTIME_CRASHED`, never faked into a domain result.
+    errors `run_analytics` already catches (e.g. an unexpected
+    provider/factory crash), that propagates here and is reported as
+    `RUNTIME_CRASHED`, never faked into a domain result. With #61
+    implemented, the production factory's typed secret failures
+    (`ConnectorUnauthorizedError`/`ConnectorUnavailableError`) are caught
+    inside `run_analytics` and become a domain `BLOCKED` result -- so only
+    genuinely unexpected programming defects reach this path.
     """
 
     try:
@@ -226,13 +231,14 @@ def run_analytics_workflow(
         )
     except Exception as exc:  # noqa: BLE001 - a runtime/provider crash is a typed orchestration failure
         # Deliberately never interpolates str(exc): the provider factory
-        # boundary (#61's eventual seam) may one day wrap a real Zernio/
-        # credential failure, and an arbitrary exception message must never
-        # be assumed safe to echo into application/operator output. The
-        # exception's class name alone is enough to distinguish e.g. the
-        # #61 PROVIDER_SECRET_WIRING_PENDING_61 placeholder
-        # (ProviderSecretWiringPendingError) from any other crash, without
-        # ever depending on its message text containing anything specific.
+        # boundary (#61's seam) wraps real credential/provider failures,
+        # and an arbitrary exception message must never be assumed safe to
+        # echo into application/operator output. The exception's class name
+        # alone is enough to distinguish e.g. a missing-credential
+        # `ConnectorUnauthorizedError` (which `run_analytics` already
+        # catches as BLOCKED, so it never arrives here) from an unexpected
+        # crash, without ever depending on message text containing anything
+        # specific.
         return _failed(
             reason_code="RUNTIME_CRASHED",
             reason_text="Daily Analytics runtime raised before establishing a result.",
@@ -601,32 +607,35 @@ def self_test() -> int:
         assert result.domain_outcome == "FAILED", result
 
         # 9. RUNTIME_CRASHED: provider factory raises something #29 does not
-        #    catch (simulating the #61 PROVIDER_SECRET_WIRING_PENDING seam) ->
-        #    non-zero, no #27 result fabricated. The exception's own message
-        #    (here containing a fake secret-like marker, standing in for
-        #    whatever a real future #61 credential failure might embed) must
-        #    never be echoed into application/operator output -- only the
-        #    stable exception *type name* may be used to identify it.
-        class ProviderSecretWiringPendingError(RuntimeError):
+        #    catch (an unexpected programming defect at the #61 seam, e.g.
+        #    outside the typed missing-secret mapping -- never a real
+        #    credential failure, which #61 now surfaces as a typed BLOCKED
+        #    outcome instead) -> non-zero, no #27 result fabricated. The
+        #    exception's own message (here containing a fake secret-like
+        #    marker, standing in for whatever a real credential failure
+        #    might embed) must never be echoed into application/operator
+        #    output -- only the stable exception *type name* may be used to
+        #    identify it.
+        class UnexpectedProviderCrashError(RuntimeError):
             pass
 
         FAKE_SECRET_MARKER = "FAKE-SECRET-should-never-be-echoed-zat_1234567890"
 
         def pending_secret_factory() -> ZernioReadOnlyAnalyticsConnector:
-            raise ProviderSecretWiringPendingError(
+            raise UnexpectedProviderCrashError(
                 f"Daily Analytics production AnalyticsProvider construction "
                 f"failed: token={FAKE_SECRET_MARKER}"
             )
 
         result = run_analytics_workflow(
-            make_trigger(external_occurrence_id="openclaw-occ-analytics-pending61"),
+            make_trigger(external_occurrence_id="openclaw-occ-analytics-crash61"),
             provider_factory=pending_secret_factory,
             artifact_root=root / "case9", output_root=root / "case9" / "run-outcomes",
         )
         assert result.application_execution == "FAILED", result
         assert result.reason_code == "RUNTIME_CRASHED", result
         assert result.domain_outcome is None, result
-        assert result.context.get("error_type") == "ProviderSecretWiringPendingError", result
+        assert result.context.get("error_type") == "UnexpectedProviderCrashError", result
         assert FAKE_SECRET_MARKER not in result.reason_text, result.reason_text
         assert FAKE_SECRET_MARKER not in str(result.context), result.context
 

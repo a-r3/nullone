@@ -267,28 +267,36 @@ constructs a Zernio connector itself (enforced by
 
 The production factory boundary lives in
 `nullone_analytics_provider_factory.py` (infrastructure, not application
-layer), wired in only by `nullone-scheduled-run.py`. Per #59's scope
-boundary against #61, `build_production_analytics_provider()` is a
-fail-closed placeholder:
+layer), wired in only by `nullone-scheduled-run.py` and the legacy
+`nullone-daily-analytics-run.py`. Issue #61 implemented the real boundary
+behind the reviewed secret source `nullone_secret_provider.py`:
 
-```text
-PROVIDER_SECRET_WIRING_PENDING_61
-```
-
-It never reads any secret, environment variable, or credential file, and
-never calls Zernio -- verified by
-`test_factory_placeholder_raises_without_reading_environment`, which
-injects the real secret env var name into the process environment and
-asserts it is never read and never leaked into the raised error text.
-Because this placeholder's exception is not one of #29's typed connector
-errors, `run_daily_analytics` does not catch it: it propagates through
-`AnalyticsWorkflow` uncaught and is reported as
-`application_execution=RUNTIME_CRASHED` (never faked into a domain
-`BLOCKED` #27 result, and never a real Zernio bootstrap attempt).
-Completing `build_production_analytics_provider` to construct a real
-`ZernioReadOnlyAnalyticsConnector` behind a securely-injected credential is
-issue #61's job; `AnalyticsWorkflow` and its tests do not need to change
-when it does.
+- `build_production_analytics_provider(*, secret_provider=None)` reads the
+  logical secret id `zernio.analytics.bearer` through
+  `EnvironmentSecretProvider` (default runtime source: the inherited
+  process environment, proven for the OpenClaw Gateway's child commands)
+  and constructs the #29 `ZernioReadOnlyAnalyticsConnector` with the
+  canonical account id. Construction performs no network calls and writes
+  nothing to disk.
+- Missing/blank/whitespace-only secret -> `ConnectorUnauthorizedError`
+  (domain `BLOCKED`, reason `ZERNIO_ANALYTICS_UNAUTHORIZED`); an
+  unreadable secret source (or any exception escaping the provider) ->
+  `ConnectorUnavailableError` (domain `BLOCKED`), with a fixed, generic
+  reason text that never interpolates the provider's own message. These are
+  exactly the #29-typed connector errors `run_daily_analytics` catches, so
+  neither is ever reported as `RUNTIME_CRASHED` and no Zernio bootstrap
+  attempt is fabricated.
+- Truly unexpected programming defects below the provider call (e.g. a
+  non-`SecretValue` token reaching transport construction) still propagate
+  and are reported as `RUNTIME_CRASHED`; only the stable exception class
+  name is echoed, never the message text.
+- The exact environment-variable name is bound only inside
+  `nullone_secret_provider.py`; neither the Zernio adapter nor the factory
+  references it (enforced by
+  `ReviewedSecretBoundaryGuardTests.test_env_var_name_bound_only_in_secret_provider`),
+  and no rendering of the factory/connector/transport ever contains the
+  value. Deployment and readback detail in
+  `docs/deployment/61-secure-analytics-secret-injection.md`.
 
 ## Exact persisted #27 result is authoritative
 
@@ -321,11 +329,11 @@ notification decision.
 `application_execution="FAILED"` is reserved for: an invalid normalized
 trigger (`TRIGGER_REJECTED`), an unparseable `scheduled_for`
 (`SCHEDULED_FOR_INVALID`), the domain runtime raising before establishing
-any result (`RUNTIME_CRASHED` -- this is also how the #61 provider-secret
-placeholder surfaces; the raising exception's own message text is never
-included in `reason_text` or `context`, only its stable
-`type(exc).__name__`, since a future real credential/provider failure
-could otherwise leak sensitive text into operator-facing output), a
+any result (`RUNTIME_CRASHED` -- reserved for genuinely unexpected
+programming defects; with #61 implemented, the production factory's typed
+secret failures are `ConnectorUnauthorizedError`/`ConnectorUnavailableError`
+and are caught inside `run_daily_analytics` as graceful `BLOCKED` domain
+results, never this path), a
 missing/corrupt/mismatched persisted result (the table above), an
 unreconciled in-memory/persisted disagreement, the injected `notifier`
 raising (`NOTIFICATION_STATE_UNSAFE` -- a #30-level unsafe/corrupt on-disk
@@ -765,9 +773,12 @@ openclaw automations create "20 3 * * *" \
   --tz "Asia/Baku"
 ```
 
-Requires #61 to complete `build_production_analytics_provider` before
-activation can produce anything other than
-`PROVIDER_SECRET_WIRING_PENDING_61`.
+Requires #61's reviewed secret boundary (implemented; see
+`docs/deployment/61-secure-analytics-secret-injection.md`) to be activated
+with a configured credential before first successful analytics data. With
+the credential absent, the run still completes orchestration with a
+graceful `domain_outcome=BLOCKED` (`ZERNIO_ANALYTICS_UNAUTHORIZED`) and
+scheduler-level exit 0 -- never a crash.
 
 Both desired jobs: exit 0 means orchestration completed regardless of
 domain outcome (never inferred as domain success), or that there was
@@ -820,8 +831,10 @@ Both live OpenClaw automations remain the legacy prompt-only `agentTurn`
 jobs confirmed above; neither invokes `MorningWorkflow`/
 `AnalyticsWorkflow`/`nullone-scheduled-run.py`. No Story-specific live job
 exists either (unrelated to #59). `ZERNIO_ANALYTICS_API_TOKEN` remains
-absent from the production environment (issue #61, unimplemented by
-design here). Daily production activation of Daily Analytics requires
+absent from the production environment; #61's boundary is implemented and
+reviewed but **not deployed** (no credential provisioned, no systemd change
+applied) -- see `docs/deployment/61-secure-analytics-secret-injection.md`.
+Daily production activation of Daily Analytics requires
 **#59 + #61**; Morning Editorial's production activation additionally
 requires the #37 job-payload migration above. Natural live scheduled proof
 of either workflow remains `UNPROVEN_LIVE / DEFERRED_TO_#37`; no synthetic

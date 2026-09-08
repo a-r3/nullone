@@ -59,10 +59,12 @@ def run_morning_trigger(trigger: dict[str, Any]) -> MorningWorkflowResult:
 def run_analytics_trigger(trigger: dict[str, Any]) -> AnalyticsWorkflowResult:
     """Validated Analytics `nullone.scheduler-invocation.v1` -> production `AnalyticsWorkflow`.
 
-    Until #61, the production `AnalyticsProvider` factory is a fail-closed
-    placeholder that never reads `ZERNIO_ANALYTICS_API_TOKEN` -- see
-    `nullone_analytics_provider_factory.py`. This is expected and is not
-    faked around here.
+    The production `AnalyticsProvider` factory (#61) reads the credential
+    only through the reviewed secret boundary and, with no credential
+    configured, yields a graceful domain `BLOCKED` result (never a crash)
+    -- see `nullone_analytics_provider_factory.py` and
+    `nullone_secret_provider.py`. This is the expected production
+    behavior and is not faked around here.
     """
 
     return run_analytics_workflow(
