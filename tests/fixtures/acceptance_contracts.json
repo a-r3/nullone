@@ -172,10 +172,10 @@
           "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
           "contains": "Publication result ambiguous; retry forbidden"
         },
-        {
-          "path": "workspace/social/ops/scripts/nullone-publisher-run.py",
-          "contains": "AUTOMATIC_RETRY=FORBIDDEN"
-        }
+  {
+   "path": "workspace/social/ops/scripts/nullone_final_publish_controller.py",
+   "contains": "AUTOMATIC_RETRY=FORBIDDEN"
+  }
       ]
     },
     {

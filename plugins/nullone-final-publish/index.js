@@ -1,0 +1,319 @@
+/**
+ * NullOne final-publish plugin entry (OpenClaw 2026.8.2).
+ *
+ * Registers ONE interactive handler (channel telegram, namespace texbrif).
+ * `publish:<POST_ID>` callbacks take the deterministic route: envelope +
+ * HMAC over the private daemon pipe, zero LLM involvement, no sessions_send,
+ * no publisher-agent turn. Every other `texbrif:*` callback returns
+ * handled:false so existing approval/reject/revise/back agent flow is
+ * byte-for-byte unchanged.
+ *
+ * NOT deployed by Git merge. Install/enable/restart happens only at the
+ * controlled #37 deployment. See README.md in this directory.
+ */
+
+const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
+const { definePluginEntry } = require("openclaw/plugin-sdk/plugin-entry");
+const { routeCallback, canonicalStringify } = require("./route");
+
+const FRAME_MAGIC = Buffer.from("NP1", "utf8");
+const FRAME_VERSION = 1;
+const MAX_BODY_LEN = 8192;
+const MAC_LEN = 32;
+const KEY_LEN = 32;
+const HANDSHAKE_TIMEOUT_MS = 15000;
+const REQUEST_TIMEOUT_MS = 120000;
+
+const SAFE_TEXT = {
+  published: "✅ Nəşr tamamlandı.",
+  publishing: "⏳ Nəşr emaldadır.",
+  blocked: "⛔ Təhlükəsiz blok. Yeni ikinci təsdiq tələb olunur.",
+  abandoned: "⛔ Köhnə təsdiq qüvvədən düşüb. Yeni ikinci təsdiq tələb olunur.",
+  failed: "❌ Nəşr uğursuz oldu. Təkrar cəhd edilməyəcək.",
+  unknown: "❓ Nəşr statusu qeyri-müəyyəndir. Təkrar cəhd edilməyəcək.",
+  rejected: "⛔ Sorğu rədd edildi.",
+  unavailable: "⛔ Nəşr xidməti hazır deyil. Heç nə yayımlanmadı.",
+};
+
+function buildFrame(envelope, key) {
+  const body = Buffer.from(canonicalStringify(envelope), "utf8");
+  if (body.length > MAX_BODY_LEN) {
+    throw new Error("envelope exceeds frame bound");
+  }
+  const header = Buffer.alloc(3 + 1 + 4);
+  FRAME_MAGIC.copy(header, 0);
+  header.writeUInt8(FRAME_VERSION, 3);
+  header.writeUInt32BE(body.length, 4);
+  const mac = crypto.createHmac("sha256", key).update(header).update(body).digest();
+  return Buffer.concat([header, body, mac]);
+}
+
+class DaemonLink {
+  constructor(pythonBin, controllerPath, workspace) {
+    this.pythonBin = pythonBin;
+    this.controllerPath = controllerPath;
+    this.workspace = workspace;
+    this.child = null;
+    this.key = null;
+    this.ready = false;
+    this.buffer = Buffer.alloc(0);
+    this.pending = null;
+    this.chain = Promise.resolve();
+  }
+
+  async ensure() {
+    if (this.child && this.ready) {
+      return;
+    }
+    await this._spawn();
+  }
+
+  async _spawn() {
+    this.key = crypto.randomBytes(KEY_LEN);
+    const child = spawn(
+      this.pythonBin,
+      [this.controllerPath, "daemon"],
+      {
+        cwd: this.workspace,
+        env: { ...process.env, NULLONE_WORKSPACE: this.workspace },
+        stdio: ["pipe", "pipe", "ignore"],
+      }
+    );
+    this.child = child;
+    this.buffer = Buffer.alloc(0);
+    child.on("exit", () => {
+      this.ready = false;
+      this.child = null;
+      if (this.pending) {
+        const reject = this.pending.reject;
+        this.pending = null;
+        reject(new Error("daemon exited"));
+      }
+    });
+    child.stdout.on("data", (chunk) => this._onData(chunk));
+    // Private spawn pipe: the per-boot key goes first, exactly KEY_LEN bytes.
+    // argv carries nothing sensitive.
+    child.stdin.write(this.key);
+    await this._waitReady();
+    this.ready = true;
+  }
+
+  _onData(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    this._pump();
+  }
+
+  _frameLength() {
+    if (this.buffer.length < 8) {
+      return null;
+    }
+    if (!this.buffer.subarray(0, 3).equals(FRAME_MAGIC)) {
+      throw new Error("bad magic");
+    }
+    if (this.buffer[3] !== FRAME_VERSION) {
+      throw new Error("bad version");
+    }
+    const len = this.buffer.readUInt32BE(4);
+    if (len > MAX_BODY_LEN) {
+      throw new Error("oversize");
+    }
+    return 8 + len + MAC_LEN;
+  }
+
+  _pump() {
+    while (this.pending) {
+      let total;
+      try {
+        total = this._frameLength();
+      } catch (error) {
+        const reject = this.pending.reject;
+        this.pending = null;
+        reject(error);
+        return;
+      }
+      if (total === null || this.buffer.length < total) {
+        return;
+      }
+      const frame = this.buffer.subarray(0, total);
+      this.buffer = this.buffer.subarray(total);
+      const header = frame.subarray(0, 8);
+      const body = frame.subarray(8, total - MAC_LEN);
+      const mac = frame.subarray(total - MAC_LEN);
+      const expected = crypto.createHmac("sha256", this.key).update(header).update(body).digest();
+      if (!crypto.timingSafeEqual(mac, expected)) {
+        const reject = this.pending.reject;
+        this.pending = null;
+        reject(new Error("bad mac"));
+        return;
+      }
+      let payload;
+      try {
+        payload = JSON.parse(body.toString("utf8"));
+      } catch {
+        const reject = this.pending.reject;
+        this.pending = null;
+        reject(new Error("bad json"));
+        return;
+      }
+      const resolve = this.pending.resolve;
+      this.pending = null;
+      resolve(payload);
+    }
+  }
+
+  _waitReady() {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const timer = setTimeout(() => {
+        this.pending = null;
+        rejectPromise(new Error("handshake timeout"));
+      }, HANDSHAKE_TIMEOUT_MS);
+      this.pending = {
+        resolve: (payload) => {
+          clearTimeout(timer);
+          if (payload && payload.schema === "nullone.publish-reply.v1" && payload.t === "ready") {
+            resolvePromise();
+          } else {
+            rejectPromise(new Error("bad handshake"));
+          }
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          rejectPromise(error);
+        },
+      };
+    });
+  }
+
+  request(envelope) {
+    // Serialize requests: the daemon processes one complete frame at a time.
+    const run = async () => {
+      await this.ensure();
+      const frame = buildFrame(envelope, this.key);
+      const reply = await new Promise((resolvePromise, rejectPromise) => {
+        const timer = setTimeout(() => {
+          this.pending = null;
+          rejectPromise(new Error("request timeout"));
+        }, REQUEST_TIMEOUT_MS);
+        this.pending = {
+          resolve: (payload) => {
+            clearTimeout(timer);
+            resolvePromise(payload);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            rejectPromise(error);
+          },
+        };
+        this.child.stdin.write(frame);
+      });
+      return reply;
+    };
+    const queued = this.chain.then(run);
+    // Keep the chain alive across failures; the caller still sees its error.
+    this.chain = queued.catch(() => {});
+    return queued;
+  }
+}
+
+function outcomeText(reply) {
+  if (!reply || reply.t !== "result") {
+    return SAFE_TEXT.unknown;
+  }
+  const code = Number(reply.code);
+  if (code === 0) {
+    return SAFE_TEXT.published;
+  }
+  if (code === 2) {
+    const hint = String(reply.hint || "");
+    if (hint === "fresh_confirmation_required") {
+      return SAFE_TEXT.abandoned;
+    }
+    return SAFE_TEXT.blocked;
+  }
+  return SAFE_TEXT.unknown;
+}
+
+module.exports = {
+  routeCallback,
+  canonicalStringify,
+  buildFrame,
+  DaemonLink,
+  outcomeText,
+  SAFE_TEXT,
+};
+
+module.exports.default = definePluginEntry({
+  register(api, ctx) {
+    const workspace =
+      (ctx && ctx.workspace) || process.env.NULLONE_WORKSPACE || "";
+    const pythonBin = (ctx && ctx.pythonBin) || "python3";
+    const controllerPath =
+      (ctx && ctx.controllerPath) ||
+      "workspace/social/ops/scripts/nullone_final_publish_controller.py";
+    const link = new DaemonLink(pythonBin, controllerPath, workspace);
+
+    api.registerInteractiveHandler({
+      channel: "telegram",
+      namespace: "texbrif",
+      handler: async (handlerCtx) => {
+        const data =
+          (handlerCtx &&
+            handlerCtx.callback &&
+            handlerCtx.callback.data) ||
+          "";
+        const routed = routeCallback(data);
+        if (routed.decision === "fallthrough") {
+          return { handled: false };
+        }
+        if (routed.decision === "consume") {
+          // Malformed publish-shaped callback: swallow safely, zero side effects.
+          return { handled: true };
+        }
+        // Deterministic publish route. Authorization was established by
+        // ingress (ctx.auth.isAuthorizedSender); re-check it here.
+        const authed =
+          handlerCtx && handlerCtx.auth && handlerCtx.auth.isAuthorizedSender === true;
+        if (!authed) {
+          return { handled: true };
+        }
+        const callback = handlerCtx.callback || {};
+        const envelope = {
+          schema: "nullone.publish-callback.v1",
+          post_id: routed.postId,
+          account_id: String(handlerCtx.accountId || ""),
+          chat_id: String(
+            (callback.chatId !== undefined && callback.chatId !== null
+              ? callback.chatId
+              : (handlerCtx.conversationId || ""))
+          ),
+          message_id: String(
+            (callback.messageId !== undefined && callback.messageId !== null
+              ? callback.messageId
+              : "")
+          ),
+          sender_id: String(handlerCtx.senderId || ""),
+          nonce: crypto.randomBytes(16).toString("hex"),
+        };
+        let reply;
+        try {
+          reply = await link.request(envelope);
+        } catch {
+          try {
+            await handlerCtx.respond.reply({ text: SAFE_TEXT.unavailable });
+          } catch {
+            // Respond path is best-effort; the callback stays consumed.
+          }
+          return { handled: true };
+        }
+        try {
+          await handlerCtx.respond.reply({ text: outcomeText(reply) });
+        } catch {
+          // Best-effort user feedback; outcome truth lives in receipts.
+        }
+        // No submitText: zero LLM involvement after the human click.
+        return { handled: true };
+      },
+    });
+  },
+});

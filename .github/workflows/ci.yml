@@ -54,6 +54,7 @@ jobs:
         run: |
           test ! -e workspace/social/ops/private
           test ! -e workspace/social/ops/manifests
+          test ! -e workspace/social/ops/publish-callback-receipts
           test ! -e workspace/social/state
           test ! -e workspace/social/research
           test ! -e workspace/social/analytics

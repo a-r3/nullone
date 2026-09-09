@@ -23,6 +23,8 @@ workspace/social/ops/manifests/
 workspace/social/ops/reliability-proof/
 workspace/social/ops/run-outcomes/
 workspace/social/ops/notifications/
+workspace/social/ops/publish-callback-receipts/
+workspace/social/ops/publish-controller.sentinel
 workspace/social/state/
 workspace/social/research/
 workspace/social/drafts/

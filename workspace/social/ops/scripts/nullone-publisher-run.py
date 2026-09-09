@@ -4,26 +4,17 @@ from __future__ import annotations
 
 import argparse
 import copy
-import subprocess
-import sys
 from pathlib import Path
 
 from nullone_bridge_common import (
     BridgeError,
     atomic_write_json,
-    find_manifest_by_review_post_id,
     now_iso,
     validate_manifest,
-    workspace_relative,
-)
-from nullone_story_supersession import (
-    require_story_not_superseded,
-    review_post_lock,
 )
 
 
 HERE = Path(__file__).resolve().parent
-PUBLISH_BRIDGE = HERE / "nullone-publish-bridge.py"
 
 
 def apply_final_authorization(
@@ -119,116 +110,28 @@ def _validate_review_post_id(review_post_id: str) -> None:
 
 
 def execute(review_post_id: str) -> int:
-    _validate_review_post_id(review_post_id)
-    with review_post_lock(review_post_id):
-        return _execute_locked(review_post_id)
+    """Legacy direct entrypoint — permanently fail-closed since #89.
+
+    A bare POST_ID-only invocation cannot prove plugin-authenticated daemon
+    provenance, so it must never apply final authorization or reach the
+    publication core. The deterministic controller
+    (`nullone_final_publish_controller.execute_authorized`, reached only
+    through the authenticated plugin pipe) is the sole live path; it reuses
+    `apply_final_authorization` + the bridge core directly, in-process.
+    """
+    raise BridgeError(
+        "Legacy direct publisher execution is disabled (#89). "
+        "Final publication runs only through the deterministic "
+        "plugin-authenticated controller path."
+    )
 
 
 def _execute_locked(review_post_id: str) -> int:
-    manifest_path, m = (
-        find_manifest_by_review_post_id(
-            review_post_id
-        )
+    raise BridgeError(
+        "Legacy direct publisher execution is disabled (#89). "
+        "Final publication runs only through the deterministic "
+        "plugin-authenticated controller path."
     )
-
-    if (
-        m["review"].get("zernio_draft_id")
-        != review_post_id
-    ):
-        raise BridgeError(
-            "Review post ID mismatch"
-        )
-
-    # Story revisions and publication callbacks serialize on the same
-    # review-post lock. This check occurs before authorization mutation or
-    # provider execution. Feed/Carousel publication is unchanged.
-    if m.get("format") == "STORY":
-        require_story_not_superseded(
-            m.get("manifest_id"),
-            review_post_id,
-        )
-
-    apply_final_authorization(
-        manifest_path,
-        m,
-    )
-
-    cmd = [
-        sys.executable,
-        str(PUBLISH_BRIDGE),
-        "execute",
-        workspace_relative(manifest_path),
-    ]
-
-    try:
-        cp = subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True,
-            timeout=420,
-            check=False,
-        )
-
-    except subprocess.TimeoutExpired:
-        # Read current durable state before deciding anything.
-        _, current = find_manifest_by_review_post_id(
-            review_post_id
-        )
-
-        print("PUBLISHER_WRAPPER=TIMEOUT")
-        print(
-            "PUBLICATION_ATTEMPTS="
-            f"{current['publication']['attempts']}"
-        )
-        print(
-            "PUBLICATION_STATE="
-            f"{current['publication']['state']}"
-        )
-        print("AUTOMATIC_RETRY=FORBIDDEN")
-        return 3
-
-    # Reload authoritative durable state.
-    _, current = find_manifest_by_review_post_id(
-        review_post_id
-    )
-
-    if cp.returncode != 0:
-
-        # Safe case: publication call was never attempted.
-        # Require a fresh final human confirmation later.
-        if current["publication"]["attempts"] == 0:
-            revoke_final_if_no_publish_attempt(
-                manifest_path,
-                current,
-            )
-
-            print("PUBLISHER_WRAPPER=BLOCKED")
-            print("PUBLISH_ATTEMPT_OCCURRED=NO")
-            print("FRESH_FINAL_CONFIRMATION_REQUIRED=YES")
-
-        else:
-            # Consequential call may have occurred.
-            # Never retry automatically.
-            print("PUBLISHER_WRAPPER=UNKNOWN_OR_FAILED")
-            print("PUBLISH_ATTEMPT_OCCURRED=YES")
-            print("AUTOMATIC_RETRY=FORBIDDEN")
-            print(
-                "PUBLICATION_STATE="
-                f"{current['publication']['state']}"
-            )
-
-        # nullone-publish-bridge emits only sanitized output.
-        if cp.stdout.strip():
-            print(cp.stdout.strip())
-
-        return cp.returncode
-
-    print("PUBLISHER_WRAPPER=PASS")
-
-    if cp.stdout.strip():
-        print(cp.stdout.strip())
-
-    return 0
 
 
 def self_test() -> int:

@@ -293,11 +293,19 @@ Return:
 """
 
 
-def execute(manifest_arg: str) -> int:
-    manifest_path, m = load_manifest(
-        manifest_arg
-    )
+def execute_loaded(manifest_path: Path, m: dict) -> int:
+    """Deterministic publication core, importable for in-process invocation.
 
+    The #89 controller calls this IN-PROCESS while holding review_post_lock,
+    so there is no parent/child process boundary between the authorization
+    decision and the attempts=1 ownership transition. This function itself
+    never acquires review_post_lock; the caller owns the lock exactly once.
+
+    Semantics are unchanged from the historical CLI path: read-only
+    preflight, attempts=1 + PUBLISH_IN_FLIGHT persisted BEFORE the single
+    provider call, ambiguity -> UNKNOWN, no retry, readback after attempt.
+    The Claude/MCP provider transport inside is unchanged (#90 owns it).
+    """
     require_final_authorization(m)
 
     preflight = run_structured(
@@ -535,6 +543,18 @@ def execute(manifest_arg: str) -> int:
         )
 
     return 0
+
+
+def execute(manifest_arg: str) -> int:
+    """Thin CLI compatibility wrapper: load, then run the in-process core."""
+    manifest_path, m = load_manifest(
+        manifest_arg
+    )
+
+    return execute_loaded(
+        manifest_path,
+        m,
+    )
 
 
 def self_test() -> int:
