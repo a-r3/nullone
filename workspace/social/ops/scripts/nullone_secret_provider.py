@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Reviewed secret boundary for NullOne infrastructure (#61).
+"""Reviewed secret boundary for NullOne infrastructure (#61, #81, #90).
 
 This is the M0 minimum port required by issue #65: a small, reviewable
 runtime boundary through which infrastructure secrets reach adapter
 construction. Application and domain layers never import this module;
-only the production Analytics provider factory
-(`nullone_analytics_provider_factory.py`) and deployment-edge readback
+only the production provider factories
+(`nullone_analytics_provider_factory.py`, `nullone_draft_provider_factory.py`,
+`nullone_publish_provider_factory.py`) and deployment-edge readback
 tooling do.
 
 Design constraints:
@@ -58,6 +59,22 @@ SECRET_ID_ZERNIO_DRAFTS_BEARER = "zernio.drafts.bearer"
 
 # Sole environment-variable binding for the drafts bearer secret.
 ENV_VAR_ZERNIO_DRAFT_API_TOKEN = "ZERNIO_DRAFT_API_TOKEN"
+
+# DISTINCT publication credential identity (#90).
+#
+# Deliberately separate from both `zernio.analytics.bearer` (read-only)
+# and `zernio.drafts.bearer` (draft creation). Neither credential may ever
+# be reused for the consequential publication write. The publish
+# credential is the only identity the deterministic Zernio publisher
+# adapter (`nullone_zernio_publish_adapter.py`) may use, requested through
+# the production publish factory
+# (`nullone_publish_provider_factory.py`). The adapter itself never reads
+# the environment; the binding below is the single place that maps this
+# logical id to its runtime source. Nothing is provisioned here.
+SECRET_ID_ZERNIO_PUBLISH_BEARER = "zernio.publish.bearer"
+
+# Sole environment-variable binding for the publish bearer secret.
+ENV_VAR_ZERNIO_PUBLISH_API_TOKEN = "ZERNIO_PUBLISH_API_TOKEN"
 
 # Fixed, value-free rendering produced by every non-revealing
 # representation of a SecretValue.
@@ -170,6 +187,7 @@ class EnvironmentSecretProvider:
     ENV_VAR_BY_SECRET_ID: Mapping[str, str] = {
         SECRET_ID_ZERNIO_ANALYTICS_BEARER: ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN,
         SECRET_ID_ZERNIO_DRAFTS_BEARER: ENV_VAR_ZERNIO_DRAFT_API_TOKEN,
+        SECRET_ID_ZERNIO_PUBLISH_BEARER: ENV_VAR_ZERNIO_PUBLISH_API_TOKEN,
     }
 
     def __init__(self, environ: Mapping[str, str] | None = None) -> None:

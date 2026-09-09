@@ -196,6 +196,10 @@
       "traceability": [
         {
           "path": "workspace/social/ops/scripts/nullone-publish-bridge.py",
+          "contains": "state=\"READBACK_FAILED\""
+        },
+        {
+          "path": "workspace/social/ops/scripts/nullone_zernio_publish_adapter.py",
           "contains": "Publish accepted but readback failed; "
         }
       ]

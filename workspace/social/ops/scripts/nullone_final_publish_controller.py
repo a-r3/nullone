@@ -405,13 +405,13 @@ def _invoke_core(
     no timeout-abandonment, no orphan: a fake wall-clock timeout around a
     thread cannot kill it, so it is refused as a boundary here.
 
-    Boundedness of the core itself is proven, not assumed: the current
-    bridge transport issues provider calls only through
-    nullone_claude.run_structured, which runs `claude -p` via
-    subprocess.run(..., timeout=...) (default 300 s, max_turns-bounded);
-    the OS kills the child on expiry and the call raises BridgeError.
-    After #90 the deterministic HTTP transport will own finite network
-    timeouts instead.
+    Boundedness of the core itself is proven, not assumed: the bridge
+    transport (#90) is a deterministic direct HTTPS publisher with a
+    finite network timeout, a bounded response body, no redirect
+    following, and no retry -- exactly one promotion write per
+    invocation. Any transport-level ambiguity raises into the
+    attempt-consumed UNKNOWN path and can never authorize a second
+    write.
     """
     if bridge_core is None:
         raise BridgeError("Publication core unavailable")

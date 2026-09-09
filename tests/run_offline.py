@@ -56,6 +56,7 @@ COMMANDS = [
     [sys.executable, "tests/test_publish_ipc.py"],
     [sys.executable, "tests/test_publish_receipt.py"],
     [sys.executable, "tests/test_final_publish_controller.py"],
+    [sys.executable, "tests/test_zernio_publish_adapter.py"],
     [sys.executable, "tests/test_plugin_routing.py"],
     [
         sys.executable,
@@ -140,6 +141,16 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_secret_provider.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_zernio_publish_adapter.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_publish_provider_factory.py",
         "self-test",
     ],
     [
