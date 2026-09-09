@@ -27,6 +27,31 @@ longer owns any `sessions_send` handoff (protocol retired). Publisher agent
 is removed from the consequential path (legacy IDs retained; exec removal is
 a #37 deployment hardening step).
 
+## Hardening notes (final)
+
+- EXACT 2026.8.2 context: the handler reads `callback.data/namespace/payload`,
+  `callback.messageId` (callbackMessage.message_id), `callback.chatId`,
+  `accountId`, `conversationId`, `senderId`, `auth.isAuthorizedSender`, and
+  `respond.reply` — verified field-by-field from the installed dispatch
+  source. Missing message identity fails closed (never an empty message_id
+  fallback); unauthorized senders are consumed silently with zero daemon
+  contact. Non-publish callbacks return `handled:false`; no `submitText` is
+  ever produced, so no agent turn can spawn from the publish path.
+- REPLY CORRELATION: every envelope carries a random 32-hex `request_id`
+  (correlation only, never authorization, never an identifier). The daemon
+  echoes it in every reply; the plugin resolves replies strictly by id.
+  A plugin-side timeout deletes the entry, so late replies can never resolve
+  another request; unknown ids are ignored; daemon death rejects all
+  outstanding requests fail-closed.
+- SYNCHRONOUS CORE: the bridge core runs on the calling thread under the
+  lock — no thread pool, no fake wall-clock timeout, no orphan worker can
+  exist past an attempts==0 return. Provider-call boundedness is proven, not
+  assumed: `run_structured` issues `claude -p` via `subprocess.run(...,
+  timeout=...)` (default 300 s, max_turns-bounded), which kills the child on
+  expiry. After #90, deterministic HTTP transport owns finite timeouts.
+- Receipt-root authority: a symlinked receipts root/post dir (or any path
+  escape) fails closed before auth, core, or attempt, with zero writes.
+
 ## Crash semantics (implemented, offline-tested)
 
 Absent→claim+invoke; RECEIVED/attempts-0→adopt; EXECUTING+flag-set+attempts-0

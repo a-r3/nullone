@@ -51,6 +51,7 @@ def make_envelope(message_id="test-message-1", post_id=POST_ID, nonce="n" * 16):
         "message_id": message_id,
         "sender_id": IDS["sender_id"],
         "nonce": nonce,
+        "request_id": "0" * 32,
     }
 
 
@@ -407,102 +408,36 @@ class CrashRecoveryTests(unittest.TestCase):
             record = receipts.read_receipt(root, POST_ID, instance)
             self.assertEqual(record["state"], "SETTLED_BLOCKED")
 
-    def test_on_core_timeout_branches(self) -> None:
-        # Deterministic unit coverage of the timeout handler (no threads):
-        # attempts==0 abandons the instance; attempts==1 settles from truth.
+    def test_core_runs_on_calling_thread_no_survivor(self) -> None:
+        # The bridge core runs synchronously on the calling thread under the
+        # lock: when execute_authorized returns with attempts==0, NO
+        # publication-capable worker can exist anywhere — there is no thread,
+        # no timeout-abandonment, no orphan. A thread recording its identity
+        # proves the same-thread boundary.
         with IsolatedWorkspace() as root:
             manifest_path, _manifest = make_manifest(root)
-            instance = instance_for()
-            receipts.claim_receipt(
-                root,
-                POST_ID,
-                instance,
-                {"attempts": 0, "publication_state": "NOT_REQUESTED",
-                 "final_publish": False},
-                "f" * 64,
-            )
-            receipts.transition_receipt(
-                root, POST_ID, instance, "EXECUTING", {"outcome": "started"}
-            )
-            code = controller._on_core_timeout(
-                root, manifest_path, POST_ID, instance
-            )
-            self.assertEqual(code, 3)
-            record = receipts.read_receipt(root, POST_ID, instance)
-            self.assertEqual(record["state"], "ABANDONED")
-            _path, current = common.load_manifest(manifest_path)
-            current["publication"].update({"attempts": 1, "state": "UNKNOWN"})
-            common.atomic_write_json(manifest_path, current)
-            other = instance_for(message_id="timeout-other")
-            receipts.claim_receipt(
-                root,
-                POST_ID,
-                other,
-                {"attempts": 0, "publication_state": "NOT_REQUESTED",
-                 "final_publish": False},
-                "ab" * 32,
-            )
-            code = controller._on_core_timeout(root, manifest_path, POST_ID, other)
-            self.assertEqual(code, 3)
-            record = receipts.read_receipt(root, POST_ID, other)
-            self.assertEqual(record["state"], "SETTLED_UNKNOWN")
-
-    def test_timeout_abandons_without_attempt(self) -> None:
-        # Threaded end-to-end: the orphaned worker may complete afterwards,
-        # but the design invariants must hold regardless of scheduling:
-        # return code 3, attempts never exceeds 1, receipt never re-executes.
-        with IsolatedWorkspace() as root:
-            make_manifest(root)
             key = controller.install_test_key()
-            release = threading.Event()
-            timer = threading.Timer(8.0, release.set)
-            timer.daemon = True
+            seen = {}
 
-            def _slow_core(manifest_path, manifest):
-                release.wait(timeout=60)
-                return fake_core_success(manifest_path, manifest)
+            def _recording_core(mp, m):
+                seen["thread"] = threading.get_ident()
+                seen["process"] = os.getpid()
+                return 0
 
-            with patch.object(controller, "bridge_core", side_effect=_slow_core):
+            with patch.object(controller, "bridge_core", side_effect=_recording_core):
                 with patch.object(controller, "notify_fn", return_value=0):
-                    with patch.object(controller, "PUBLISH_TIMEOUT_SECONDS", 0.2):
-                        timer.start()
-                        try:
-                            code = controller.execute_authorized(
-                                POST_ID, instance_for(), make_envelope(),
-                                _daemon_key=key,
-                            )
-                        finally:
-                            timer.cancel()
-            self.assertEqual(code, 3)
-            _path, current = common.load_manifest(
-                root / "social/ops/manifests/ctrl-manifest.json"
-            )
-            self.assertLessEqual(int(current["publication"]["attempts"]), 1)
-            record = receipts.read_receipt(root, POST_ID, instance_for())
-            self.assertIn(
-                record["state"], ("ABANDONED", "SETTLED_PUBLISHED", "SETTLED_UNKNOWN")
-            )
-            # Note: an orphaned worker may persist attempts=1 after an
-            # ABANDONED settle; that single attempt is governed (never a
-            # second), and the terminal receipt still bars re-execution.
-            # The same instance can never execute again. Depending on the
-            # orphan interleaving, stored truth is ABANDONED-terminal or the
-            # orphan's settled manifest truth; either way the core must not
-            # run and attempts must never exceed 1.
-            from unittest.mock import Mock
-
-            strict_core = Mock(side_effect=AssertionError("must not invoke"))
-            with patch.object(controller, "bridge_core", strict_core):
-                with patch.object(controller, "notify_fn", return_value=0):
-                    again = controller.execute_authorized(
+                    code = controller.execute_authorized(
                         POST_ID, instance_for(), make_envelope(), _daemon_key=key
                     )
-            strict_core.assert_not_called()
-            self.assertIn(again, (0, 3))
-            _path, final = common.load_manifest(
-                root / "social/ops/manifests/ctrl-manifest.json"
-            )
-            self.assertLessEqual(int(final["publication"]["attempts"]), 1)
+            self.assertEqual(code, 0)
+            self.assertEqual(seen["thread"], threading.get_ident())
+            self.assertEqual(seen["process"], os.getpid())
+            _path, current = common.load_manifest(manifest_path)
+            self.assertEqual(int(current["publication"]["attempts"]), 0)
+            # attempts==0 on return proves nothing was or will be attempted:
+            # the only execution site already ran to completion on this thread.
+            record = receipts.read_receipt(root, POST_ID, instance_for())
+            self.assertEqual(record["state"], "SETTLED_UNKNOWN")
 
     def test_boot_reconcile_abandons_stale_and_settles_consumed(self) -> None:
         with IsolatedWorkspace() as root:
@@ -535,6 +470,62 @@ class CrashRecoveryTests(unittest.TestCase):
             self.assertEqual(len(summary["settled"]), 1)
             record = receipts.read_receipt(root, POST_ID, live_instance)
             self.assertEqual(record["state"], "SETTLED_PUBLISHED")
+
+
+class ReceiptAuthorityTests(unittest.TestCase):
+    def test_symlinked_receipt_root_fails_closed(self) -> None:
+        with IsolatedWorkspace() as root:
+            manifest_path, _manifest = make_manifest(root)
+            key = controller.install_test_key()
+            # Swap the canonical receipt root for a symlink: every claim
+            # must fail closed before auth, core, or attempt.
+            base = receipts.receipts_root(root)
+            target = root / "external-receipts"
+            target.mkdir(parents=True)
+            os.symlink(target, base)
+            strict_core = _recording_core()
+            with patch.object(controller, "bridge_core", strict_core):
+                with patch.object(controller, "notify_fn", return_value=0):
+                    with self.assertRaisesRegex(BridgeError, "symlink"):
+                        controller.execute_authorized(
+                            POST_ID, instance_for(), make_envelope(),
+                            _daemon_key=key,
+                        )
+            self.assertEqual(strict_core.calls, 0)
+            _path, current = common.load_manifest(manifest_path)
+            self.assertFalse(current["approval"]["final_publish"])
+            self.assertEqual(int(current["publication"]["attempts"]), 0)
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_symlinked_post_dir_fails_closed(self) -> None:
+        with IsolatedWorkspace() as root:
+            manifest_path, _manifest = make_manifest(root)
+            key = controller.install_test_key()
+            base = receipts.receipts_root(root)
+            base.mkdir(parents=True)
+            target = root / "external-post"
+            target.mkdir()
+            os.symlink(target, base / POST_ID.lower())
+            strict_core = _recording_core()
+            with patch.object(controller, "bridge_core", strict_core):
+                with patch.object(controller, "notify_fn", return_value=0):
+                    with self.assertRaisesRegex(BridgeError, "symlink"):
+                        controller.execute_authorized(
+                            POST_ID, instance_for(), make_envelope(),
+                            _daemon_key=key,
+                        )
+            self.assertEqual(strict_core.calls, 0)
+            _path, current = common.load_manifest(manifest_path)
+            self.assertEqual(int(current["publication"]["attempts"]), 0)
+
+
+class _recording_core:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, manifest_path, manifest):
+        self.calls += 1
+        raise AssertionError("core must not run")
 
 
 class DaemonProtocolTests(unittest.TestCase):
@@ -608,6 +599,8 @@ class DaemonProtocolTests(unittest.TestCase):
                 self.assertEqual(reply.get("t"), "result")
                 # Daemon replies stringify values (bounded sanitized frame).
                 self.assertEqual(int(reply.get("code")), 0)
+                # Reply correlation: exact request_id echo.
+                self.assertEqual(reply.get("request_id"), "0" * 32)
                 os.close(w_in)
                 thread.join(timeout=10)
             self.assertEqual(result.get("code"), 0)

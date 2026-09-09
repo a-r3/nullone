@@ -50,6 +50,8 @@ ENVELOPE_SCHEMA = "nullone.publish-callback.v1"
 
 # Exact envelope key set. Unknown/duplicate handling: JSON objects cannot
 # carry duplicates after parsing; any key outside this set rejects the frame.
+# request_id is reply-correlation ONLY (random per callback, never an
+# authorization factor and never a raw Telegram identifier).
 ENVELOPE_KEYS = frozenset(
     {
         "schema",
@@ -59,6 +61,7 @@ ENVELOPE_KEYS = frozenset(
         "message_id",
         "sender_id",
         "nonce",
+        "request_id",
     }
 )
 
@@ -127,6 +130,13 @@ def validate_envelope_shape(envelope: Any) -> dict[str, Any]:
         value = envelope.get(field)
         if not isinstance(value, str) or not value or len(value) > _MAX_ID_LEN:
             raise MalformedFrameError("envelope field shape invalid")
+    request_id = envelope.get("request_id")
+    if (
+        not isinstance(request_id, str)
+        or len(request_id) != 32
+        or any(c not in "0123456789abcdef" for c in request_id)
+    ):
+        raise MalformedFrameError("request_id shape invalid")
     return dict(envelope)
 
 

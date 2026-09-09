@@ -14,7 +14,16 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-NODE_SUITE = ROOT / "tests/js/test_plugin_route.js"
+NODE_SUITES = [
+    ROOT / "tests/js/test_plugin_route.js",
+    ROOT / "tests/js/test_plugin_index.js",
+    ROOT / "tests/js/test_plugin_link.js",
+]
+EXPECTED_PASSES = {
+    "test_plugin_route.js": 9,
+    "test_plugin_index.js": 9,
+    "test_plugin_link.js": 6,
+}
 
 
 class PluginRoutingSuiteTests(unittest.TestCase):
@@ -22,19 +31,24 @@ class PluginRoutingSuiteTests(unittest.TestCase):
         node = shutil.which("node")
         self.assertIsNotNone(node, "node binary is required for #89 plugin tests")
         assert node is not None
-        proc = subprocess.run(
-            [node, "--test", str(NODE_SUITE)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(ROOT),
-        )
-        self.assertEqual(
-            proc.returncode,
-            0,
-            "Node plugin routing suite failed:\n" + proc.stdout + proc.stderr,
-        )
-        self.assertIn("# pass 9", proc.stdout)
+        for suite in NODE_SUITES:
+            proc = subprocess.run(
+                [node, "--test", str(suite)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=str(ROOT),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"Node suite {suite.name} failed:\n" + proc.stdout + proc.stderr,
+            )
+            self.assertIn(
+                f"# pass {EXPECTED_PASSES[suite.name]}",
+                proc.stdout,
+                f"Node suite {suite.name} pass-count mismatch:\n" + proc.stdout,
+            )
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ def make_envelope(**overrides):
         "message_id": "mid",
         "sender_id": "sender",
         "nonce": "n" * 32,
+        "request_id": "0" * 32,
     }
     base.update(overrides)
     return base
@@ -133,6 +134,21 @@ class FramingTests(unittest.TestCase):
         key = ipc.generate_key()
         with self.assertRaises(ipc.MalformedFrameError):
             ipc.encode_frame(make_envelope(post_id="ZZZ"), key)
+
+    def test_bad_request_id_rejected(self) -> None:
+        key = ipc.generate_key()
+        with self.assertRaises(ipc.MalformedFrameError):
+            ipc.encode_frame(make_envelope(request_id="ZZZ"), key)
+        envelope = make_envelope()
+        del envelope["request_id"]
+        with self.assertRaises(ipc.MalformedFrameError):
+            ipc.encode_frame(envelope, key)
+
+    def test_request_id_carries_no_identity(self) -> None:
+        key = ipc.generate_key()
+        frame = ipc.encode_frame(make_envelope(), key)
+        envelope, _ = ipc.decode_frame(frame, key)
+        self.assertEqual(envelope["request_id"], "0" * 32)
 
     def test_empty_string_field_rejected(self) -> None:
         key = ipc.generate_key()

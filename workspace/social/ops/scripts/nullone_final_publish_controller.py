@@ -38,14 +38,12 @@ UNKNOWN/timeout/attempt-consumed failure (attempts>=1, never retry).
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import fcntl
 import hashlib
 import hmac
 import os
 import sys
 import time
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
@@ -127,12 +125,6 @@ except Exception:  # pragma: no cover
     _real_notify = None  # type: ignore[assignment]
 
 notify_fn: Callable[[str], int] | None = _real_notify
-
-# Core wall-clock bound, preserved from the legacy wrapper (420s). A timeout
-# never retries: attempts>=1 settles from manifest; attempts==0 settles the
-# instance ABANDONED_TIMEOUT (the orphaned worker, if any, is governed by
-# the same attempts rule and can never cause a second attempt).
-PUBLISH_TIMEOUT_SECONDS = 420
 
 SENTINEL_NAME = "publish-controller.sentinel"
 
@@ -405,16 +397,27 @@ def _adopt(
 def _invoke_core(
     workspace: Path, manifest_path: Path, post_id: str, instance_id: str
 ) -> int:
-    """Invoke the bridge core IN-PROCESS, then settle from durable state."""
+    """Invoke the bridge core IN-PROCESS, on THIS thread, under the lock.
+
+    Synchronous by design (#89 hardening): when this function returns, no
+    publication-capable worker exists anywhere — attempts==0 on return
+    PROVES nothing was or will be attempted by this invocation. No thread,
+    no timeout-abandonment, no orphan: a fake wall-clock timeout around a
+    thread cannot kill it, so it is refused as a boundary here.
+
+    Boundedness of the core itself is proven, not assumed: the current
+    bridge transport issues provider calls only through
+    nullone_claude.run_structured, which runs `claude -p` via
+    subprocess.run(..., timeout=...) (default 300 s, max_turns-bounded);
+    the OS kills the child on expiry and the call raises BridgeError.
+    After #90 the deterministic HTTP transport will own finite network
+    timeouts instead.
+    """
     if bridge_core is None:
         raise BridgeError("Publication core unavailable")
     _path, manifest = find_manifest_by_review_post_id(post_id)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(bridge_core, manifest_path, manifest)
-            core_code = future.result(timeout=PUBLISH_TIMEOUT_SECONDS)
-    except FuturesTimeoutError:
-        return _on_core_timeout(workspace, manifest_path, post_id, instance_id)
+        core_code = bridge_core(manifest_path, manifest)
     except BridgeError:
         return _on_core_bridge_error(workspace, manifest_path, post_id, instance_id)
     except Exception:
@@ -429,30 +432,6 @@ def _invoke_core(
     print("PUBLISH_CONTROLLER=PASS")
     print(f"PUBLICATION_STATE={state}")
     return int(core_code)
-
-
-def _on_core_timeout(
-    workspace: Path, manifest_path: Path, post_id: str, instance_id: str
-) -> int:
-    # Never retry: attempts>=1 settles from manifest; attempts==0 abandons
-    # this instance (an orphaned worker, if any, is governed by the same
-    # attempts rule and can never cause a second attempt).
-    _path, current = find_manifest_by_review_post_id(post_id)
-    if int(current.get("publication", {}).get("attempts", 0)) >= 1:
-        _settle_from_manifest(workspace, manifest_path, current, post_id, instance_id)
-        print("PUBLICATION_STATE=UNKNOWN_OR_FAILED")
-        print("AUTOMATIC_RETRY=FORBIDDEN")
-        return 3
-    receipts.transition_receipt(
-        workspace,
-        post_id,
-        instance_id,
-        "ABANDONED",
-        {"outcome": "timeout", "code": 3, "hint": "fresh_confirmation_required"},
-    )
-    print("PUBLICATION_STATE=TIMEOUT")
-    print("AUTOMATIC_RETRY=FORBIDDEN")
-    return 3
 
 
 def _on_core_bridge_error(
@@ -646,7 +625,7 @@ def daemon_main(
             )
             continue
         reply = _dispatch(envelope, ws, key)
-        _write_reply(stream_out, key, reply)
+        _write_reply(stream_out, key, reply, _echo_request_id(envelope))
     # Unreachable loop: `sentinel` stays referenced for process lifetime,
     # keeping the singleton lock held until the daemon exits.
 
@@ -663,8 +642,32 @@ def _read_key(stream_in: BinaryIO) -> bytes:
     return data
 
 
-def _write_reply(stream_out: BinaryIO, key: bytes, payload: dict[str, Any]) -> None:
+def _echo_request_id(envelope: dict[str, Any]) -> str | None:
+    """Return the envelope's request_id for reply correlation, else None.
+
+    Correlation is NOT authorization: the id only routes a reply to its
+    requester. Only a well-formed 32-hex id is echoed; anything else is
+    dropped (the plugin ignores id-less replies that are not the handshake).
+    """
+    candidate = envelope.get("request_id")
+    if (
+        isinstance(candidate, str)
+        and len(candidate) == 32
+        and all(c in "0123456789abcdef" for c in candidate)
+    ):
+        return candidate
+    return None
+
+
+def _write_reply(
+    stream_out: BinaryIO,
+    key: bytes,
+    payload: dict[str, Any],
+    request_id: str | None = None,
+) -> None:
     safe = {k: str(v)[:256] for k, v in payload.items()}
+    if request_id is not None:
+        safe["request_id"] = request_id
     body = ipc.canonical_envelope_bytes({"schema": "nullone.publish-reply.v1", **safe})
     header = ipc.MAGIC + bytes((ipc.VERSION,)) + ipc.LEN_STRUCT.pack(len(body))
     mac = hmac.new(key, header + body, hashlib.sha256).digest()
