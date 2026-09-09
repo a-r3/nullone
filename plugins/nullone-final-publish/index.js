@@ -98,6 +98,12 @@ const SAFE_TEXT = {
   unknown: "❓ Nəşr statusu qeyri-müəyyəndir. Təkrar cəhd edilməyəcək.",
   rejected: "⛔ Sorğu rədd edildi.",
   unavailable: "⛔ Nəşr xidməti hazır deyil. Heç nə yayımlanmadı.",
+  // Post-dispatch truth: once the frame may have reached the daemon,
+  // timeout/death/silence proves NOTHING about publication. Never claim
+  // "nothing was published" here; never retry; never mint a new
+  // authorization. Attempts/receipt authority stays with the controller.
+  dispatchUnknown:
+    "❓ Nəşr sorğusunun nəticəsi qeyri-müəyyəndir. Avtomatik təkrar cəhd edilməyəcək.",
 };
 
 // Authoritative publication states the daemon may report (closed enum).
@@ -200,6 +206,9 @@ class DaemonLink {
     this.child = null;
     // Fail closed: every outstanding requester gets a terminal rejection.
     // No legacy LLM fallback exists anywhere on this path.
+    // Outstanding request entries were all dispatched (entries are created
+    // only around the wire write), so death after dispatch reports
+    // dispatched:true: the daemon may have executed, truth is UNKNOWN.
     if (this.handshake) {
       const reject = this.handshake.reject;
       this.handshake = null;
@@ -207,6 +216,9 @@ class DaemonLink {
     }
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer);
+      if (error && error.dispatched === undefined) {
+        error.dispatched = true;
+      }
       entry.reject(error);
     }
     this.pending.clear();
@@ -323,13 +335,18 @@ class DaemonLink {
     // replies (per-request map). A late reply for an expired request can
     // never resolve another request: expired entries are deleted, and
     // unknown ids are ignored.
+    // Dispatch boundary: failures BEFORE the wire write carry
+    // dispatched=false (nothing was sent); failures AT/AFTER the write
+    // carry dispatched=true (the daemon may have executed — truth UNKNOWN).
     const run = async () => {
       await this.ensure();
       const frame = buildFrame(envelope, this.key);
       const reply = await new Promise((resolvePromise, rejectPromise) => {
         const timer = setTimeout(() => {
           this.pending.delete(requestId);
-          rejectPromise(new Error("request timeout"));
+          const error = new Error("request timeout");
+          error.dispatched = true;
+          rejectPromise(error);
         }, timeoutMs);
         this.pending.set(requestId, {
           resolve: (payload) => {
@@ -342,14 +359,31 @@ class DaemonLink {
           },
           timer,
         });
-        this.child.stdin.write(frame);
+        try {
+          this.child.stdin.write(frame);
+        } catch (error) {
+          this.pending.delete(requestId);
+          clearTimeout(timer);
+          // The write was attempted: a partial frame may have reached the
+          // daemon, so this is post-dispatch by the safe classification.
+          error.dispatched = true;
+          rejectPromise(error);
+        }
       });
       return reply;
     };
     const queued = this.writeChain.then(run);
     // Keep the write chain alive across failures; callers see their error.
-    this.writeChain = queued.catch(() => {});
-    return queued;
+    // A caller-side dispatch flag defaults to false (pre-dispatch) when the
+    // failure predates any write attempt.
+    const guarded = queued.catch((error) => {
+      if (error && error.dispatched === undefined) {
+        error.dispatched = false;
+      }
+      throw error;
+    });
+    this.writeChain = guarded.catch(() => {});
+    return guarded;
   }
 }
 
@@ -459,9 +493,20 @@ function buildHandler(link) {
     let reply;
     try {
       reply = await link.request(envelope);
-    } catch {
+    } catch (error) {
+      // Dispatch boundary wording (exact #89 pre-merge rule):
+      // - pre-dispatch failure (spawn/handshake/frame build): the request
+      //   was never sent, so the unavailable wording is truthful;
+      // - post-dispatch failure (timeout, daemon death, missing reply,
+      //   protocol ambiguity): publication MAY have happened — truthful
+      //   UNKNOWN wording, never "nothing was published".
+      // Never cancel, never retry, never mint a new authorization here.
+      const text =
+        error && error.dispatched === true
+          ? SAFE_TEXT.dispatchUnknown
+          : SAFE_TEXT.unavailable;
       try {
-        await handlerCtx.respond.reply({ text: SAFE_TEXT.unavailable });
+        await handlerCtx.respond.reply({ text });
       } catch {
         // Respond path is best-effort; the callback stays consumed.
       }

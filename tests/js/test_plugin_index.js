@@ -399,3 +399,74 @@ test("E: spawn failure consumes safely and never routes to LLM", async () => {
   assert.equal(ctx._replies.length, 1);
   assert.match(ctx._replies[0], /hazır deyil/);
 });
+
+test("pre-dispatch spawn failure says request was not sent (exact)", async () => {
+  const spawnFn = () => {
+    throw new Error("spawn exploded");
+  };
+  const api = makeApi();
+  plugin.default.register(
+    api,
+    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
+  );
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.ok(ctx._replies[0].includes("Heç nə yayımlanmadı"));
+  assert.ok(!ctx._replies[0].includes("qeyri-müəyyən"));
+});
+
+test("post-dispatch timeout uses the exact UNKNOWN wording", async () => {
+  const error = new Error("request timeout");
+  error.dispatched = true;
+  const link = {
+    request: async () => {
+      throw error;
+    },
+  };
+  const handler = plugin.buildHandler(link);
+  const ctx = makeHandlerCtx();
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.equal(
+    ctx._replies[0],
+    "❓ Nəşr sorğusunun nəticəsi qeyri-müəyyəndir. Avtomatik təkrar cəhd edilməyəcək."
+  );
+  assert.ok(!ctx._replies[0].includes("Heç nə yayımlanmadı"));
+});
+
+test("post-dispatch daemon death uses the exact UNKNOWN wording", async () => {
+  const error = new Error("daemon exited");
+  error.dispatched = true;
+  const link = {
+    request: async () => {
+      throw error;
+    },
+  };
+  const handler = plugin.buildHandler(link);
+  const ctx = makeHandlerCtx();
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(
+    ctx._replies[0],
+    "❓ Nəşr sorğusunun nəticəsi qeyri-müəyyəndir. Avtomatik təkrar cəhd edilməyəcək."
+  );
+});
+
+test("pre-dispatch rejection keeps the not-sent wording", async () => {
+  for (const error of [new Error("spawn exploded"), new Error("handshake timeout")]) {
+    const link = {
+      request: async () => {
+        throw error;
+      },
+    };
+    const handler = plugin.buildHandler(link);
+    const ctx = makeHandlerCtx();
+    const result = await handler(ctx);
+    assert.deepEqual(result, { handled: true });
+    assert.ok(ctx._replies[0].includes("Heç nə yayımlanmadı"));
+    assert.ok(!ctx._replies[0].includes("qeyri-müəyyən"));
+  }
+});

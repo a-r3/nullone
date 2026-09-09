@@ -250,3 +250,51 @@ test("E: request ids are random non-identifying correlation only", async () => {
   fake.stdout.emit("data", resultFrame(fake.key, "e".repeat(32), 0));
   await promise;
 });
+
+test("F: spawn failure is pre-dispatch (dispatched=false)", async () => {
+  const spawnFn = () => {
+    throw new Error("spawn exploded");
+  };
+  const link = new plugin.DaemonLink("python3", "controller.py", "/tmp/ws", spawnFn, {
+    requestTimeoutMs: 200,
+    handshakeTimeoutMs: 200,
+  });
+  const error = await link.request(envelope("f".repeat(32))).then(
+    () => null,
+    (e) => e
+  );
+  assert.ok(error instanceof Error);
+  assert.equal(error.dispatched, false);
+});
+
+test("G: post-dispatch timeout carries dispatched=true", async () => {
+  const fake = new FakeChild();
+  // Swallow frames: capture but never answer.
+  fake.onFrame = () => {};
+  const link = makeLink(fake, { requestTimeoutMs: 80, handshakeTimeoutMs: 1000 });
+  const error = await link.request(envelope("a".repeat(32))).then(
+    () => null,
+    (e) => e
+  );
+  assert.ok(error instanceof Error);
+  assert.match(String(error && error.message), /request timeout/);
+  assert.equal(error.dispatched, true);
+});
+
+test("H: post-dispatch daemon death carries dispatched=true", async () => {
+  const fake = new FakeChild();
+  const link = makeLink(fake, { requestTimeoutMs: 2000, handshakeTimeoutMs: 1000 });
+  const pending = link.request(envelope("b".repeat(32)));
+  // Wait until the frame reached the fake child, then kill it.
+  for (let i = 0; i < 100 && fake.written.length < 1; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(fake.written.length, 1);
+  fake.die();
+  const error = await pending.then(
+    () => null,
+    (e) => e
+  );
+  assert.ok(error instanceof Error);
+  assert.equal(error.dispatched, true);
+});
