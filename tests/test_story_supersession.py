@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -23,20 +21,10 @@ SCRIPTS = ROOT / "workspace/social/ops/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import nullone_bridge_common as common  # noqa: E402
+import nullone_final_publish_controller as controller  # noqa: E402
+import nullone_publish_receipt as receipts  # noqa: E402
 import nullone_story_pipeline as pipeline  # noqa: E402
 import nullone_story_supersession as supersession  # noqa: E402
-
-
-def load_script(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, SCRIPTS / filename)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {filename}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-publisher = load_script("nullone_publisher_run_supersession_test", "nullone-publisher-run.py")
 
 REVIEW_POST_ID = "0123456789abcdef01234567"
 
@@ -153,7 +141,9 @@ def mark_superseded(manifest: dict) -> dict:
 
 
 def successful_publish_run(manifest_path: Path):
-    def _run(*args, **kwargs):
+    """Fake bridge core: persist the attempt exactly like the real core."""
+
+    def _core(_manifest_path_arg, _manifest):
         _path, manifest = common.load_manifest(manifest_path)
         manifest["publication"].update(
             {
@@ -166,9 +156,38 @@ def successful_publish_run(manifest_path: Path):
             }
         )
         common.atomic_write_json(manifest_path, manifest)
-        return subprocess.CompletedProcess(args[0], 0, stdout="PUBLISH_BRIDGE=PASS", stderr="")
+        return 0
 
-    return _run
+    return _core
+
+
+_TEST_KEY = controller.install_test_key()
+_NONCE_COUNTER = 0
+
+
+def run_authorized_publish():
+    """Invoke the deterministic controller path (#89) with test provenance."""
+    global _NONCE_COUNTER
+    _NONCE_COUNTER += 1
+    envelope = {
+        "schema": "nullone.publish-callback.v1",
+        "post_id": REVIEW_POST_ID,
+        "account_id": "test-account",
+        "chat_id": "test-chat",
+        "message_id": "supersession-test",
+        "sender_id": "test-sender",
+        "nonce": f"sup-{_NONCE_COUNTER:08d}",
+    }
+    instance = receipts.derive_authorization_instance_id(
+        envelope["account_id"],
+        envelope["chat_id"],
+        envelope["message_id"],
+        REVIEW_POST_ID,
+    )
+    with patch.object(controller, "notify_fn", return_value=0):
+        return controller.execute_authorized(
+            REVIEW_POST_ID, instance, envelope, _daemon_key=_TEST_KEY
+        )
 
 
 class CreatingDraftConnector:
@@ -192,12 +211,12 @@ class PublisherSupersessionTests(unittest.TestCase):
             mark_superseded(manifest)
 
             with patch.object(
-                publisher.subprocess,
-                "run",
+                controller,
+                "bridge_core",
                 side_effect=AssertionError("publish bridge must not be invoked"),
             ) as run:
                 with self.assertRaisesRegex(common.BridgeError, "STORY_VERSION_SUPERSEDED"):
-                    publisher.execute(REVIEW_POST_ID)
+                    run_authorized_publish()
 
             run.assert_not_called()
             _path, current = common.load_manifest(manifest_path)
@@ -209,11 +228,11 @@ class PublisherSupersessionTests(unittest.TestCase):
         with isolated_workspace() as root:
             manifest_path, _manifest = make_manifest(root)
             with patch.object(
-                publisher.subprocess,
-                "run",
+                controller,
+                "bridge_core",
                 side_effect=successful_publish_run(manifest_path),
             ) as run:
-                self.assertEqual(publisher.execute(REVIEW_POST_ID), 0)
+                self.assertEqual(run_authorized_publish(), 0)
 
             self.assertEqual(run.call_count, 1)
             _path, current = common.load_manifest(manifest_path)
@@ -240,12 +259,12 @@ class PublisherSupersessionTests(unittest.TestCase):
             self.assertEqual(result.outcome, "WRITER_FAILED")
 
             with patch.object(
-                publisher.subprocess,
-                "run",
+                controller,
+                "bridge_core",
                 side_effect=AssertionError("publish bridge must not be invoked"),
             ) as run:
                 with self.assertRaisesRegex(common.BridgeError, "STORY_VERSION_SUPERSEDED"):
-                    publisher.execute(REVIEW_POST_ID)
+                    run_authorized_publish()
             run.assert_not_called()
             _path, current = common.load_manifest(manifest_path)
             self.assertFalse(current["approval"]["final_publish"])
@@ -275,12 +294,12 @@ class PublisherSupersessionTests(unittest.TestCase):
             self.assertEqual(result.outcome, "DRAFT_CREATED")
 
             with patch.object(
-                publisher.subprocess,
-                "run",
+                controller,
+                "bridge_core",
                 side_effect=AssertionError("publish bridge must not be invoked"),
             ) as run:
                 with self.assertRaisesRegex(common.BridgeError, "STORY_VERSION_SUPERSEDED"):
-                    publisher.execute(REVIEW_POST_ID)
+                    run_authorized_publish()
             run.assert_not_called()
             _path, current = common.load_manifest(manifest_path)
             self.assertFalse(current["approval"]["final_publish"])
@@ -291,11 +310,11 @@ class PublisherSupersessionTests(unittest.TestCase):
             with self.subTest(fmt=fmt), isolated_workspace() as root:
                 manifest_path, _manifest = make_manifest(root, fmt=fmt)
                 with patch.object(
-                    publisher.subprocess,
-                    "run",
+                    controller,
+                    "bridge_core",
                     side_effect=successful_publish_run(manifest_path),
                 ) as run:
-                    self.assertEqual(publisher.execute(REVIEW_POST_ID), 0)
+                    self.assertEqual(run_authorized_publish(), 0)
                 self.assertEqual(run.call_count, 1)
 
     def test_revision_wins_lock_then_stale_callback_blocks(self):
@@ -335,15 +354,15 @@ class PublisherSupersessionTests(unittest.TestCase):
 
             def run_publish():
                 try:
-                    publisher.execute(REVIEW_POST_ID)
+                    run_authorized_publish()
                 except Exception as error:
                     publish_error.append(error)
 
             with (
                 patch.object(pipeline, "mark_story_superseded", side_effect=slow_mark),
                 patch.object(
-                    publisher.subprocess,
-                    "run",
+                    controller,
+                    "bridge_core",
                     side_effect=AssertionError("publish bridge must not be invoked"),
                 ) as publish_run,
             ):
@@ -388,14 +407,14 @@ class PublisherSupersessionTests(unittest.TestCase):
                     }
                 )
                 common.atomic_write_json(manifest_path, current)
-                return subprocess.CompletedProcess(args[0], 3, stdout="", stderr="")
+                raise common.BridgeError("synthetic ambiguous result")
 
             publisher_result = []
             revision_result = []
             writer_calls = 0
 
             def run_publish():
-                publisher_result.append(publisher.execute(REVIEW_POST_ID))
+                publisher_result.append(run_authorized_publish())
 
             def writer(_context):
                 nonlocal writer_calls
@@ -413,7 +432,7 @@ class PublisherSupersessionTests(unittest.TestCase):
                 )
 
             with patch.object(
-                publisher.subprocess, "run", side_effect=consequential_publish
+                controller, "bridge_core", side_effect=consequential_publish
             ):
                 publish_thread = threading.Thread(target=run_publish)
                 publish_thread.start()

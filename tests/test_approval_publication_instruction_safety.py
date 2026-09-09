@@ -295,12 +295,12 @@ class ApprovalPublicationInstructionSafetyTests(unittest.TestCase):
         self.assertIsNotNone(match, "approval AGENTS.md must define a PURPOSE section")
         purpose = match.group(1)
         self.assertNotIn("perform the final human-authorized publish action", purpose)
-        self.assertIn("delegate", purpose.lower())
-        self.assertIn("texbrif-publisher", purpose)
+        self.assertNotIn("sessions_send", purpose)
+        self.assertIn("second-stage", purpose.lower())
 
-    # --- positive delegation invariant ---------------------------------------
+    # --- #89 deterministic handoff invariants --------------------------------
 
-    def test_approval_delegates_final_publish_via_sessions_send_to_publisher(
+    def test_approval_final_stage_has_no_sessions_send_handoff(
         self,
     ) -> None:
         match = re.search(
@@ -312,10 +312,22 @@ class ApprovalPublicationInstructionSafetyTests(unittest.TestCase):
             match, "approval AGENTS.md must define a FINAL STAGE section"
         )
         final_stage = match.group(1)
-        self.assertIn("sessions_send", final_stage)
-        self.assertIn("texbrif-publisher", final_stage)
-        self.assertIn("PUBLISH_AUTHORIZED", final_stage)
-        self.assertIn("Do not itself publish", final_stage)
+        # sessions_send may appear ONLY inside prohibition clauses ("Do NOT
+        # send ..."), never as an affirmative handoff instruction.
+        for clause in _split_sentence_clauses(final_stage):
+            if "sessions_send" not in clause:
+                continue
+            lowered = clause.lower()
+            self.assertTrue(
+                any(
+                    cue in lowered
+                    for cue in ("do not", "must not", "never", "forbidden")
+                ),
+                "affirmative sessions_send handoff instruction found:\n" + clause,
+            )
+        self.assertNotIn("PUBLISH_AUTHORIZED\nreview_post_id", final_stage)
+        self.assertIn("texbrif:publish:", final_stage)
+        self.assertIn("NO_REPLY", final_stage)
 
     def test_approval_publication_flow_forbids_direct_zernio_execution(
         self,
@@ -333,11 +345,31 @@ class ApprovalPublicationInstructionSafetyTests(unittest.TestCase):
         self.assertIn("posts_update_post", flow)
         self.assertIn("execute publication itself", flow)
 
-    def test_publisher_authorizes_only_deterministic_wrapper(self) -> None:
-        self.assertIn("nullone-publisher-run.py", self.publisher_text)
-        self.assertIn("execute <POST_ID>", self.publisher_text)
-        self.assertIn("call Zernio MCP directly", self.publisher_text)
-        self.assertIn("use Zernio REST", self.publisher_text)
+    def test_publisher_has_no_wrapper_exec_role(self) -> None:
+        self.assertNotIn("run exactly ONE local command", self.publisher_text)
+        # The retired-command quotations are prohibitions, not grants: every
+        # paragraph naming the wrapper command must itself carry a
+        # NEVER/RETIRED/fail-closed cue or directly follow such a paragraph
+        # (command on its own fenced line beneath the prohibition).
+        paragraphs = split_paragraphs(self.publisher_text)
+        found = False
+        for index, paragraph in enumerate(paragraphs):
+            if "nullone-publisher-run.py execute" not in paragraph:
+                continue
+            found = True
+            context = paragraph
+            if index > 0:
+                context = paragraphs[index - 1] + "\n" + paragraph
+            lowered = context.lower()
+            self.assertTrue(
+                any(
+                    cue in lowered
+                    for cue in ("never", "retired", "fail-closed", "must not run")
+                ),
+                "wrapper command mention must be a prohibition, not a grant:\n"
+                + paragraph,
+            )
+        self.assertTrue(found, "expected retired-command prohibition text")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+{
+  "name": "nullone-final-publish",
+  "version": "1.0.0",
+  "description": "Deterministic final publish callback handoff for NullOne (#89). Repository source only; install/enable/restart happens at controlled #37 deployment, never by Git merge.",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  }
+}

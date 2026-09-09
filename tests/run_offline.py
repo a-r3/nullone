@@ -53,6 +53,10 @@ COMMANDS = [
     [sys.executable, "tests/test_scheduled_occurrence_authority.py"],
     [sys.executable, "tests/test_scheduled_run_dispatch.py"],
     [sys.executable, "tests/test_scheduled_wakeup_cli.py"],
+    [sys.executable, "tests/test_publish_ipc.py"],
+    [sys.executable, "tests/test_publish_receipt.py"],
+    [sys.executable, "tests/test_final_publish_controller.py"],
+    [sys.executable, "tests/test_plugin_routing.py"],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_breaking_identity.py",
@@ -91,6 +95,11 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-publisher-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_final_publish_controller.py",
         "self-test",
     ],
     [
