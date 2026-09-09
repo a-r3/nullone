@@ -1,6 +1,6 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-08 Asia/Baku
+Last updated: 2026-09-09 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
 ## Identity
@@ -129,10 +129,9 @@ NOT DEPLOYED — no Story job exists, no live handoff, no Story production
 run proof, no Zernio draft created, no Telegram preview sent, no OpenClaw
 changes.
 
-#80 is CLOSED/COMPLETED (PR #85 squash-merged as `879e04b2db5adda9e0370d10771f626ef6c951ed`; repository implementation is MERGED; NOT DEPLOYED).
-NEXT_ENGINEERING_TASK = #81 (DraftProvider resolution/proof).
-#81 is OPEN: DraftProvider live scheduled path remains `LIVE_SCHEDULED_PATH_UNPROVEN` and still
-blocks READY. #37 is OPEN / BLOCKED; do not rerun yet.
+#81 is CLOSED/COMPLETED (PR #87 squash-merged as `8d5e6dfc1dc0fad48d0a1419945e31e134e1a6e8`; repository implementation is MERGED; NOT DEPLOYED).
+NEXT_ENGINEERING_TASK = NEW read-only #37 preflight.
+#37 is OPEN / BLOCKED pending a NEW read-only preflight; do not rerun yet. Do NOT mark #37 READY.
 
 ### #80 Breaking Radar production integration — CLOSED / COMPLETED
 
@@ -185,23 +184,79 @@ Finalized repository architecture:
 - Fresh/replay #27 reason and notification-error classification semantics are
   identical.
 
-#80 is CLOSED. #81 is OPEN: DraftProvider live scheduled path remains
-`LIVE_SCHEDULED_PATH_UNPROVEN` and still blocks READY. #37 remains OPEN /
-BLOCKED. No production activation occurred; no synthetic Breaking event.
+#80 is CLOSED. Status of #81 below supersedes the #81-OPEN line recorded here at #80-merge time.
+See "### #81 DraftProvider resolution/proof — CLOSED / COMPLETED" for current truth: #81 is CLOSED/COMPLETED (PR #87). #37 remains OPEN /
+BLOCKED pending a NEW read-only preflight. No production activation occurred; no synthetic Breaking event.
 **NOT DEPLOYED (MERGED != DEPLOYED).** Current live production remains the
 old/current baseline.
+
+### #81 DraftProvider resolution/proof — CLOSED / COMPLETED
+
+#81 DraftProvider resolution/proof — CLOSED / COMPLETED. PR #87
+squash-merged on `main` as
+`8d5e6dfc1dc0fad48d0a1419945e31e134e1a6e8`.
+
+Read-only investigation verdict was REPLACEMENT_REQUIRED:
+- old review-draft transport: DraftConnector → nullone-draft-bridge.py →
+  `claude -p` → Zernio MCP;
+- merged desired review-draft transport: DraftConnector → existing
+  nullone-draft-bridge.py stable CLI edge → deterministic direct Zernio
+  REST DraftProvider.
+- application/domain DraftConnector boundary remains provider-independent;
+- review-draft path no longer depends on Claude/MCP bootstrap.
+
+Dedicated draft/write secret logical id: `zernio.drafts.bearer`; env
+binding NAME: `ZERNIO_DRAFT_API_TOKEN`. This credential is distinct from
+the Analytics credential. No real credential provisioned yet. No Zernio
+draft created during implementation. No production activation occurred.
+MERGED != DEPLOYED.
+
+Final #81 safety semantics (repository desired state; no live production
+proof claimed):
+- current Zernio REST/OpenAPI contract is used (base
+  `https://zernio.com/api/v1`);
+- presign → PUT → persist public_url; presigned upload URL remains
+  memory-only; bearer token never sent to upload host;
+- existing valid public_url values are reused;
+- Sep-8 same-run partial progress is covered: first 3 media can persist
+  successfully, 4th presign can fail, create_attempts remains 0, no draft
+  create occurs, recovery reuses first 3;
+- exact media URL/type/contentType binding;
+- complete post validation uses the same canonical payload as create;
+- payload uses mediaItems + platforms + isDraft=true;
+- STORY contentType is nested in Instagram platformSpecificData;
+- publishNow absent; scheduledFor absent;
+- deterministic UUIDv5 x-request-id is defense-in-depth only;
+- max exactly one POST /posts; ambiguity after create request =>
+  REVIEW_UNKNOWN; no automatic retry;
+- exact one-target readback required;
+- malformed presign provider response => sanitized BLOCKED before attempt;
+- authenticated POST capability is exact-path allowlisted to:
+  `/media/presign`, `/tools/validate/media`, `/tools/validate/post`,
+  `/posts`;
+- no publisher/publication capability added.
+
+NOT DEPLOYED — no live secret readiness, no actual production factory
+construction, no exact deployment delta, no scheduler mapping, no live
+Zernio draft creation, no Telegram preview, and no end-to-end production
+health proven by this merge. Those belong to a NEW #37 preflight /
+controlled deployment.
 
 Current required order:
 
 ```text
-#81 DraftProvider resolution/proof
-→ NEW read-only #37 preflight
+NEW read-only #37 preflight
 → READY_FOR_CONTROLLED_DEPLOYMENT?
 → controlled deployment only if READY
 ```
 
 Historical 2026-09-07 preflight and 2026-09-08 BLOCKED preflight evidence
-are preserved unchanged.
+are preserved unchanged. The blockers discovered by the prior 2026-09-08
+preflight (#79/#80/#81) are now resolved in Git, but this does NOT
+retroactively turn the historical preflight into READY. A NEW read-only
+#37 preflight is required against the exact current main. Do NOT rerun
+#37 in this task. Do NOT provision `ZERNIO_DRAFT_API_TOKEN` or any other
+secret. Do NOT deploy.
 
 1. Repository engineering for #61 is merged (PR #77). Do not start
    production secret provisioning from this context record alone.
@@ -215,13 +270,19 @@ are preserved unchanged.
 Required order:
 
 ```text
-#81 DraftProvider resolution/proof
-→ NEW read-only #37 preflight
+NEW read-only #37 preflight
 → READY_FOR_CONTROLLED_DEPLOYMENT?
 → only then controlled deployment
 ```
 
 Only READY permits deployment. No ad-hoc deployment is permitted.
+
+GitHub desired state != production actual state. Current live production
+remains the old/current baseline until a controlled deployment under #37.
+PR #87 merge alone does not prove: live secret readiness, actual
+production factory construction, exact deployment delta, scheduler
+mapping, live Zernio draft creation, Telegram preview, or end-to-end
+production health.
 
 Existing M1/M2/M3 remain intact.
 
@@ -1447,7 +1508,7 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current Git desired-state M0 execution order — after #80 merge (PR #85)
+### Current Git desired-state M0 execution order — after #81 merge (PR #87)
 
 1. #59 is CLOSED/COMPLETED: PR #75 squash-merged as
    `03603698291b2f6e5c0775067f15abb33f87fa63` (foundation PR #73
@@ -1468,15 +1529,23 @@ rewrite historical production evidence or authorize deployment.
    Breaking Radar structured handoff repository integration complete.
    Implementation is MERGED; remains NOT DEPLOYED; no production activation
    or synthetic Breaking event occurred.
-5. NEXT_ENGINEERING_TASK = #81 DraftProvider production-path resolution/proof
-   (`LIVE_SCHEDULED_PATH_UNPROVEN`; #81 remains OPEN and must be resolved before
-   READY) → NEW strictly read-only #37 preflight (the historical 2026-09-07 and
-   2026-09-08 preflights remain preserved as historical evidence; DO NOT rerun
-   #37 yet).
-6. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
+5. #81 is CLOSED/COMPLETED: PR #87 squash-merged on `main` as
+   `8d5e6dfc1dc0fad48d0a1419945e31e134e1a6e8`. Direct Zernio REST
+   DraftProvider repository implementation complete (REPLACEMENT_REQUIRED;
+   `zernio.drafts.bearer` / `ZERNIO_DRAFT_API_TOKEN` distinct from
+   Analytics credential; no credential provisioned; no Zernio draft
+   created). Implementation is MERGED; remains NOT DEPLOYED.
+6. NEXT_ENGINEERING_TASK = NEW read-only #37 preflight. The blockers
+   discovered by the prior 2026-09-08 preflight (#79/#80/#81) are now
+   resolved in Git, but this does NOT retroactively turn the historical
+   preflight into READY. A NEW read-only #37 preflight is required against
+   the exact current main (historical 2026-09-07 and 2026-09-08 preflights
+   remain preserved as historical evidence; DO NOT rerun #37 yet; do NOT
+   mark #37 READY; do NOT provision secrets; do NOT deploy).
+7. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
    deployment under #37; otherwise report the exact blockers with no deploy.
    No ad-hoc deployment is permitted (MERGED != DEPLOYED).
-7. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
+8. Observe natural Morning/Daily/Story/breaking/alert behavior under #37.
 
 #37 remains OPEN under its unchanged acceptance criteria. Once its
 integration dependencies are merged and preflight permits deployment, it
