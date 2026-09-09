@@ -64,17 +64,23 @@ ENV_VAR_ZERNIO_DRAFT_API_TOKEN = "ZERNIO_DRAFT_API_TOKEN"
 #
 # Deliberately separate from both `zernio.analytics.bearer` (read-only)
 # and `zernio.drafts.bearer` (draft creation). Neither credential may ever
-# be reused for the consequential publication write. The publish
-# credential is the only identity the deterministic Zernio publisher
-# adapter (`nullone_zernio_publish_adapter.py`) may use, requested through
-# the production publish factory
-# (`nullone_publish_provider_factory.py`). The adapter itself never reads
-# the environment; the binding below is the single place that maps this
-# logical id to its runtime source. Nothing is provisioned here.
+# be reused for the consequential publication write.
+#
+# The publish credential is intentionally NOT bound to any environment
+# variable below: a plain inherited environment variable alone must never
+# satisfy publication auth. In production the value arrives only from the
+# OpenClaw protected store (SecretRef id `ZERNIO_PUBLISH_API_TOKEN`,
+# declared as a plugin SecretInput), is handed to the controller daemon
+# over the authenticated private spawn pipe at startup, and is held in
+# controller-process memory as a SecretValue inside InMemorySecretProvider
+# (this module). The publisher adapter and bridge never read the
+# environment.
 SECRET_ID_ZERNIO_PUBLISH_BEARER = "zernio.publish.bearer"
 
-# Sole environment-variable binding for the publish bearer secret.
-ENV_VAR_ZERNIO_PUBLISH_API_TOKEN = "ZERNIO_PUBLISH_API_TOKEN"
+# Protected-store entry name for the publish bearer secret.
+# This is a store id, never an environment-variable binding: nothing in
+# this module (or anywhere else) reads it from the process environment.
+PUBLISH_SECRET_STORE_ID = "ZERNIO_PUBLISH_API_TOKEN"
 
 # Fixed, value-free rendering produced by every non-revealing
 # representation of a SecretValue.
@@ -187,7 +193,6 @@ class EnvironmentSecretProvider:
     ENV_VAR_BY_SECRET_ID: Mapping[str, str] = {
         SECRET_ID_ZERNIO_ANALYTICS_BEARER: ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN,
         SECRET_ID_ZERNIO_DRAFTS_BEARER: ENV_VAR_ZERNIO_DRAFT_API_TOKEN,
-        SECRET_ID_ZERNIO_PUBLISH_BEARER: ENV_VAR_ZERNIO_PUBLISH_API_TOKEN,
     }
 
     def __init__(self, environ: Mapping[str, str] | None = None) -> None:
@@ -237,6 +242,50 @@ class EnvironmentSecretProvider:
     def bound_env_var(cls, secret_id: str) -> str | None:
         """Redacted metadata: the env-var name bound to `secret_id` (or None)."""
         return cls.ENV_VAR_BY_SECRET_ID.get(secret_id)
+
+
+class InMemorySecretProvider:
+    """Single-source memory-only secret provider (#90 publication path).
+
+    Holds exactly one SecretValue, installed once from the credential the
+    OpenClaw plugin delivered over the authenticated private spawn pipe
+    at controller startup. There is deliberately no environment fallback,
+    no file fallback, and no second source: `get_required` serves the
+    held value for the single bound logical id
+    (`zernio.publish.bearer`) and raises typed missing-secret for
+    anything else.
+
+    Blank/whitespace-only values are rejected at construction as a typed
+    missing-secret condition so a malformed pipe delivery fails closed
+    before any publication attempt. Nothing here ever logs or persists
+    the value.
+    """
+
+    BOUND_SECRET_ID = SECRET_ID_ZERNIO_PUBLISH_BEARER
+
+    def __init__(self, token: SecretValue) -> None:
+        if not isinstance(token, SecretValue):
+            raise TypeError(
+                "InMemorySecretProvider requires a SecretValue token"
+            )
+        revealed = token.reveal()
+        if revealed == "" or revealed.isspace():
+            raise SecretNotConfiguredError(
+                "in-memory publication credential is absent or blank"
+            )
+        self._token = token
+
+    def get_required(self, secret_id: str) -> SecretValue:
+        if secret_id != self.BOUND_SECRET_ID:
+            raise SecretNotConfiguredError(
+                "requested secret is not bound to a runtime source"
+            )
+        return self._token
+
+    def probe(self, secret_id: str) -> SecretPresence:
+        if secret_id != self.BOUND_SECRET_ID:
+            return SecretPresence.UNAVAILABLE
+        return SecretPresence.PRESENT_READABLE
 
 
 def default_secret_file_path() -> Path:
@@ -478,6 +527,55 @@ def self_test() -> int:
         raise AssertionError("unavailable source did not fail closed")
     except SecretUnavailableError:
         pass
+
+    # Publication identity is intentionally NOT env-bound (#90): a plain
+    # inherited variable alone must never satisfy publication auth.
+    assert (
+        EnvironmentSecretProvider.bound_env_var(
+            SECRET_ID_ZERNIO_PUBLISH_BEARER
+        )
+        is None
+    )
+    assert (
+        EnvironmentSecretProvider().probe(SECRET_ID_ZERNIO_PUBLISH_BEARER)
+        is SecretPresence.UNAVAILABLE
+    )
+    try:
+        EnvironmentSecretProvider(
+            environ={PUBLISH_SECRET_STORE_ID: marker}
+        ).get_required(SECRET_ID_ZERNIO_PUBLISH_BEARER)
+        raise AssertionError("unbound publish secret resolved from env")
+    except SecretNotConfiguredError:
+        pass
+
+    # In-memory provider: single source, no env/file fallback.
+    held = InMemorySecretProvider(SecretValue(marker))
+    assert held.get_required(SECRET_ID_ZERNIO_PUBLISH_BEARER) == SecretValue(
+        marker
+    )
+    assert held.probe(SECRET_ID_ZERNIO_PUBLISH_BEARER) is (
+        SecretPresence.PRESENT_READABLE
+    )
+    assert (
+        held.probe(SECRET_ID_ZERNIO_ANALYTICS_BEARER)
+        is SecretPresence.UNAVAILABLE
+    )
+    try:
+        held.get_required(SECRET_ID_ZERNIO_ANALYTICS_BEARER)
+        raise AssertionError("in-memory provider served an unbound id")
+    except SecretNotConfiguredError:
+        pass
+    try:
+        InMemorySecretProvider(SecretValue("   "))
+        raise AssertionError("blank in-memory token was accepted")
+    except SecretNotConfiguredError:
+        pass
+    try:
+        InMemorySecretProvider(marker)  # type: ignore[arg-type]
+        raise AssertionError("non-SecretValue token was accepted")
+    except TypeError:
+        pass
+    assert marker not in repr(held)
 
     print("SECRET_PROVIDER_SELF_TEST=PASS")
     print("SECRET_REDACTED=TRUE")

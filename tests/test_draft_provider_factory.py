@@ -188,11 +188,11 @@ class CapabilitySeparationTests(unittest.TestCase):
         )
         self.assertEqual(bound, ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN)
 
-    def test_three_distinct_bindings(self):
-        # analytics + drafts (#81) + publish (#90)
+    def test_two_distinct_bindings(self):
+        # analytics + drafts (#81); publish (#90) is not env-bound
         self.assertEqual(
             len(EnvironmentSecretProvider.ENV_VAR_BY_SECRET_ID),
-            3,
+            2,
         )
 
 

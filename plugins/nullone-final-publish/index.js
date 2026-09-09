@@ -7,6 +7,24 @@
  * `texbrif:*` callback returns handled:false so existing approval/reject/
  * revise/back agent flow is byte-for-byte unchanged.
  *
+ * PUBLICATION SECRET (issue #90 fix): the publish credential NEVER comes
+ * from inherited environment state. The manifest declares a managed
+ * plugin SecretInput
+ * (`plugins.entries.nullone-final-publish.config.publishToken`, expected
+ * string) whose production value is the protected store SecretRef
+ * `{source:"store", provider:"default", id:"ZERNIO_PUBLISH_API_TOKEN"}`.
+ * At activation the plugin reads the configured input from
+ * `api.pluginConfig.publishToken`: a plain string (host-materialized) is
+ * used directly; a `{source:"store",...}` ref object is resolved through
+ * the supported SDK resolver (`resolveRequiredConfiguredSecretRefInputString`
+ * from `openclaw/plugin-sdk/secret-input-runtime`) -- never by reading a
+ * secret store manually, never from the environment. Any other shape
+ * (missing, blank, env-sourced) fails closed: no daemon spawn, no
+ * publication. The resolved token travels to the controller daemon ONLY
+ * inside one bounded HMAC-authenticated startup frame on the private
+ * spawn pipe, stays memory-only on both sides, and never enters
+ * argv/env/files/logs/receipts.
+ *
  * EXACT 2026.8.2 context contract (verified from installed
  * dist/plugin-runtime-k6Y5nYdM.js dispatch + telegram ingress factory):
  * - handlerCtx.callback.data = raw callback data string
@@ -19,6 +37,11 @@
  * - return {handled:false} falls through to agent routing; any other
  *   handled result consumes the callback; with no submitText no agent turn
  *   is spawned.
+ * - register(api, ctx) is SYNCHRONOUS by host contract ("plugin register
+ *   must be synchronous"): async store resolution happens lazily inside
+ *   DaemonLink.ensure() before the daemon spawns, never in register().
+ * - api.pluginConfig = validated `plugins.entries.<id>.config` (raw
+ *   SecretInput: resolved string or SecretRef object).
  *
  * NOT deployed by Git merge. Install/enable/restart happens only at the
  * controlled #37 deployment. See README.md in this directory.
@@ -45,6 +68,15 @@ const CONTROLLER_RELATIVE = [
   "nullone_final_publish_controller.py",
 ];
 const CONTROLLER_BASENAME = "nullone_final_publish_controller.py";
+
+// Managed SecretInput path for the publication credential (mirrors the
+// manifest `configContracts.secretInputs.paths` entry).
+const SECRET_CONFIG_PATH =
+  "plugins.entries.nullone-final-publish.config.publishToken";
+// Publication credentials are short bearer strings; anything larger is
+// hostile/malformed. Mirrors the Python pipe bound (MAX_TOKEN_LEN).
+const MAX_TOKEN_LEN = 2048;
+const STARTUP_SCHEMA = "nullone.publish-startup.v1";
 
 /**
  * Deterministic controller path construction (issue #89 hardening).
@@ -133,6 +165,115 @@ function buildFrame(envelope, key) {
   return Buffer.concat([header, body, mac]);
 }
 
+/**
+ * Build the ONE authenticated startup credential frame.
+ *
+ * Same wire security as callback frames (HMAC under the per-boot key K
+ * established over the private spawn pipe). The controller verifies the
+ * MAC before parsing and refuses READY until a well-formed non-blank
+ * credential arrives. The token travels memory-only and is never placed
+ * in argv/env/files/logs.
+ */
+function buildStartupFrame(publishToken, key) {
+  if (
+    typeof publishToken !== "string" ||
+    publishToken.length === 0 ||
+    /^\s*$/.test(publishToken)
+  ) {
+    throw new Error("publish credential unavailable");
+  }
+  if (publishToken.length > MAX_TOKEN_LEN) {
+    throw new Error("publish credential oversize");
+  }
+  if (!Buffer.isBuffer(key) || key.length !== KEY_LEN) {
+    throw new Error("channel key length invalid");
+  }
+  return buildFrame(
+    { schema: STARTUP_SCHEMA, publish_token: publishToken },
+    key
+  );
+}
+
+function isStoreSecretRef(value) {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    value.source === "store" &&
+    typeof value.provider === "string" &&
+    value.provider.length > 0 &&
+    typeof value.id === "string" &&
+    value.id.length > 0
+  );
+}
+
+function loadSecretResolver() {
+  // Supported SDK surface only; never read a secret store manually.
+  // Lazy so offline/test environments without the SDK subtree still load.
+  try {
+    const runtime = require("openclaw/plugin-sdk/secret-input-runtime");
+    if (
+      runtime &&
+      typeof runtime.resolveRequiredConfiguredSecretRefInputString ===
+        "function"
+    ) {
+      return runtime.resolveRequiredConfiguredSecretRefInputString;
+    }
+  } catch {
+    // Unavailable outside the Gateway host.
+  }
+  return null;
+}
+
+/**
+ * Resolve the configured publish SecretInput to a memory-only string.
+ *
+ * Accepted (in order):
+ * 1. a non-blank string within the length bound (host-materialized);
+ * 2. a `{source:"store", provider, id}` ref object, resolved through the
+ *    supported SDK resolver against the protected store.
+ * Everything else -- missing, blank, oversize, env-sourced or otherwise
+ * malformed input -- rejects: publication auth can never be satisfied by
+ * a plain inherited environment variable.
+ */
+async function resolvePublishToken(rawInput, hostConfig) {
+  if (typeof rawInput === "string") {
+    if (
+      rawInput.length > 0 &&
+      rawInput.length <= MAX_TOKEN_LEN &&
+      !/^\s*$/.test(rawInput)
+    ) {
+      return rawInput;
+    }
+    throw new Error("publish credential unavailable");
+  }
+  if (isStoreSecretRef(rawInput)) {
+    const resolveRef = loadSecretResolver();
+    if (!resolveRef) {
+      throw new Error("publish secret resolver unavailable");
+    }
+    const resolved = await resolveRef({
+      config: hostConfig,
+      value: rawInput,
+      path: SECRET_CONFIG_PATH,
+      env: process.env,
+    });
+    const value =
+      resolved && typeof resolved.value === "string"
+        ? resolved.value
+        : "";
+    if (
+      value.length > 0 &&
+      value.length <= MAX_TOKEN_LEN &&
+      !/^\s*$/.test(value)
+    ) {
+      return value;
+    }
+    throw new Error("publish credential unavailable");
+  }
+  throw new Error("publish credential unavailable");
+}
+
 function isPositiveMessageId(value) {
   if (typeof value === "number") {
     return Number.isSafeInteger(value) && value > 0;
@@ -161,6 +302,13 @@ class DaemonLink {
       (opts && opts.requestTimeoutMs) || REQUEST_TIMEOUT_MS;
     this.handshakeTimeoutMs =
       (opts && opts.handshakeTimeoutMs) || HANDSHAKE_TIMEOUT_MS;
+    // Async SecretInput resolver: () => Promise<string>. Injected by
+    // register() (production: SDK store resolution of the configured
+    // publishToken); offline tests inject fakes. Never the environment.
+    this.resolvePublishToken =
+      (opts && opts.resolvePublishToken) || null;
+    this.publishToken = null;
+    this.tokenPromise = null;
     this.child = null;
     this.key = null;
     this.ready = false;
@@ -170,14 +318,46 @@ class DaemonLink {
     this.writeChain = Promise.resolve();
   }
 
+  async ensurePublishToken() {
+    if (this.publishToken !== null) {
+      return this.publishToken;
+    }
+    if (!this.tokenPromise) {
+      this.tokenPromise = (async () => {
+        if (typeof this.resolvePublishToken !== "function") {
+          throw new Error("publish credential unavailable");
+        }
+        const token = await this.resolvePublishToken();
+        if (
+          typeof token !== "string" ||
+          token.length === 0 ||
+          token.length > MAX_TOKEN_LEN ||
+          /^\s*$/.test(token)
+        ) {
+          throw new Error("publish credential unavailable");
+        }
+        this.publishToken = token;
+        return token;
+      })();
+      // A rejection must not poison later callbacks forever: a fresh
+      // second-stage message retries resolution (never a retry of a
+      // consumed publication attempt -- nothing was sent yet).
+      this.tokenPromise.catch(() => {
+        this.tokenPromise = null;
+      });
+    }
+    return this.tokenPromise;
+  }
+
   async ensure() {
     if (this.child && this.ready) {
       return;
     }
-    await this._spawn();
+    const token = await this.ensurePublishToken();
+    await this._spawn(token);
   }
 
-  async _spawn() {
+  async _spawn(publishToken) {
     this.key = crypto.randomBytes(KEY_LEN);
     this.pending.clear();
     const child = this.spawnFn(
@@ -194,9 +374,12 @@ class DaemonLink {
     child.on("exit", () => this._onDeath(new Error("daemon exited")));
     child.on("error", (error) => this._onDeath(error));
     child.stdout.on("data", (chunk) => this._onData(chunk));
-    // Private spawn pipe: the per-boot key goes first, exactly KEY_LEN bytes.
-    // argv carries nothing sensitive.
+    // Private spawn pipe: the per-boot key goes first, exactly KEY_LEN
+    // bytes, then ONE bounded authenticated startup credential frame.
+    // argv and env carry nothing sensitive: the resolved token travels
+    // memory-only inside the HMAC'd frame.
     child.stdin.write(this.key);
+    child.stdin.write(buildStartupFrame(publishToken, this.key));
     await this._waitReady();
     this.ready = true;
   }
@@ -526,11 +709,16 @@ module.exports = {
   routeCallback,
   canonicalStringify,
   buildFrame,
+  buildStartupFrame,
   buildHandler,
   DaemonLink,
   outcomeText,
   SAFE_TEXT,
   resolveControllerPath,
+  resolvePublishToken,
+  SECRET_CONFIG_PATH,
+  MAX_TOKEN_LEN,
+  STARTUP_SCHEMA,
   CONTROLLER_RELATIVE,
 };
 
@@ -543,12 +731,25 @@ module.exports.default = definePluginEntry({
     // the absolute path deterministically from the served workspace.
     const override =
       ctx && ctx.controllerPath ? ctx.controllerPath : undefined;
+    // Publication SecretInput as configured on the managed path
+    // (api.pluginConfig). Raw shape: host-materialized string or
+    // `{source:"store",...}` ref object. Resolution is async and lazy
+    // (register must stay synchronous): DaemonLink resolves it before
+    // the first spawn and fails closed without it.
+    const rawPublishToken =
+      api && api.pluginConfig
+        ? api.pluginConfig.publishToken
+        : undefined;
+    const hostConfig = api && api.config ? api.config : undefined;
     let link = null;
     let linkError = null;
     try {
       const controllerPath = resolveControllerPath(workspace, override);
       const spawnFn = (ctx && ctx.spawnFn) || undefined;
-      link = new DaemonLink(pythonBin, controllerPath, workspace, spawnFn);
+      link = new DaemonLink(pythonBin, controllerPath, workspace, spawnFn, {
+        resolvePublishToken: () =>
+          resolvePublishToken(rawPublishToken, hostConfig),
+      });
     } catch (error) {
       // Fail closed at registration: the handler below stays installed but
       // every publish callback is consumed safely with zero daemon contact

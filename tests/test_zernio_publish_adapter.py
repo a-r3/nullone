@@ -53,11 +53,12 @@ from nullone_bridge_common import (  # noqa: E402
 from nullone_secret_provider import (  # noqa: E402
     ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN,
     ENV_VAR_ZERNIO_DRAFT_API_TOKEN,
-    ENV_VAR_ZERNIO_PUBLISH_API_TOKEN,
+    PUBLISH_SECRET_STORE_ID,
     SECRET_ID_ZERNIO_ANALYTICS_BEARER,
     SECRET_ID_ZERNIO_DRAFTS_BEARER,
     SECRET_ID_ZERNIO_PUBLISH_BEARER,
     EnvironmentSecretProvider,
+    InMemorySecretProvider,
     SecretNotConfiguredError,
     SecretValue,
 )
@@ -335,42 +336,88 @@ class SecretBoundaryTests(unittest.TestCase):
                 current["publication"]["state"], "NOT_REQUESTED"
             )
 
+    def test_no_installed_provider_fails_before_publication(self):
+        # Fresh bridge module with nothing installed (notably raw CLI
+        # invocation): the factory fails closed even with the store entry
+        # name present in the environment.
+        with IsolatedWorkspace() as root:
+            manifest_path, _m = make_manifest(root)
+            bridge = load_bridge()
+            with patch.dict(
+                os.environ,
+                {PUBLISH_SECRET_STORE_ID: SECRET_MARKER},
+                clear=False,
+            ):
+                with self.assertRaises(BridgeError) as ctx:
+                    bridge.execute_loaded(
+                        manifest_path, read_manifest(manifest_path)
+                    )
+            self.assertIn("unavailable", str(ctx.exception).lower())
+            current = read_manifest(manifest_path)
+            self.assertEqual(current["publication"]["attempts"], 0)
+            self.assertEqual(
+                current["publication"]["state"], "NOT_REQUESTED"
+            )
+
     def test_plain_env_alone_does_not_satisfy_publish_credential(self):
         with patch.dict(
             os.environ,
-            {ENV_VAR_ZERNIO_PUBLISH_API_TOKEN: SECRET_MARKER},
+            {PUBLISH_SECRET_STORE_ID: SECRET_MARKER},
             clear=False,
         ):
             # A raw environment string is rejected as a programming
             # defect: only a SecretValue is accepted.
             with self.assertRaises(TypeError):
                 adapter.build_authenticated_transport(
-                    token=os.environ[ENV_VAR_ZERNIO_PUBLISH_API_TOKEN]
+                    token=os.environ[PUBLISH_SECRET_STORE_ID]
                 )
-        # Neither the adapter nor the bridge ever reads the environment.
+            # The publish identity has no environment binding at all, so
+            # the inherited variable is never even consulted.
+            self.assertIsNone(
+                EnvironmentSecretProvider.bound_env_var(
+                    SECRET_ID_ZERNIO_PUBLISH_BEARER
+                )
+            )
+            with self.assertRaises(SecretNotConfiguredError):
+                EnvironmentSecretProvider().get_required(
+                    SECRET_ID_ZERNIO_PUBLISH_BEARER
+                )
+        # Neither the adapter, bridge, factory, nor IPC ever reads the
+        # environment for publication auth (no os import for secrets in
+        # any of them). The controller reads exactly NULLONE_WORKSPACE
+        # (#89, pre-existing) and no credential.
+        import re
+
+        import nullone_final_publish_controller as controller_mod
+        import nullone_publish_ipc as ipc_mod
+
         for module in (
             adapter,
             load_bridge(),
             load_factory(),
+            ipc_mod,
         ):
             source = inspect.getsource(module)
             self.assertNotIn("os.environ", source)
             self.assertNotIn("getenv", source)
+        controller_source = inspect.getsource(controller_mod)
+        env_gets = set(
+            re.findall(r"os\.environ\.get\(\"([^\"]+)\"\)", controller_source)
+        )
+        self.assertEqual(env_gets, {"NULLONE_WORKSPACE"})
+        self.assertNotIn("getenv", controller_source)
 
     def test_mocked_protected_resolution_reaches_adapter_memory_only(self):
         from nullone_publish_provider_factory import (
             build_production_publish_provider,
         )
 
-        class ProtectedStoreProvider:
-            """Stand-in for a protected store SecretRef resolution."""
-
-            def get_required(self, secret_id):
-                assert secret_id == SECRET_ID_ZERNIO_PUBLISH_BEARER
-                return SecretValue(SECRET_MARKER)
-
+        # Stand-in for the pipe-delivered credential resolved from the
+        # protected store SecretRef: memory-only, no environment.
         provider = build_production_publish_provider(
-            secret_provider=ProtectedStoreProvider()
+            secret_provider=InMemorySecretProvider(
+                SecretValue(SECRET_MARKER)
+            )
         )
         self.assertIsInstance(provider, adapter.ZernioPublishProvider)
         self.assertIsInstance(
@@ -390,10 +437,6 @@ class SecretBoundaryTests(unittest.TestCase):
             build_production_publish_provider,
         )
 
-        class ProtectedStoreProvider:
-            def get_required(self, secret_id):
-                return SecretValue(SECRET_MARKER)
-
         with IsolatedWorkspace() as root:
             manifest_path, _m = make_manifest(root)
             provider = adapter.ZernioPublishProvider(
@@ -410,7 +453,9 @@ class SecretBoundaryTests(unittest.TestCase):
             # Memory-only injection through the real factory path shape.
             self.assertIsInstance(
                 build_production_publish_provider(
-                    secret_provider=ProtectedStoreProvider()
+                    secret_provider=InMemorySecretProvider(
+                        SecretValue(SECRET_MARKER)
+                    )
                 )._transport.token,
                 SecretValue,
             )
@@ -442,22 +487,18 @@ class SecretBoundaryTests(unittest.TestCase):
             SECRET_ID_ZERNIO_PUBLISH_BEARER,
             SECRET_ID_ZERNIO_DRAFTS_BEARER,
         )
-        self.assertNotEqual(
-            ENV_VAR_ZERNIO_PUBLISH_API_TOKEN,
-            ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN,
-        )
-        self.assertNotEqual(
-            ENV_VAR_ZERNIO_PUBLISH_API_TOKEN,
-            ENV_VAR_ZERNIO_DRAFT_API_TOKEN,
-        )
+        # The store entry name is not an environment binding.
         self.assertEqual(
+            PUBLISH_SECRET_STORE_ID, "ZERNIO_PUBLISH_API_TOKEN"
+        )
+        self.assertIsNone(
             EnvironmentSecretProvider.bound_env_var(
                 SECRET_ID_ZERNIO_PUBLISH_BEARER
-            ),
-            "ZERNIO_PUBLISH_API_TOKEN",
+            )
         )
+        # Exactly two inherited-env bindings remain (analytics + drafts).
         self.assertEqual(
-            len(EnvironmentSecretProvider.ENV_VAR_BY_SECRET_ID), 3
+            len(EnvironmentSecretProvider.ENV_VAR_BY_SECRET_ID), 2
         )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from nullone_bridge_common import (
     BridgeError,
@@ -17,6 +17,7 @@ from nullone_bridge_common import (
 from nullone_publish_provider_factory import (
     build_production_publish_provider,
 )
+from nullone_secret_provider import SecretProvider
 from nullone_state import (
     mark_queue_published_exact,
     record_publication_event,
@@ -36,13 +37,45 @@ from nullone_zernio_publish_adapter import (
     classify_readback_truth,
 )
 
-# Production provider construction seam (#90). The deterministic
-# controller calls execute_loaded IN-PROCESS; offline tests substitute a
-# fake provider factory here without touching production wiring. The
-# default is the production factory behind the reviewed secret boundary.
-provider_factory: Callable[[], ZernioPublishProvider] = (
-    build_production_publish_provider
-)
+# Production provider construction seam (#90). The ONLY publication
+# secret source is the in-memory provider installed here by the
+# controller daemon at startup from the credential the plugin delivered
+# over the authenticated private pipe. There is no environment fallback:
+# with nothing installed the factory fails closed before any attempt.
+# The deterministic controller calls execute_loaded IN-PROCESS; offline
+# tests substitute a fake provider factory here without touching
+# production wiring.
+_installed_secret_provider: SecretProvider | None = None
+
+
+def install_publish_secret_provider(
+    provider: SecretProvider,
+) -> None:
+    """Install the single in-memory publication secret source.
+
+    Called exactly once by the controller daemon at startup, and by
+    offline tests with fakes. Anything without `get_required` is a
+    programming defect (AttributeError on use, never a domain result).
+    """
+    global _installed_secret_provider
+    _installed_secret_provider = provider
+
+
+def provider_factory() -> ZernioPublishProvider:
+    """Build the deterministic publisher from the installed secret source.
+
+    Fails closed (BridgeError, attempts untouched) when controller
+    startup did not deliver a credential -- notably for raw standalone
+    CLI invocation, which can never publish.
+    """
+    if _installed_secret_provider is None:
+        raise BridgeError(
+            "Publication credential unavailable: controller startup "
+            "did not deliver it over the private pipe"
+        )
+    return build_production_publish_provider(
+        secret_provider=_installed_secret_provider
+    )
 
 # Fixed, generic failure text for a readback that proves the provider
 # rejected the promoted post. Never echoes response bodies.

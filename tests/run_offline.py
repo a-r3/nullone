@@ -57,6 +57,7 @@ COMMANDS = [
     [sys.executable, "tests/test_publish_receipt.py"],
     [sys.executable, "tests/test_final_publish_controller.py"],
     [sys.executable, "tests/test_zernio_publish_adapter.py"],
+    [sys.executable, "tests/test_publish_secret_pipe.py"],
     [sys.executable, "tests/test_plugin_routing.py"],
     [
         sys.executable,

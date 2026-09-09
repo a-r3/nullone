@@ -38,6 +38,12 @@ The environment-variable binding for the credential exists only inside
 publish credential is distinct from both the analytics and drafts
 credentials and is the only identity the deterministic publisher may
 use.
+
+There is exactly one secret source for publication: the caller must pass
+an explicit SecretProvider (in production, the InMemorySecretProvider
+seeded from the credential the plugin delivered over the authenticated
+private pipe). There is no implicit environment fallback -- a missing
+argument fails closed instead of consulting the process environment.
 """
 from __future__ import annotations
 
@@ -69,22 +75,20 @@ CREDENTIAL_UNAVAILABLE_REASON = (
 
 def build_production_publish_provider(
     *,
-    secret_provider: SecretProvider | None = None,
+    secret_provider: SecretProvider,
 ) -> ZernioPublishProvider:
     """Construct the production `ZernioPublishProvider` (#90 publisher).
 
-    `secret_provider` defaults to `EnvironmentSecretProvider`, which reads
-    the credential from the inherited process environment -- the runtime
-    source proven for the OpenClaw Gateway's child commands (issue #61,
-    branch A). The logical secret id requested here is
-    `zernio.publish.bearer`; the environment-variable mapping is owned by
-    `nullone_secret_provider.py`.
+    `secret_provider` is required and keyword-only: in production it is
+    the InMemorySecretProvider installed by the controller daemon from
+    the pipe-delivered credential. There is deliberately no default --
+    falling back to the process environment would create a second secret
+    source and let a plain inherited variable satisfy publication auth,
+    both of which are forbidden. Offline tests pass an explicit fake or
+    InMemorySecretProvider.
     """
 
-    provider: SecretProvider = (
-        secret_provider if secret_provider is not None
-        else EnvironmentSecretProvider()
-    )
+    provider: SecretProvider = secret_provider
 
     try:
         token = provider.get_required(SECRET_ID_ZERNIO_PUBLISH_BEARER)
@@ -163,17 +167,13 @@ def self_test() -> int:
         raise AssertionError("factory swallowed RuntimeError")
 
     # Present secret -> provider constructed with the canonical account
-    # id; the value never leaks through any rendering.
-    class PresentEnv(EnvironmentSecretProvider):
-        def __init__(self):
-            self._environ = {
-                EnvironmentSecretProvider.bound_env_var(
-                    SECRET_ID_ZERNIO_PUBLISH_BEARER
-                ): marker,
-            }
+    # id; the value never leaks through any rendering. The credential
+    # arrives only via the in-memory provider seeded from the pipe
+    # delivery; there is no environment binding for publish.
+    from nullone_secret_provider import InMemorySecretProvider
 
     provider = build_production_publish_provider(
-        secret_provider=PresentEnv()
+        secret_provider=InMemorySecretProvider(SecretValue(marker))
     )
     assert provider._account_id == CANONICAL_ACCOUNT_ID
     assert marker not in repr(provider)

@@ -68,6 +68,11 @@ from nullone_story_supersession import (
 
 import nullone_publish_ipc as ipc
 import nullone_publish_receipt as receipts
+from nullone_secret_provider import (
+    InMemorySecretProvider,
+    SecretNotConfiguredError,
+    SecretValue,
+)
 
 HERE = Path(__file__).resolve().parent
 
@@ -133,6 +138,13 @@ SENTINEL_NAME = "publish-controller.sentinel"
 # shell) have an empty registry and fail the gate below.
 _INSTALLED_KEYS: set[bytes] = set()
 
+# Process-local publication credential (memory-only SecretValue).
+# Installed ONLY by daemon_main() from the startup credential frame the
+# plugin delivered over the authenticated private pipe. The daemon
+# refuses READY until this is installed; the bridge factory builds the
+# publisher exclusively from it (never from the process environment).
+_PUBLISH_TOKEN: SecretValue | None = None
+
 
 def install_daemon_key(key: bytes) -> None:
     """Install the per-boot channel key in THIS process only (daemon boot)."""
@@ -148,6 +160,31 @@ def install_test_key() -> bytes:
     key = secrets.token_bytes(ipc.KEY_LEN)
     _INSTALLED_KEYS.add(key)
     return key
+
+
+def install_publish_token(token: str) -> SecretValue:
+    """Install the pipe-delivered publication credential (daemon boot).
+
+    Validates the startup credential (non-blank, bounded) and wraps it
+    as a memory-only SecretValue. Blank/oversize/non-string input is a
+    typed missing-secret condition: the caller must refuse READY.
+    """
+    if not isinstance(token, str):
+        raise SecretNotConfiguredError(
+            "publication credential delivery invalid"
+        )
+    if (
+        not token
+        or token.isspace()
+        or len(token) > ipc.MAX_TOKEN_LEN
+    ):
+        raise SecretNotConfiguredError(
+            "publication credential delivery invalid"
+        )
+    secret = SecretValue(token)
+    global _PUBLISH_TOKEN
+    _PUBLISH_TOKEN = secret
+    return secret
 
 
 def _key_installed(key: bytes) -> bool:
@@ -589,9 +626,13 @@ def daemon_main(
     """Run the singleton controller daemon on stdio framing protocol.
 
     argv carries NOTHING sensitive. stdin: first exactly KEY_LEN raw bytes
-    (the per-boot channel key over the private spawn pipe), then HMAC frames.
-    stdout: one READY frame after key install, then one reply frame per
-    request frame. stdin EOF exits fail-closed.
+    (the per-boot channel key over the private spawn pipe), then ONE
+    authenticated startup credential frame (the publication credential
+    resolved from the protected store SecretRef), then HMAC frames.
+    stdout: one READY frame after key install AND credential install, then
+    one reply frame per request frame. READY is refused (fail-closed,
+    exit 2, no READY frame) until a valid channel AND a valid non-empty
+    credential are both established. stdin EOF exits fail-closed.
     """
     ws = Path(workspace) if workspace is not None else workspace_root()
     stream_in = stdin if stdin is not None else sys.stdin.buffer
@@ -603,10 +644,15 @@ def daemon_main(
         return 2
     try:
         key = _read_key(stream_in)
-    except ipc.IpcError as error:
-        print(f"DAEMON_KEY_REFUSED={type(error).__name__}")
+        token = ipc.read_startup_frame(stream_in, key)
+        secret = install_publish_token(token)
+    except (ipc.IpcError, SecretNotConfiguredError) as error:
+        print(f"DAEMON_STARTUP_REFUSED={type(error).__name__}")
         return 2
     install_daemon_key(key)
+    _bridge_module().install_publish_secret_provider(
+        InMemorySecretProvider(secret)
+    )
     summary = reconcile_boot(ws)
     _write_reply(
         stream_out,

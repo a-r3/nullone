@@ -870,23 +870,21 @@ def classify_readback_truth(summary: dict[str, Any]) -> str:
 
 def build_direct_publish_provider(
     *,
-    secret_provider: SecretProvider | None = None,
+    secret_provider: SecretProvider,
 ) -> ZernioPublishProvider:
     """Construct the production ZernioPublishProvider behind the reviewed
     secret boundary.
 
-    Construction performs no network calls and writes nothing to disk.
-    Converts typed missing/unavailable secret conditions into sanitized
-    publish-provider failures. Never exposes credential material. The
-    logical secret id requested here is `zernio.publish.bearer`,
-    distinct from both the analytics and drafts credentials; the
-    environment-variable mapping is owned by
-    `nullone_secret_provider.py`.
+    `secret_provider` is required and keyword-only: in production it is
+    the InMemorySecretProvider installed by the controller daemon from
+    the pipe-delivered credential. There is deliberately no default --
+    falling back to the process environment would create a second secret
+    source for publication, which is forbidden. Construction performs no
+    network calls and writes nothing to disk. Converts typed
+    missing/unavailable secret conditions into sanitized publish-provider
+    failures. Never exposes credential material.
     """
-    provider: SecretProvider = (
-        secret_provider if secret_provider is not None
-        else EnvironmentSecretProvider()
-    )
+    provider: SecretProvider = secret_provider
 
     try:
         token = provider.get_required(SECRET_ID_ZERNIO_PUBLISH_BEARER)
@@ -978,36 +976,35 @@ def self_test() -> int:
         assert "secret daemon died" in str(exc)
 
     # Present secret -> provider constructed; value never leaks.
-    class PresentEnv(EnvironmentSecretProvider):
-        def __init__(self):
-            self._environ = {
-                EnvironmentSecretProvider.bound_env_var(
-                    SECRET_ID_ZERNIO_PUBLISH_BEARER
-                ): marker,
-            }
+    # The credential arrives only via the in-memory provider seeded from
+    # the pipe delivery; there is no environment binding for publish.
+    from nullone_secret_provider import InMemorySecretProvider
 
-    provider = build_direct_publish_provider(secret_provider=PresentEnv())
+    provider = build_direct_publish_provider(
+        secret_provider=InMemorySecretProvider(SecretValue(marker))
+    )
     assert isinstance(provider, ZernioPublishProvider)
     assert marker not in repr(provider)
     assert marker not in repr(provider._transport)
     assert "redacted" in repr(provider._transport)
     assert type(provider._transport.token) is SecretValue
 
-    # Publish credential separate from analytics AND drafts.
+    # Publish credential separate from analytics AND drafts, and never
+    # env-bound: the store entry name is not an environment binding.
     from nullone_secret_provider import (
-        ENV_VAR_ZERNIO_PUBLISH_API_TOKEN,
+        PUBLISH_SECRET_STORE_ID,
         SECRET_ID_ZERNIO_ANALYTICS_BEARER,
         SECRET_ID_ZERNIO_DRAFTS_BEARER,
     )
 
     assert SECRET_ID_ZERNIO_PUBLISH_BEARER != SECRET_ID_ZERNIO_ANALYTICS_BEARER
     assert SECRET_ID_ZERNIO_PUBLISH_BEARER != SECRET_ID_ZERNIO_DRAFTS_BEARER
+    assert PUBLISH_SECRET_STORE_ID == "ZERNIO_PUBLISH_API_TOKEN"
     assert (
         EnvironmentSecretProvider.bound_env_var(
             SECRET_ID_ZERNIO_PUBLISH_BEARER
         )
-        == ENV_VAR_ZERNIO_PUBLISH_API_TOKEN
-        == "ZERNIO_PUBLISH_API_TOKEN"
+        is None
     )
 
     # Exact-path allowlist enforced before any network use (real

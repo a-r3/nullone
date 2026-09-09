@@ -53,27 +53,40 @@ from publication.
   `platformPostUrl` string when present; platform post id never
   fabricated.
 
-## Secret boundary (as specified by #90)
+## Secret boundary (protected store SecretRef + private pipe)
 
-New logical credential `zernio.publish.bearer` /
-`ZERNIO_PUBLISH_API_TOKEN`, owned solely in
-`nullone_secret_provider.py` (`SecretValue`, inherited-env-only, typed
-missing/unavailable errors), mirroring the reviewed analytics (#61) and
-drafts (#81) conventions and distinct from both. The adapter and bridge
-never read the environment (no `os.environ`/argv/file/log/receipt
-exposure); the production factory (`nullone_publish_provider_factory.py`)
-resolves the `SecretValue` in controller-process memory and injects it
-into the adapter at construction. Secret absent → fail before any
-attempt. Nothing is provisioned by this change; provisioning (if ever)
-is a #37 deployment action, never a Git merge.
+New logical credential `zernio.publish.bearer`, protected-store entry
+`ZERNIO_PUBLISH_API_TOKEN`. The publication credential NEVER comes from
+inherited environment state: `zernio.publish.bearer` is intentionally NOT
+bound in `EnvironmentSecretProvider`, so a plain inherited variable alone
+cannot satisfy publication auth (typed missing-secret, fail-closed before
+any attempt).
 
-Note: the installed OpenClaw 2026.8.2 SDK does expose a generic
-SecretInput/SecretRef surface, but no store-bound wiring exists at this
-plugin boundary in-repo, #90 explicitly mandates the inherited-env-only
-reviewed boundary above, and inventing a new pipe-delivered-secret
-mechanism is out of scope. The boundary implemented here satisfies every
-adapter-level hard requirement (memory-only, never model-visible, typed
-fail-closed, no leakage).
+Production flow:
+
+1. The plugin manifest declares the managed SecretInput
+   `plugins.entries.nullone-final-publish.config.publishToken`
+   (expected string); production binds
+   `{source:"store", provider:"default", id:"ZERNIO_PUBLISH_API_TOKEN"}`
+   there (a #37 deployment action, never a Git merge, nothing provisioned
+   here).
+2. At activation the plugin reads the configured input from
+   `api.pluginConfig.publishToken`: a host-materialized string is used
+   directly; a `{source:"store",...}` ref is resolved through the
+   supported SDK SecretInput surface only (never a manual store read,
+   never the environment). Missing/blank/non-store input fails closed
+   with zero spawn and zero publication.
+3. The resolved token crosses to the controller daemon ONLY inside one
+   bounded HMAC-authenticated startup frame on the existing private
+   spawn pipe (after the per-boot key K; argv/env carry nothing).
+4. The daemon refuses READY until a valid channel AND a valid non-empty
+   credential are both established, wraps the credential as a
+   memory-only SecretValue, and injects it into the provider factory
+   through an InMemorySecretProvider -- the single secret source. The
+   publisher adapter, bridge, factory, IPC, and controller never read
+   the environment for publication auth.
+
+Analytics/draft secret behavior is untouched.
 
 ## #89 preservation (all green offline)
 
