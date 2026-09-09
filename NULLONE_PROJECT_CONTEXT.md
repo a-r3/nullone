@@ -289,6 +289,70 @@ Existing M1/M2/M3 remain intact.
 New operational milestone:
 `M0 — Production operations are healthy and timely`
 
+### #89 Deterministic final publish handoff — CLOSED / COMPLETED
+
+#89 CLOSED / COMPLETED. PR #91 squash-merged on `main` as
+`f1315f74ed08ab235f524c3777e86c7d5bb703ee`.
+
+#89 desired architecture (repository desired state; implementation MERGED /
+NOT DEPLOYED):
+
+```text
+final Telegram publish callback
+→ deterministic OpenClaw interactive plugin
+→ authenticated private pipe
+→ deterministic controller
+→ per-human authorization receipt
+→ in-process publication core
+→ deterministic notifier
+```
+
+- approval LLM no longer owns the final sessions_send handoff;
+- publisher LLM no longer owns consequential wrapper execution;
+- legacy raw execute path fail-closed;
+- max-one publication attempt preserved;
+- ambiguity truthful / no retry.
+
+### #90 Deterministic Zernio publisher connector — CLOSED / COMPLETED
+
+#90 CLOSED / COMPLETED. PR #92 squash-merged on `main` as
+`d790aa78564c9e8889c94e9d3b5a2c0f40db774c`.
+
+#90 desired architecture (repository desired state; implementation MERGED /
+NOT DEPLOYED):
+
+```text
+publication core
+→ deterministic direct Zernio REST adapter
+→ read-only remote draft preflight
+→ attempts=1 persisted
+→ exactly one PUT promotion
+→ read-only readback
+```
+
+- Claude/MCP removed from the consequential publication transport;
+- ZERO consequential LLM decisions after the final human click in desired
+  Git state;
+- publication credential uses the OpenClaw protected SecretRef
+  (`zernio.publish.bearer` / store entry `ZERNIO_PUBLISH_API_TOKEN`);
+- plugin SecretInput materialized at activation;
+- credential crosses only the authenticated private plugin→controller
+  channel;
+- no inherited-env publication credential;
+- no real credential provisioned;
+- no live Zernio calls during implementation.
+
+All known repository M0 engineering blockers #79/#80/#81/#89/#90 are CLOSED
+in Git. This does NOT mean production is ready or deployed.
+
+NEXT_ENGINEERING_TASK = NONE
+NEXT_OPERATIONAL_TASK = NEW read-only #37 preflight
+
+#37 remains OPEN and must determine: `READY_FOR_CONTROLLED_DEPLOYMENT` or
+`BLOCKED`. Historical 2026-09-07 and 2026-09-08 preflight records are
+preserved as historical evidence below; old incidents are not rewritten as
+if they occurred on the new code.
+
 ## OpenClaw trigger-edge architecture decision (#59, 2026-09-07)
 
 `nullone_openclaw_scheduler_adapter.map_openclaw_occurrence` (merged by PR
@@ -385,7 +449,7 @@ Verified planning:
 - M0 exists as milestone #4
 - canonical planning issues #3–#14 exist; #3, #4 and #5 are now CLOSED (PR #46, #38, #39 respectively), while the remaining applicable planning issues stay open
 - accidental duplicates #15–#26 closed
-- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, BreakingWorkflow orchestration #63, scheduled occurrence authority #59, scheduled credential injection #61, and the narrow legacy-publication-instruction blocker #66 are CLOSED/COMPLETED; **no M0 component-level repository engineering blockers remain** (2026-09-08 preflight discovered separate deployment production-integration blockers — Story trigger/candidate source, Breaking structured source — recorded under Current execution priority), while parent deployment issue #37 remains OPEN / NOT READY YET; #6 remains OPEN in M1 and #13 remains OPEN in M3
+- operational component issues #27–#36, application-runtime architecture issue #65, cadence compatibility #60, Story workflow/review delivery #62, BreakingWorkflow orchestration #63, scheduled occurrence authority #59, scheduled credential injection #61, the narrow legacy-publication-instruction blocker #66, deterministic final publish handoff #89, and deterministic Zernio publisher connector #90 are CLOSED/COMPLETED; **all known repository M0 engineering blockers #79/#80/#81/#89/#90 are CLOSED in Git** (2026-09-08 preflight discovered separate deployment production-integration blockers — Story trigger/candidate source, Breaking structured source — recorded under Current execution priority; #79/#80/#81 were since closed by PR #83/#85/#87), while parent deployment issue #37 remains OPEN / NOT READY YET; #6 remains OPEN in M1 and #13 remains OPEN in M3
 - native dependencies created
 - Project #5 exists
 - GitHub Project field ordering for some M0 items may remain UI-housekeeping due transient GraphQL secondary rate limiting; this is not an engineering blocker
@@ -434,6 +498,8 @@ Relevant issues:
 - #63 `BreakingWorkflow` orchestration — CLOSED/COMPLETED; PR #71 squash-merged as `34b35cba7bea0c366096bfbfd5d7141743c87189`; repository-level implementation is complete and preserves the exact #34/#36 verification vocabulary, defers optional-main preparation until after Story review delivery succeeds, derives candidate-level Radar occurrences, and emits contract-safe #27 mappings; no production activation occurred, strict Radar handoff remains `DESIRED / NOT DEPLOYED`, natural Breaking live proof remains `UNPROVEN_LIVE / DEFERRED_TO_#37`, and the scheduled Zernio path remains `LIVE_SCHEDULED_PATH_UNPROVEN`
 - #65 NullOne Application Runtime architecture — CLOSED/COMPLETED; the accepted contract establishes NullOne workflow ownership and replaceable provider adapters
 - #66 remove reachable legacy publication instructions/capabilities — CLOSED/COMPLETED; no production activation was implied by repository completion
+- #89 deterministic final publish handoff — CLOSED/COMPLETED; PR #91 squash-merged as `f1315f74ed08ab235f524c3777e86c7d5bb703ee` (`Closes #89`); implementation MERGED, NOT DEPLOYED
+- #90 deterministic Zernio publisher connector — CLOSED/COMPLETED; PR #92 squash-merged as `d790aa78564c9e8889c94e9d3b5a2c0f40db774c` (`Closes #90`); implementation MERGED, NOT DEPLOYED
 
 ### Verified #5 completion — 2026-09-05 18:32–18:34
 PR #39 `Add isolated behavioral regression tests to CI` was verified with local authenticated `gh` and, after the repository became public, independently visible through the GitHub connector.
@@ -1508,7 +1574,7 @@ level with a final verdict of FAIL — see
 `PASS 4 / FAIL 4 / NOT_EXERCISED 7`; completing repo engineering does not
 rewrite historical production evidence or authorize deployment.
 
-### Current Git desired-state M0 execution order — after #81 merge (PR #87)
+### Current Git desired-state M0 execution order — after #89/#90 merge (PR #91/PR #92)
 
 1. #59 is CLOSED/COMPLETED: PR #75 squash-merged as
    `03603698291b2f6e5c0775067f15abb33f87fa63` (foundation PR #73
@@ -1535,13 +1601,29 @@ rewrite historical production evidence or authorize deployment.
    `zernio.drafts.bearer` / `ZERNIO_DRAFT_API_TOKEN` distinct from
    Analytics credential; no credential provisioned; no Zernio draft
    created). Implementation is MERGED; remains NOT DEPLOYED.
-6. NEXT_ENGINEERING_TASK = NEW read-only #37 preflight. The blockers
-   discovered by the prior 2026-09-08 preflight (#79/#80/#81) are now
-   resolved in Git, but this does NOT retroactively turn the historical
-   preflight into READY. A NEW read-only #37 preflight is required against
-   the exact current main (historical 2026-09-07 and 2026-09-08 preflights
-   remain preserved as historical evidence; DO NOT rerun #37 yet; do NOT
-   mark #37 READY; do NOT provision secrets; do NOT deploy).
+6. #89 is CLOSED/COMPLETED: PR #91 squash-merged on `main` as
+   `f1315f74ed08ab235f524c3777e86c7d5bb703ee` (`Closes #89`).
+   Deterministic final publish handoff repository implementation complete
+   (plugin-authenticated ingress, in-process publication core, deterministic
+   notifier; approval/publisher LLMs out of the consequential path).
+   Implementation is MERGED; remains NOT DEPLOYED.
+7. #90 is CLOSED/COMPLETED: PR #92 squash-merged on `main` as
+   `d790aa78564c9e8889c94e9d3b5a2c0f40db774c` (`Closes #90`).
+   Deterministic Zernio REST publisher repository implementation complete
+   (remote-draft preflight, attempts=1 before exactly one PUT promotion,
+   readback clarification; Claude/MCP out of the publication transport;
+   publication credential via protected SecretRef + private pipe, no
+   inherited-env credential, nothing provisioned, no live calls).
+   Implementation is MERGED; remains NOT DEPLOYED.
+8. NEXT_ENGINEERING_TASK = NONE. NEXT_OPERATIONAL_TASK = NEW read-only #37
+   preflight. All known repository M0 engineering blockers
+   (#79/#80/#81/#89/#90) are CLOSED in Git, but this does NOT
+   retroactively turn any historical preflight into READY, and it does NOT
+   mean production is ready or deployed. A NEW read-only #37 preflight is
+   required against the exact current main (historical 2026-09-07 and
+   2026-09-08 preflights remain preserved as historical evidence; DO NOT
+   rerun #37 yet; do NOT mark #37 READY; do NOT provision secrets; do NOT
+   deploy).
 7. Only a `READY_FOR_CONTROLLED_DEPLOYMENT` verdict permits controlled
    deployment under #37; otherwise report the exact blockers with no deploy.
    No ad-hoc deployment is permitted (MERGED != DEPLOYED).
