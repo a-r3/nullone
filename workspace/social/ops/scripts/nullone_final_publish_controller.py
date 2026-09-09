@@ -693,17 +693,81 @@ def _dispatch(envelope: dict[str, Any], workspace: Path, key: bytes) -> dict[str
             post_id,
         )
     except BridgeError:
-        return {"t": "result", "outcome": "REJECTED", "code": 2}
+        return {
+            "t": "result",
+            "outcome": "REJECTED",
+            "code": 2,
+            "publication_state": "REJECTED",
+        }
     try:
         code = execute_authorized(
             post_id, instance_id, envelope, _daemon_key=key, _workspace=workspace
         )
-    except BridgeError as error:
-        return {"t": "result", "outcome": "BLOCKED", "code": 2, "note": str(error)[:120]}
+    except BridgeError:
+        return {
+            "t": "result",
+            "outcome": "BLOCKED",
+            "code": 2,
+            "publication_state": _truthful_state(workspace, post_id, "BLOCKED"),
+        }
     except Exception:
-        return {"t": "result", "outcome": "UNKNOWN", "code": 3}
+        return {
+            "t": "result",
+            "outcome": "UNKNOWN",
+            "code": 3,
+            "publication_state": "UNKNOWN",
+        }
     hint = "fresh_confirmation_required" if code == 2 else "none"
-    return {"t": "result", "outcome": "SETTLED", "code": code, "hint": hint}
+    # Code 2 is always a pre-attempt refusal (attempts==0 proven), so a
+    # non-enum durable state (e.g. NOT_REQUESTED) truthfully maps to BLOCKED.
+    # Any other code with a non-enum state maps to UNKNOWN, never completed.
+    return {
+        "t": "result",
+        "outcome": "SETTLED",
+        "code": code,
+        "hint": hint,
+        "publication_state": _truthful_state(
+            workspace, post_id, "BLOCKED" if code == 2 else "UNKNOWN"
+        ),
+    }
+
+
+# Closed enum of authoritative publication states the daemon may report.
+# Anything outside it (missing manifest, unreadable/corrupt state) maps to
+# UNKNOWN — never to a completion claim.
+_ALLOWED_PUBLICATION_STATES = frozenset(
+    {
+        "PUBLISHED",
+        "PUBLISHING",
+        "FAILED",
+        "CHECK_REQUIRED",
+        "READBACK_FAILED",
+        "UNKNOWN",
+        "BLOCKED",
+        "REJECTED",
+    }
+)
+
+
+def _truthful_state(workspace: Path, post_id: str, fallback: str) -> str:
+    """Re-read authoritative manifest truth for the daemon reply.
+
+    Called AFTER execute_authorized returns, so this is post-execution
+    durable truth, not a prediction. Unreadable or out-of-enum state maps
+    to the fallback (UNKNOWN for settled paths, BLOCKED for refusals).
+    """
+    try:
+        _path, manifest = find_manifest_by_review_post_id(post_id)
+    except BridgeError:
+        if fallback in _ALLOWED_PUBLICATION_STATES:
+            return fallback
+        return "UNKNOWN"
+    state = manifest.get("publication", {}).get("state")
+    if isinstance(state, str) and state in _ALLOWED_PUBLICATION_STATES:
+        return state
+    if fallback in _ALLOWED_PUBLICATION_STATES:
+        return fallback
+    return "UNKNOWN"
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -21,7 +21,7 @@ NODE_SUITES = [
 ]
 EXPECTED_PASSES = {
     "test_plugin_route.js": 9,
-    "test_plugin_index.js": 9,
+    "test_plugin_index.js": 15,
     "test_plugin_link.js": 6,
 }
 

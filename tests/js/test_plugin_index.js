@@ -206,12 +206,18 @@ test("daemon loss is consumed fail-closed with safe text, no LLM fallback", asyn
 
 test("outcome codes map to safe bounded texts", async () => {
   const cases = [
-    [{ t: "result", outcome: "SETTLED", code: 0 }, /tamamlandı/],
-    [{ t: "result", outcome: "SETTLED", code: 2, hint: "fresh_confirmation_required" }, /təsdiq/],
-    [{ t: "result", outcome: "SETTLED", code: 2 }, /blok/],
-    [{ t: "result", outcome: "SETTLED", code: 3 }, /qeyri-müəyyən|uncertain/i],
-    [{ t: "result", outcome: "BLOCKED", code: 2 }, /blok/],
-    [null, /qeyri-müəyyən|uncertain/i],
+    [{ t: "result", outcome: "SETTLED", code: 0, publication_state: "PUBLISHED" }, /tamamlandı/],
+    [{ t: "result", outcome: "SETTLED", code: 0, publication_state: "PUBLISHING" }, /emaldadır/],
+    [{ t: "result", outcome: "SETTLED", code: 0, publication_state: "FAILED" }, /uğursuz/],
+    [{ t: "result", outcome: "SETTLED", code: 0, publication_state: "CHECK_REQUIRED" }, /yoxlama tələb/],
+    [{ t: "result", outcome: "SETTLED", code: 0, publication_state: "READBACK_FAILED" }, /oxunuşu uğursuz|qeyri-müəyyən/],
+    [{ t: "result", outcome: "SETTLED", code: 3, publication_state: "UNKNOWN" }, /qeyri-müəyyən/],
+    [{ t: "result", outcome: "SETTLED", code: 2, publication_state: "BLOCKED", hint: "fresh_confirmation_required" }, /təsdiq/],
+    [{ t: "result", outcome: "SETTLED", code: 2, publication_state: "BLOCKED" }, /blok/],
+    [{ t: "result", outcome: "REJECTED", code: 2, publication_state: "REJECTED" }, /rədd edildi/],
+    [{ t: "result", outcome: "SETTLED", code: 0 }, /qeyri-müəyyən/],
+    [{ t: "result", outcome: "SETTLED", code: 0, publication_state: "SOMETHING_ELSE" }, /qeyri-müəyyən/],
+    [null, /qeyri-müəyyən/],
   ];
   for (const [reply, pattern] of cases) {
     const link = makeLink({ reply });
@@ -220,4 +226,176 @@ test("outcome codes map to safe bounded texts", async () => {
     await handler(ctx);
     assert.match(ctx._replies[0], pattern, JSON.stringify(reply));
   }
+});
+
+test("only PUBLISHED may use the success text (false-positive sweep)", async () => {
+  const states = [
+    "PUBLISHING",
+    "FAILED",
+    "CHECK_REQUIRED",
+    "READBACK_FAILED",
+    "UNKNOWN",
+    "BLOCKED",
+    "REJECTED",
+    null,
+    "SOMETHING_ELSE",
+  ];
+  for (const publication_state of states) {
+    const reply = { t: "result", outcome: "SETTLED", code: 0 };
+    if (publication_state !== null) {
+      reply.publication_state = publication_state;
+    }
+    const link = makeLink({ reply });
+    const handler = registeredHandler(link);
+    const ctx = makeHandlerCtx();
+    await handler(ctx);
+    assert.ok(
+      !ctx._replies[0].includes("Nəşr tamamlandı"),
+      `state ${publication_state} must not claim completion`
+    );
+  }
+  const published = makeLink({
+    reply: { t: "result", outcome: "SETTLED", code: 0, publication_state: "PUBLISHED" },
+  });
+  const handler = registeredHandler(published);
+  const ctx = makeHandlerCtx();
+  await handler(ctx);
+  assert.ok(ctx._replies[0].includes("Nəşr tamamlandı"));
+});
+
+test("A: workspace maps to the exact in-workspace controller path", () => {
+  const resolved = plugin.resolveControllerPath("/tmp/nullone-workspace");
+  assert.equal(
+    resolved,
+    "/tmp/nullone-workspace/social/ops/scripts/nullone_final_publish_controller.py"
+  );
+});
+
+test("B: no duplicated workspace/workspace component", () => {
+  const resolved = plugin.resolveControllerPath("/tmp/nullone-workspace");
+  assert.ok(!resolved.includes("workspace/workspace"), resolved);
+  const deployed = plugin.resolveControllerPath("/home/oem/.openclaw/workspace");
+  assert.equal(
+    deployed,
+    "/home/oem/.openclaw/workspace/social/ops/scripts/nullone_final_publish_controller.py"
+  );
+  assert.ok(!deployed.includes("workspace/workspace"), deployed);
+});
+
+test("C: default registration spawns the exact production-relative path", async () => {
+  const crypto = require("node:crypto");
+  const { EventEmitter } = require("node:events");
+  const seen = { argv: null, key: null };
+  const { canonicalStringify } = plugin;
+  function replyFrame(payload, key) {
+    const body = Buffer.from(canonicalStringify(payload), "utf8");
+    const header = Buffer.alloc(8);
+    Buffer.from("NP1", "utf8").copy(header, 0);
+    header.writeUInt8(1, 3);
+    header.writeUInt32BE(body.length, 4);
+    const mac = crypto.createHmac("sha256", key).update(header).update(body).digest();
+    return Buffer.concat([header, body, mac]);
+  }
+  const fake = new EventEmitter();
+  fake.stdout = new EventEmitter();
+  fake.stdin = {
+    write: (chunk) => {
+      const data = Buffer.from(chunk);
+      if (!seen.key) {
+        assert.equal(data.length, 32);
+        seen.key = data;
+        setImmediate(() =>
+          fake.stdout.emit(
+            "data",
+            replyFrame(
+              { schema: "nullone.publish-reply.v1", t: "ready", reconciled: "0/0/0" },
+              seen.key
+            )
+          )
+        );
+        return true;
+      }
+      if (!seen.envelope) {
+        seen.envelope = data;
+      }
+      // Echo the REAL request_id from the framed envelope (parsed, not guessed).
+      const bodyLen = data.readUInt32BE(4);
+      const envelope = JSON.parse(data.subarray(8, 8 + bodyLen).toString("utf8"));
+      const requestId = envelope.request_id;
+      setImmediate(() =>
+        fake.stdout.emit(
+          "data",
+          replyFrame(
+            {
+              schema: "nullone.publish-reply.v1",
+              t: "result",
+              outcome: "SETTLED",
+              code: "0",
+              publication_state: "PUBLISHED",
+              request_id: requestId,
+            },
+            seen.key
+          )
+        )
+      );
+      return true;
+    },
+  };
+  const spawnFn = (bin, argv, opts) => {
+    seen.argv = argv;
+    seen.opts = opts;
+    return fake;
+  };
+  const api = makeApi();
+  plugin.default.register(
+    api,
+    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
+  );
+  assert.equal(registrations.length, 1);
+  const handler = registrations[0].handler;
+  const ctx = makeHandlerCtx();
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.ok(seen.argv, "spawn must have been invoked");
+  assert.equal(
+    seen.argv[0],
+    "/tmp/nullone-workspace/social/ops/scripts/nullone_final_publish_controller.py"
+  );
+  assert.deepEqual(seen.argv.slice(1), ["daemon"]);
+  assert.ok(!seen.argv[0].includes("workspace/workspace"), seen.argv[0]);
+  assert.ok(ctx._replies[0].includes("Nəşr tamamlandı"));
+});
+
+test("D: missing workspace fails closed with zero spawn", async () => {
+  let spawned = false;
+  const spawnFn = () => {
+    spawned = true;
+    throw new Error("must not spawn");
+  };
+  const api = makeApi();
+  plugin.default.register(api, makeCtx({ workspace: "", spawnFn }));
+  assert.equal(registrations.length, 1);
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(spawned, false);
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /hazır deyil/);
+});
+
+test("E: spawn failure consumes safely and never routes to LLM", async () => {
+  const spawnFn = () => {
+    throw new Error("spawn exploded");
+  };
+  const api = makeApi();
+  plugin.default.register(
+    api,
+    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
+  );
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal("submitText" in result, false);
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /hazır deyil/);
 });

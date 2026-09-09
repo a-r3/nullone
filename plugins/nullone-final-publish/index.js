@@ -25,6 +25,7 @@
  */
 
 const crypto = require("node:crypto");
+const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { definePluginEntry } = require("openclaw/plugin-sdk/plugin-entry");
 const { routeCallback, canonicalStringify } = require("./route");
@@ -37,16 +38,81 @@ const KEY_LEN = 32;
 const HANDSHAKE_TIMEOUT_MS = 15000;
 const REQUEST_TIMEOUT_MS = 120000;
 
+const CONTROLLER_RELATIVE = [
+  "social",
+  "ops",
+  "scripts",
+  "nullone_final_publish_controller.py",
+];
+const CONTROLLER_BASENAME = "nullone_final_publish_controller.py";
+
+/**
+ * Deterministic controller path construction (issue #89 hardening).
+ *
+ * The daemon child runs with cwd = workspace, so a *relative* controller
+ * path would resolve to <workspace>/workspace/... — wrong. The reviewed
+ * controller lives INSIDE the served workspace; the absolute path is
+ * constructed deterministically with node:path.
+ *
+ * @param {string} workspace served workspace root (required, non-empty)
+ * @param {string|undefined} override explicit test/dev override only;
+ *   must be an absolute path to the controller file. Production never sets
+ *   it (no ctx.controllerPath injection is documented or supported).
+ * @throws on missing workspace or on a resolved path escaping the workspace.
+ */
+function resolveControllerPath(workspace, override) {
+  if (typeof workspace !== "string" || workspace.length === 0) {
+    throw new Error("workspace unavailable");
+  }
+  if (override !== undefined && override !== null && override !== "") {
+    if (typeof override !== "string" || !path.isAbsolute(override)) {
+      throw new Error("controller override must be absolute");
+    }
+    if (path.basename(override) !== CONTROLLER_BASENAME) {
+      throw new Error("controller override basename mismatch");
+    }
+    return override;
+  }
+  const root = path.resolve(workspace);
+  const absolute = path.join(root, ...CONTROLLER_RELATIVE);
+  const relative = path.relative(root, absolute);
+  if (
+    relative === "" ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("controller path escapes workspace");
+  }
+  return absolute;
+}
+
 const SAFE_TEXT = {
   published: "✅ Nəşr tamamlandı.",
   publishing: "⏳ Nəşr emaldadır.",
   blocked: "⛔ Təhlükəsiz blok. Yeni ikinci təsdiq tələb olunur.",
   abandoned: "⛔ Köhnə təsdiq qüvvədən düşüb. Yeni ikinci təsdiq tələb olunur.",
   failed: "❌ Nəşr uğursuz oldu. Təkrar cəhd edilməyəcək.",
+  checkRequired: "❓ Nəşr nəticəsi yoxlama tələb edir. Təkrar cəhd edilməyəcək.",
+  readbackFailed:
+    "❓ Nəşr oxunuşu uğursuz oldu. Status qeyri-müəyyəndir. Təkrar cəhd edilməyəcək.",
   unknown: "❓ Nəşr statusu qeyri-müəyyəndir. Təkrar cəhd edilməyəcək.",
   rejected: "⛔ Sorğu rədd edildi.",
   unavailable: "⛔ Nəşr xidməti hazır deyil. Heç nə yayımlanmadı.",
 };
+
+// Authoritative publication states the daemon may report (closed enum).
+// Anything else (missing, malformed, unknown) maps to unknown — never to
+// the success text.
+const PUBLICATION_STATES = new Set([
+  "PUBLISHED",
+  "PUBLISHING",
+  "FAILED",
+  "CHECK_REQUIRED",
+  "READBACK_FAILED",
+  "UNKNOWN",
+  "BLOCKED",
+  "REJECTED",
+]);
 
 function buildFrame(envelope, key) {
   const body = Buffer.from(canonicalStringify(envelope), "utf8");
@@ -288,26 +354,49 @@ class DaemonLink {
 }
 
 function outcomeText(reply) {
-  if (!reply || reply.t !== "result") {
-    return SAFE_TEXT.unknown;
-  }
-  const code = Number(reply.code);
-  if (code === 0) {
-    return SAFE_TEXT.published;
-  }
-  if (code === 2) {
-    const hint = String(reply.hint || "");
-    if (hint === "fresh_confirmation_required") {
-      return SAFE_TEXT.abandoned;
+  // Domain truth FIRST: the user-facing text is determined by the
+  // authoritative publication_state re-read from durable manifest truth
+  // after execution. The numeric return code is process/control information
+  // only and MUST NOT determine "published" by itself.
+  const state =
+    reply && typeof reply.publication_state === "string"
+      ? reply.publication_state
+      : null;
+  if (state !== null && PUBLICATION_STATES.has(state)) {
+    switch (state) {
+      case "PUBLISHED":
+        return SAFE_TEXT.published;
+      case "PUBLISHING":
+        return SAFE_TEXT.publishing;
+      case "FAILED":
+        return SAFE_TEXT.failed;
+      case "CHECK_REQUIRED":
+        return SAFE_TEXT.checkRequired;
+      case "READBACK_FAILED":
+        return SAFE_TEXT.readbackFailed;
+      case "REJECTED":
+        return SAFE_TEXT.rejected;
+      case "BLOCKED": {
+        const hint = reply && typeof reply.hint === "string" ? reply.hint : "";
+        if (hint === "fresh_confirmation_required") {
+          return SAFE_TEXT.abandoned;
+        }
+        return SAFE_TEXT.blocked;
+      }
+      case "UNKNOWN":
+      default:
+        return SAFE_TEXT.unknown;
     }
-    return SAFE_TEXT.blocked;
   }
+  // Missing/malformed/unknown state: never claim completion.
   return SAFE_TEXT.unknown;
 }
 
 /**
  * Build the interactive handler with an injected daemon link (production
- * constructs the real link; offline tests inject a fake).
+ * constructs the real link; offline tests inject a fake). A null link
+ * (failed registration) consumes every publish callback safely with zero
+ * daemon contact and zero LLM fallback.
  */
 function buildHandler(link) {
   return async (handlerCtx) => {
@@ -322,6 +411,15 @@ function buildHandler(link) {
     }
     if (routed.decision === "consume") {
       // Malformed publish-shaped callback: swallow safely, zero side effects.
+      return { handled: true };
+    }
+    if (!link) {
+      // Registration failed (workspace/path unavailable): fail closed.
+      try {
+        await handlerCtx.respond.reply({ text: SAFE_TEXT.unavailable });
+      } catch {
+        // Best-effort only.
+      }
       return { handled: true };
     }
     // Deterministic publish route. Authorization was established by ingress
@@ -387,6 +485,8 @@ module.exports = {
   DaemonLink,
   outcomeText,
   SAFE_TEXT,
+  resolveControllerPath,
+  CONTROLLER_RELATIVE,
 };
 
 module.exports.default = definePluginEntry({
@@ -394,15 +494,27 @@ module.exports.default = definePluginEntry({
     const workspace =
       (ctx && ctx.workspace) || process.env.NULLONE_WORKSPACE || "";
     const pythonBin = (ctx && ctx.pythonBin) || "python3";
-    const controllerPath =
-      (ctx && ctx.controllerPath) ||
-      "workspace/social/ops/scripts/nullone_final_publish_controller.py";
-    const link = new DaemonLink(pythonBin, controllerPath, workspace);
+    // Test/dev override only (see resolveControllerPath); production derives
+    // the absolute path deterministically from the served workspace.
+    const override =
+      ctx && ctx.controllerPath ? ctx.controllerPath : undefined;
+    let link = null;
+    let linkError = null;
+    try {
+      const controllerPath = resolveControllerPath(workspace, override);
+      const spawnFn = (ctx && ctx.spawnFn) || undefined;
+      link = new DaemonLink(pythonBin, controllerPath, workspace, spawnFn);
+    } catch (error) {
+      // Fail closed at registration: the handler below stays installed but
+      // every publish callback is consumed safely with zero daemon contact
+      // and zero LLM fallback.
+      linkError = error;
+    }
 
     api.registerInteractiveHandler({
       channel: "telegram",
       namespace: "texbrif",
-      handler: buildHandler(link),
+      handler: buildHandler(link, linkError),
     });
   },
 });

@@ -528,11 +528,70 @@ class _recording_core:
         raise AssertionError("core must not run")
 
 
+class TruthfulStateTests(unittest.TestCase):
+    def test_missing_manifest_maps_to_fallback(self) -> None:
+        with IsolatedWorkspace() as root:
+            self.assertEqual(
+                controller._truthful_state(root, POST_ID, "BLOCKED"), "BLOCKED"
+            )
+            self.assertEqual(
+                controller._truthful_state(root, POST_ID, "NOPE"), "UNKNOWN"
+            )
+
+    def test_out_of_enum_state_maps_to_fallback(self) -> None:
+        with IsolatedWorkspace() as root:
+            manifest_path, _manifest = make_manifest(root)
+            # NOT_REQUESTED is a pre-attempt state, never a completion claim.
+            self.assertEqual(
+                controller._truthful_state(root, POST_ID, "BLOCKED"), "BLOCKED"
+            )
+            self.assertEqual(
+                controller._truthful_state(root, POST_ID, "UNKNOWN"), "UNKNOWN"
+            )
+
+    def test_enum_state_passes_through(self) -> None:
+        with IsolatedWorkspace() as root:
+            manifest_path, _manifest = make_manifest(root)
+            _path, current = common.load_manifest(manifest_path)
+            current["publication"].update({"attempts": 1, "state": "CHECK_REQUIRED"})
+            common.atomic_write_json(manifest_path, current)
+            self.assertEqual(
+                controller._truthful_state(root, POST_ID, "UNKNOWN"),
+                "CHECK_REQUIRED",
+            )
+
+    def test_daemon_blocked_reply_carries_blocked_state(self) -> None:
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            key = ipc.generate_key()
+
+            def _blocked(_mp, _m):
+                raise BridgeError("Final read-only publication preflight failed")
+
+            with (
+                patch.object(controller, "bridge_core", side_effect=_blocked),
+                patch.object(controller, "notify_fn", return_value=0),
+            ):
+                thread, result, w_in, r_out = self._run_daemon(root, key)
+                reply = DaemonProtocolTests._request(w_in, r_out, key, make_envelope())
+                self.assertEqual(int(reply.get("code")), 2)
+                self.assertEqual(reply.get("publication_state"), "BLOCKED")
+                os.close(w_in)
+                thread.join(timeout=30)
+
+    def _run_daemon(self, root, key):
+        return DaemonProtocolTests._run_daemon(root, key)
+
+    def _request(self, w_in, r_out, key, envelope):
+        return DaemonProtocolTests._request(w_in, r_out, key, envelope)
+
+
 class DaemonProtocolTests(unittest.TestCase):
     # NOTE: pipe IO uses select + raw os.read with hard deadlines.
     # Buffered-reader blocking reads proved hang-prone under host CPU
     # throttling; deadline loops fail loudly instead of hanging the suite.
-    def _run_daemon(self, root, key):
+    @staticmethod
+    def _run_daemon(root, key):
         r_in, w_in = os.pipe()
         r_out, w_out = os.pipe()
         os.set_blocking(r_out, False)
@@ -553,11 +612,12 @@ class DaemonProtocolTests(unittest.TestCase):
         thread.start()
         # Handshake: raw key first (private spawn pipe), then framed READY.
         os.write(w_in, key)
-        reply = self._read_reply(r_out, key, "READY")
+        reply = DaemonProtocolTests._read_reply(r_out, key, "READY")
         assert reply.get("t") == "ready", reply
         return thread, result, w_in, r_out
 
-    def _read_reply(self, fd, key, what, deadline_s=30):
+    @staticmethod
+    def _read_reply(fd, key, what, deadline_s=30):
         import select
 
         buffered = b""
@@ -582,9 +642,10 @@ class DaemonProtocolTests(unittest.TestCase):
                 raise AssertionError(f"{what}: pipe EOF")
             buffered += chunk
 
-    def _request(self, w_in, r_out, key, envelope):
+    @staticmethod
+    def _request(w_in, r_out, key, envelope):
         os.write(w_in, ipc.encode_frame(envelope, key))
-        return self._read_reply(r_out, key, "request")
+        return DaemonProtocolTests._read_reply(r_out, key, "request")
 
     def test_full_daemon_publish_flow(self) -> None:
         with IsolatedWorkspace() as root:
@@ -595,12 +656,14 @@ class DaemonProtocolTests(unittest.TestCase):
                 patch.object(controller, "notify_fn", return_value=0),
             ):
                 thread, result, w_in, r_out = self._run_daemon(root, key)
-                reply = self._request(w_in, r_out, key, make_envelope())
+                reply = DaemonProtocolTests._request(w_in, r_out, key, make_envelope())
                 self.assertEqual(reply.get("t"), "result")
                 # Daemon replies stringify values (bounded sanitized frame).
                 self.assertEqual(int(reply.get("code")), 0)
                 # Reply correlation: exact request_id echo.
                 self.assertEqual(reply.get("request_id"), "0" * 32)
+                # Domain truth: authoritative publication_state, not code.
+                self.assertEqual(reply.get("publication_state"), "PUBLISHED")
                 os.close(w_in)
                 thread.join(timeout=10)
             self.assertEqual(result.get("code"), 0)
@@ -625,7 +688,7 @@ class DaemonProtocolTests(unittest.TestCase):
                 forged = bytearray(ipc.encode_frame(make_envelope(), key))
                 forged[-1] ^= 0x01
                 os.write(w_in, bytes(forged))
-                reply = self._read_reply(r_out, key, "bad-hmac")
+                reply = DaemonProtocolTests._read_reply(r_out, key, "bad-hmac")
                 self.assertEqual(reply.get("t"), "error")
                 os.close(w_in)
                 thread.join(timeout=30)
