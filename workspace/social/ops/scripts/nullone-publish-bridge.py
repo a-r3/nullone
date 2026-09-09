@@ -4,100 +4,84 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+from typing import Any
 
 from nullone_bridge_common import (
-    CANONICAL_ACCOUNT_ID,
     BridgeError,
     atomic_write_json,
     load_manifest,
     now_iso,
-    resolve_workspace_path,
     workspace_relative,
 )
-from nullone_claude import run_structured
+from nullone_publish_provider_factory import (
+    build_production_publish_provider,
+)
+from nullone_secret_provider import SecretProvider
 from nullone_state import (
     mark_queue_published_exact,
     record_publication_event,
 )
+from nullone_zernio_publish_adapter import (
+    PROMOTE_AMBIGUOUS_REASON,
+    PROMOTE_REJECTED_REASON,
+    READBACK_FAILED_REASON,
+    PublishAdapterError,
+    PublishAmbiguousError,
+    PublishConnectorUnauthorizedError,
+    PublishConnectorUnavailableError,
+    PublishPreflightBlockedError,
+    PublishReadbackFailedError,
+    ZernioPublishProvider,
+    build_expected_snapshot,
+    classify_readback_truth,
+)
+
+# Production provider construction seam (#90). The ONLY publication
+# secret source is the in-memory provider installed here by the
+# controller daemon at startup from the credential the plugin delivered
+# over the authenticated private pipe. There is no environment fallback:
+# with nothing installed the factory fails closed before any attempt.
+# The deterministic controller calls execute_loaded IN-PROCESS; offline
+# tests substitute a fake provider factory here without touching
+# production wiring.
+_installed_secret_provider: SecretProvider | None = None
 
 
-PREFLIGHT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": ["READY", "BLOCKED"],
-        },
-        "review_draft_ok": {"type": "boolean"},
-        "account_ok": {"type": "boolean"},
-        "media_ok": {"type": "boolean"},
-        "error": {"type": "string"},
-    },
-    "required": [
-        "status",
-        "review_draft_ok",
-        "account_ok",
-        "media_ok",
-        "error",
-    ],
-    "additionalProperties": False,
-}
+def install_publish_secret_provider(
+    provider: SecretProvider,
+) -> None:
+    """Install the single in-memory publication secret source.
+
+    Called exactly once by the controller daemon at startup, and by
+    offline tests with fakes. Anything without `get_required` is a
+    programming defect (AttributeError on use, never a domain result).
+    """
+    global _installed_secret_provider
+    _installed_secret_provider = provider
 
 
-PUBLISH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": [
-                "PUBLISH_CALLED",
-                "BLOCKED",
-            ],
-        },
-        "live_zernio_post_id": {
-            "type": "string"
-        },
-        "returned_status": {
-            "type": "string"
-        },
-        "error": {"type": "string"},
-    },
-    "required": [
-        "status",
-        "live_zernio_post_id",
-        "returned_status",
-        "error",
-    ],
-    "additionalProperties": False,
-}
+def provider_factory() -> ZernioPublishProvider:
+    """Build the deterministic publisher from the installed secret source.
 
+    Fails closed (BridgeError, attempts untouched) when controller
+    startup did not deliver a credential -- notably for raw standalone
+    CLI invocation, which can never publish.
+    """
+    if _installed_secret_provider is None:
+        raise BridgeError(
+            "Publication credential unavailable: controller startup "
+            "did not deliver it over the private pipe"
+        )
+    return build_production_publish_provider(
+        secret_provider=_installed_secret_provider
+    )
 
-READBACK_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": [
-                "CHECKED",
-                "BLOCKED",
-            ],
-        },
-        "live_status": {"type": "string"},
-        "platform_status": {"type": "string"},
-        "platform_post_id": {"type": "string"},
-        "permalink": {"type": "string"},
-        "error": {"type": "string"},
-    },
-    "required": [
-        "status",
-        "live_status",
-        "platform_status",
-        "platform_post_id",
-        "permalink",
-        "error",
-    ],
-    "additionalProperties": False,
-}
+# Fixed, generic failure text for a readback that proves the provider
+# rejected the promoted post. Never echoes response bodies.
+READBACK_PROVES_FAILED_REASON = (
+    "Zernio reports the publication failed; retry forbidden."
+)
 
 
 def require_final_authorization(m: dict) -> None:
@@ -160,137 +144,20 @@ def require_final_authorization(m: dict) -> None:
             )
 
 
-def preflight_prompt(m: dict) -> str:
-    review_id = m["review"][
-        "zernio_draft_id"
-    ]
+def _platform_post_url_from(body: Any) -> str | None:
+    """Copy ONLY the documented platformPostUrl string when present.
 
-    media_urls = [
-        x["public_url"]
-        for x in m["media"]
-    ]
-
-    return f"""
-NULLONE PUBLISH BRIDGE — READ-ONLY FINAL PREFLIGHT.
-
-Do not create, update, schedule, delete or publish anything.
-
-Canonical Instagram account ID:
-{CANONICAL_ACCOUNT_ID}
-
-Review draft ID:
-{review_id}
-
-Verify:
-1. canonical account exists;
-2. review draft exists and status is draft;
-3. review draft targets Instagram and canonical account ID;
-4. every approved public media URL remains valid.
-
-Approved media URLs:
-{json.dumps(media_urls, ensure_ascii=False)}
-
-A stale cached username such as texbrif is NOT an error
-when the canonical account ID matches.
-
-Return READY only when every invariant passes.
-"""
-
-
-def publish_prompt(m: dict) -> str:
-    caption_path = resolve_workspace_path(
-        m["caption"]["file"]
-    )
-
-    caption = caption_path.read_text(
-        encoding="utf-8"
-    )
-
-    media_urls = [
-        x["public_url"]
-        for x in m["media"]
-    ]
-
-    story_instruction = (
-        'Publish as Instagram Story contentType="story".'
-        if m["format"] == "STORY"
-        else
-        "Publish as normal Instagram feed/carousel content."
-    )
-
-    return f"""
-NULLONE PUBLISH BRIDGE — FINAL HUMAN-AUTHORIZED PUBLICATION.
-
-This invocation is reached only after the local manifest validator
-confirmed:
-
-source = texbrif-approval
-operator = Rauf
-human_confirmation = two_step
-first_stage = true
-final_publish = true
-publication.attempts = 0
-verification = PASS
-
-The second Telegram human publication confirmation is therefore present.
-
-Publish the exact approved content NOW.
-
-Use ONLY:
-mcp__zernio__posts_publish_now
-
-Call posts_publish_now MAXIMUM ONE TIME.
-
-Canonical account ID:
-{CANONICAL_ACCOUNT_ID}
-
-FORMAT:
-{m["format"]}
-
-{story_instruction}
-
-EXACT APPROVED CAPTION — verbatim:
-{json.dumps(caption, ensure_ascii=False)}
-
-EXACT APPROVED MEDIA URLS — preserve order:
-{json.dumps(media_urls, ensure_ascii=False)}
-
-Do not:
-- rewrite caption
-- replace media
-- schedule
-- create a draft
-- retry
-- call posts_publish_now twice
-
-Return the new live Zernio post ID from that single call.
-
-If the result is ambiguous, return the information you actually received.
-Never make a second publish call.
-"""
-
-
-def readback_prompt(
-    live_post_id: str,
-) -> str:
-    return f"""
-NULLONE PUBLISH BRIDGE — READ-ONLY RESULT CHECK.
-
-Check this exact Zernio post ID once:
-
-{live_post_id}
-
-Use posts_get only.
-
-Do not create, update, schedule, delete or publish anything.
-
-Return:
-- exact Zernio status
-- Instagram platform status
-- platform post ID when available
-- exact permalink when available
-- actual platform error if present
-"""
+    Never fabricate: anything absent, empty, or non-string becomes None.
+    """
+    if not isinstance(body, dict):
+        return None
+    post = body.get("post")
+    if not isinstance(post, dict):
+        return None
+    url = post.get("platformPostUrl")
+    if isinstance(url, str) and url:
+        return url
+    return None
 
 
 def execute_loaded(manifest_path: Path, m: dict) -> int:
@@ -301,33 +168,61 @@ def execute_loaded(manifest_path: Path, m: dict) -> int:
     decision and the attempts=1 ownership transition. This function itself
     never acquires review_post_lock; the caller owns the lock exactly once.
 
-    Semantics are unchanged from the historical CLI path: read-only
-    preflight, attempts=1 + PUBLISH_IN_FLIGHT persisted BEFORE the single
-    provider call, ambiguity -> UNKNOWN, no retry, readback after attempt.
-    The Claude/MCP provider transport inside is unchanged (#90 owns it).
+    Consequential path (#90), zero model involvement after the final human
+    click: local authorization gate -> remote-draft read-only preflight
+    against the approved manifest -> attempts=1 + PUBLISH_IN_FLIGHT
+    persisted BEFORE the single network write -> exactly ONE PUT
+    /v1/posts/{reviewPostId} with the minimal promotion payload ->
+    read-only readback that clarifies truth but can never authorize
+    another PUT. Ambiguity -> UNKNOWN, no retry, ever.
     """
     require_final_authorization(m)
 
-    preflight = run_structured(
-        prompt=preflight_prompt(m),
-        allowed_tools=[
-            "mcp__zernio__accounts_list",
-            "mcp__zernio__posts_get",
-            "mcp__zernio__validate_media",
-        ],
-        schema=PREFLIGHT_SCHEMA,
-        max_turns=8,
-    )
-
-    if (
-        preflight.get("status") != "READY"
-        or not preflight.get("review_draft_ok")
-        or not preflight.get("account_ok")
-        or not preflight.get("media_ok")
-    ):
+    # Exact remote-draft expectations derived from the approved immutable
+    # manifest. No network yet; failure blocks with attempts untouched.
+    try:
+        expected = build_expected_snapshot(m)
+    except PublishPreflightBlockedError as exc:
         raise BridgeError(
-            "Final read-only publication preflight failed"
-        )
+            "Approved manifest cannot supply exact publication expectations"
+        ) from exc
+
+    post_id = expected["post_id"]
+
+    # Resolve the publication credential behind the reviewed secret
+    # boundary (controller process memory only). Absent credential fails
+    # BEFORE any attempt is consumed.
+    try:
+        provider = provider_factory()
+    except (
+        PublishConnectorUnauthorizedError,
+        PublishConnectorUnavailableError,
+    ) as exc:
+        raise BridgeError(str(exc)) from None
+
+    # Read-only remote draft preflight BEFORE publication.attempts
+    # becomes 1. Any contradiction blocks with attempts 0 and zero PUT.
+    # The remote draft is never modified to make it match.
+    try:
+        provider.preflight(post_id, expected)
+    except PublishPreflightBlockedError as exc:
+        raise BridgeError(
+            "Final remote-draft publication preflight failed; "
+            "fresh human confirmation required after remediation"
+        ) from exc
+    except (
+        PublishConnectorUnauthorizedError,
+        PublishConnectorUnavailableError,
+    ) as exc:
+        raise BridgeError(str(exc)) from None
+    except PublishAdapterError as exc:
+        # Any other transport-level deviation before the attempt
+        # (redirect refused, oversize body, unexpected shape) blocks
+        # with attempts untouched.
+        raise BridgeError(
+            "Final remote-draft publication preflight failed; "
+            "fresh human confirmation required after remediation"
+        ) from exc
 
     # Critical idempotency boundary.
     # From here on publication MUST NEVER be automatically retried.
@@ -340,175 +235,103 @@ def execute_loaded(manifest_path: Path, m: dict) -> int:
         m,
     )
 
+    # Exactly ONE consequential PUT. The provider performs no retry; any
+    # ambiguity surfaces as PublishAmbiguousError with the attempt
+    # already consumed.
     try:
-        result = run_structured(
-            prompt=publish_prompt(m),
-            allowed_tools=[
-                "mcp__zernio__posts_publish_now",
-            ],
-            schema=PUBLISH_SCHEMA,
-            max_turns=4,
-        )
-
+        disposition, _put_status, put_body = provider.promote_once(post_id)
+    except PublishAmbiguousError:
+        disposition, _put_status, put_body = ("AMBIGUOUS", 0, None)
     except Exception:
-        m["publication"]["state"] = "UNKNOWN"
-        m["publication"]["error"] = (
-            "Publish invocation ended ambiguously"
-        )
-
-        atomic_write_json(
+        _persist_unknown(
             manifest_path,
             m,
+            PROMOTE_AMBIGUOUS_REASON,
         )
-        raise
-
-    if result.get("status") != "PUBLISH_CALLED":
-        m["publication"]["state"] = "UNKNOWN"
-        m["publication"]["error"] = (
-            "Publish result was not unambiguously accepted"
-        )
-
-        atomic_write_json(
-            manifest_path,
-            m,
-        )
-
         raise BridgeError(
             "Publication result ambiguous; retry forbidden"
-        )
+        ) from None
 
-    live_id = result.get(
-        "live_zernio_post_id",
-        "",
-    ).strip()
+    put_post_url = _platform_post_url_from(put_body)
 
-    if not live_id:
-        m["publication"]["state"] = "UNKNOWN"
-        m["publication"]["error"] = (
-            "Publish call returned no live post ID"
-        )
-
-        atomic_write_json(
-            manifest_path,
-            m,
-        )
-
-        raise BridgeError(
-            "Live post ID missing; retry forbidden"
-        )
-
-    m["publication"][
-        "live_zernio_post_id"
-    ] = live_id
-
-    m["publication"]["state"] = "PUBLISH_ACCEPTED"
-
-    atomic_write_json(
-        manifest_path,
-        m,
-    )
-
-    # The consequential live call has been accepted.
-    # Write authoritative state BEFORE readback so even a later
-    # readback failure cannot allow a duplicate publication.
-    record_publication_event(
-        m,
-        "PUBLISH_ACCEPTED",
-    )
-
-    # Read-only check after the one and only live write.
-    try:
-        checked = run_structured(
-            prompt=readback_prompt(live_id),
-            allowed_tools=[
-                "mcp__zernio__posts_get",
-            ],
-            schema=READBACK_SCHEMA,
-            max_turns=4,
-        )
-
-    except Exception:
-        m["publication"]["state"] = "READBACK_FAILED"
-        m["publication"]["error"] = (
-            "Publish accepted but readback failed; "
-            "do not retry publication"
-        )
-
-        atomic_write_json(
-            manifest_path,
-            m,
-        )
-        raise
-
-    if checked.get("status") != "CHECKED":
-        m["publication"]["state"] = "READBACK_FAILED"
-        m["publication"]["error"] = (
-            "Post readback was not conclusive; "
-            "do not retry publication"
-        )
-
-        atomic_write_json(
-            manifest_path,
-            m,
-        )
-
-        raise BridgeError(
-            "Readback inconclusive; publication retry forbidden"
-        )
-
-    live_status = checked.get(
-        "live_status",
-        "",
-    ).lower()
-
-    platform_status = checked.get(
-        "platform_status",
-        "",
-    ).lower()
-
-    if (
-        live_status == "published"
-        and platform_status == "published"
-    ):
-        final_state = "PUBLISHED"
-
-    elif live_status in {
-        "publishing",
-        "processing",
-        "queued",
-    }:
-        final_state = "PUBLISHING"
-
-    elif live_status in {
-        "failed",
-        "error",
-    }:
-        final_state = "FAILED"
-
+    if disposition == "REJECTED":
+        # Documented definite request rejection: terminal FAILED. The
+        # readback below can still adopt a truer state if the provider
+        # contradicts the rejection, but it can never authorize a PUT.
+        provisional = "FAILED"
+    elif disposition == "NEEDS_READBACK":
+        provisional = "PENDING_READBACK"
+        # The consequential write was issued. Record the authoritative
+        # event BEFORE readback so even a later readback failure cannot
+        # allow a duplicate publication.
+        m["publication"]["live_zernio_post_id"] = post_id
+        atomic_write_json(manifest_path, m)
+        record_publication_event(m, "PUBLISH_ACCEPTED")
     else:
-        final_state = "CHECK_REQUIRED"
+        provisional = "UNKNOWN"
 
-    m["publication"]["state"] = final_state
-    m["publication"]["platform_post_id"] = (
-        checked.get("platform_post_id") or None
-    )
-    m["publication"]["permalink"] = (
-        checked.get("permalink") or None
-    )
-    m["publication"]["last_checked_at"] = now_iso()
-    m["publication"]["error"] = (
-        checked.get("error") or None
-    )
+    # Read-only clarification AFTER the one PUT. Readback classifies
+    # truth but NEVER authorizes another PUT.
+    try:
+        truth = provider.readback(post_id, expected)
+    except Exception:
+        if provisional == "FAILED":
+            _persist_state(
+                manifest_path,
+                m,
+                state="FAILED",
+                error=PROMOTE_REJECTED_REASON,
+                permalink=put_post_url,
+                live_post_id=post_id,
+            )
+            record_publication_event(m, "FAILED")
+            return 0
+        if provisional == "PENDING_READBACK":
+            _persist_state(
+                manifest_path,
+                m,
+                state="READBACK_FAILED",
+                error=READBACK_FAILED_REASON,
+                permalink=put_post_url,
+                live_post_id=post_id,
+            )
+            record_publication_event(m, "READBACK_FAILED")
+            return 0
+        _persist_unknown(manifest_path, m, PROMOTE_AMBIGUOUS_REASON)
+        raise BridgeError(
+            "Publication result ambiguous; retry forbidden"
+        ) from None
 
-    atomic_write_json(
+    permalink = truth.get("platform_post_url") or put_post_url
+    classified = classify_readback_truth(truth)
+    if provisional == "FAILED" and classified not in (
+        "PUBLISHED",
+        "PUBLISHING",
+    ):
+        # A documented definite rejection stands: a readback that merely
+        # confirms the un-published draft (or any other non-delivery
+        # state) is consistent with the rejection, not a reason to
+        # soften it. Only proven delivery overrides the rejection --
+        # and even then no second PUT is ever issued.
+        final_state = "FAILED"
+        error: str | None = PROMOTE_REJECTED_REASON
+    else:
+        final_state = classified
+        if final_state == "FAILED":
+            error = READBACK_PROVES_FAILED_REASON
+        else:
+            error = None
+
+    _persist_state(
         manifest_path,
         m,
+        state=final_state,
+        error=error,
+        permalink=permalink,
+        live_post_id=post_id,
     )
 
-    record_publication_event(
-        m,
-        final_state,
-    )
+    record_publication_event(m, final_state)
 
     if final_state == "PUBLISHED":
         mark_queue_published_exact(
@@ -524,7 +347,7 @@ def execute_loaded(manifest_path: Path, m: dict) -> int:
         f"MANIFEST={workspace_relative(manifest_path)}"
     )
     print(
-        f"LIVE_ZERNIO_POST_ID={live_id}"
+        f"LIVE_ZERNIO_POST_ID={post_id}"
     )
     print(
         f"PUBLICATION_STATE={final_state}"
@@ -543,6 +366,52 @@ def execute_loaded(manifest_path: Path, m: dict) -> int:
         )
 
     return 0
+
+
+def _persist_state(
+    manifest_path: Path,
+    m: dict,
+    *,
+    state: str,
+    error: str | None,
+    permalink: str | None,
+    live_post_id: str,
+) -> None:
+    """Persist a terminal publication state.
+
+    Metadata rule: live_zernio_post_id is the promoted review post (the
+    PUT promotes the SAME post, it never mints a new one). permalink is
+    copied ONLY from a documented platformPostUrl string when actually
+    present. platform_post_id is never fabricated and stays empty unless
+    a documented provider field supplies it -- no such field exists in
+    the current contract, so it is always None here.
+    """
+    m["publication"]["live_zernio_post_id"] = live_post_id
+    m["publication"]["state"] = state
+    m["publication"]["platform_post_id"] = None
+    m["publication"]["permalink"] = permalink
+    m["publication"]["last_checked_at"] = now_iso()
+    m["publication"]["error"] = error
+
+    atomic_write_json(
+        manifest_path,
+        m,
+    )
+
+
+def _persist_unknown(
+    manifest_path: Path,
+    m: dict,
+    reason: str,
+) -> None:
+    m["publication"]["state"] = "UNKNOWN"
+    m["publication"]["error"] = reason
+    m["publication"]["last_checked_at"] = now_iso()
+
+    atomic_write_json(
+        manifest_path,
+        m,
+    )
 
 
 def execute(manifest_arg: str) -> int:
@@ -608,9 +477,19 @@ def self_test() -> int:
             "Human authorization self-test failed"
         )
 
+    # Deterministic transport seam: the minimal promotion payload is
+    # exact, and the bridge module carries no model transport.
+    from nullone_zernio_publish_adapter import build_promote_payload
+
+    assert build_promote_payload() == {
+        "isDraft": False,
+        "publishNow": True,
+    }
+
     print("PUBLISH_BRIDGE_SELF_TEST=PASS")
     print("IDEMPOTENCY_GUARD=PASS")
     print("TWO_STEP_AUTH_GUARD=PASS")
+    print("DETERMINISTIC_TRANSPORT=PASS")
     print("EXTERNAL_CALLS=0")
 
     return 0

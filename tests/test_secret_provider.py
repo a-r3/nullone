@@ -122,7 +122,8 @@ class EnvironmentSecretProviderTests(unittest.TestCase):
     def test_legacy_alias_mapping_not_present(self):
         provider = self._provider()
         self.assertNotIn("zernio.bearer.legacy", provider.ENV_VAR_BY_SECRET_ID)
-        # Two bindings: analytics + drafts (#81)
+        # Two inherited-env bindings: analytics + drafts (#81). The
+        # publication identity (#90) is intentionally NOT env-bound.
         self.assertEqual(len(provider.ENV_VAR_BY_SECRET_ID), 2)
 
 

@@ -21,11 +21,28 @@ const {
   canonicalStringify,
 } = require("../../plugins/nullone-final-publish/route");
 
+// Pipe-delivered test credential. Memory-only, never env/argv (asserted).
+const TEST_TOKEN = "test-pipe-token-do-not-log";
+
 before(() => {
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     if (request === "openclaw/plugin-sdk/plugin-entry") {
       return { definePluginEntry: (entry) => entry };
+    }
+    if (request === "openclaw/plugin-sdk/secret-input-runtime") {
+      return {
+        resolveRequiredConfiguredSecretRefInputString: async ({ value }) => {
+          if (
+            value &&
+            value.source === "store" &&
+            value.id === "ZERNIO_PUBLISH_API_TOKEN"
+          ) {
+            return { value: "resolved-store-token" };
+          }
+          return { unresolvedRefReason: "not configured" };
+        },
+      };
     }
     return originalLoad.call(this, request, parent, isMain);
   };
@@ -81,6 +98,7 @@ class FakeChild extends EventEmitter {
   constructor() {
     super();
     this.key = null;
+    this.startupFrame = null;
     this.written = [];
     this.stdin = {
       write: (chunk) => {
@@ -90,6 +108,12 @@ class FakeChild extends EventEmitter {
           this.key = data;
           // Async like real IPC: the plugin arms its handshake after write.
           setImmediate(() => this.stdout.emit("data", readyFrame(this.key)));
+          return true;
+        }
+        if (!this.startupFrame) {
+          // Second write is the bounded startup credential frame (#90);
+          // consumed separately, never counted as a request envelope.
+          this.startupFrame = data;
           return true;
         }
         this.written.push(data);
@@ -115,8 +139,17 @@ function makeLink(fake, opts) {
     "controller.py",
     "/tmp/ws",
     spawnFn,
-    opts || { requestTimeoutMs: 500, handshakeTimeoutMs: 1000 }
+    {
+      requestTimeoutMs: 500,
+      handshakeTimeoutMs: 1000,
+      resolvePublishToken: async () => TEST_TOKEN,
+      ...(opts || {}),
+    }
   );
+}
+
+function parseStartupFrame(buffer, key) {
+  return parseRequestFrame(buffer, key);
 }
 
 function envelope(id) {
@@ -258,6 +291,7 @@ test("F: spawn failure is pre-dispatch (dispatched=false)", async () => {
   const link = new plugin.DaemonLink("python3", "controller.py", "/tmp/ws", spawnFn, {
     requestTimeoutMs: 200,
     handshakeTimeoutMs: 200,
+    resolvePublishToken: async () => TEST_TOKEN,
   });
   const error = await link.request(envelope("f".repeat(32))).then(
     () => null,
@@ -297,4 +331,187 @@ test("H: post-dispatch daemon death carries dispatched=true", async () => {
   );
   assert.ok(error instanceof Error);
   assert.equal(error.dispatched, true);
+});
+
+test("S1: startup credential frame follows the key before any envelope", async () => {
+  const fake = new FakeChild();
+  const link = makeLink(fake);
+  const promise = link.request(envelope("e".repeat(32)));
+  for (let i = 0; i < 100 && !fake.startupFrame; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(fake.startupFrame, "startup frame must be the second write");
+  const parsed = parseStartupFrame(fake.startupFrame, fake.key);
+  assert.equal(parsed.schema, "nullone.publish-startup.v1");
+  assert.equal(parsed.publish_token, TEST_TOKEN);
+  assert.deepEqual(Object.keys(parsed).sort(), ["publish_token", "schema"]);
+  fake.stdout.emit("data", resultFrame(fake.key, "e".repeat(32), 0));
+  await promise;
+});
+
+test("S2: token never enters spawn argv or environment", async () => {
+  const seen = {};
+  function fakeForEnvTest() {
+    const child = new FakeChild();
+    const inner = child.stdin.write;
+    let writes = 0;
+    child.stdin.write = (chunk) => {
+      writes += 1;
+      const result = inner(chunk);
+      if (writes === 2) {
+        setImmediate(() =>
+          child.stdout.emit("data", readyFrame(child.key))
+        );
+      }
+      return result;
+    };
+    child.onFrame = (data) => {
+      const parsed = parseRequestFrame(data, child.key);
+      setImmediate(() =>
+        child.stdout.emit(
+          "data",
+          resultFrame(child.key, parsed.request_id, 0)
+        )
+      );
+    };
+    return child;
+  }
+  const link = new plugin.DaemonLink(
+    "python3",
+    "controller.py",
+    "/tmp/ws",
+    (bin, argv, opts) => {
+      seen.argv = argv;
+      seen.env = opts && opts.env;
+      return fakeForEnvTest();
+    },
+    {
+      requestTimeoutMs: 500,
+      handshakeTimeoutMs: 1000,
+      resolvePublishToken: async () => TEST_TOKEN,
+    }
+  );
+  const reply = await link.request(envelope("e".repeat(32)));
+  assert.equal(reply.code, "0");
+  assert.deepEqual(seen.argv, ["controller.py", "daemon"]);
+  const envText = JSON.stringify(seen.env);
+  assert.ok(!envText.includes(TEST_TOKEN), "token must not be in child env");
+  assert.ok(!JSON.stringify(seen.argv).includes(TEST_TOKEN));
+});
+
+test("S3: missing credential fails closed before spawn (pre-dispatch)", async () => {
+  let spawned = false;
+  const link = new plugin.DaemonLink(
+    "python3",
+    "controller.py",
+    "/tmp/ws",
+    () => {
+      spawned = true;
+      throw new Error("must not spawn");
+    },
+    {
+      requestTimeoutMs: 200,
+      handshakeTimeoutMs: 200,
+      resolvePublishToken: async () => {
+        throw new Error("publish credential unavailable");
+      },
+    }
+  );
+  const error = await link.request(envelope("e".repeat(32))).then(
+    () => null,
+    (e) => e
+  );
+  assert.ok(error instanceof Error);
+  assert.equal(error.dispatched, false);
+  assert.equal(spawned, false);
+});
+
+test("S4: blank credential fails closed before spawn", async () => {
+  let spawned = false;
+  const link = new plugin.DaemonLink(
+    "python3",
+    "controller.py",
+    "/tmp/ws",
+    () => {
+      spawned = true;
+      throw new Error("must not spawn");
+    },
+    {
+      requestTimeoutMs: 200,
+      handshakeTimeoutMs: 200,
+      resolvePublishToken: async () => "   ",
+    }
+  );
+  const error = await link.request(envelope("e".repeat(32))).then(
+    () => null,
+    (e) => e
+  );
+  assert.ok(error instanceof Error);
+  assert.equal(spawned, false);
+});
+
+test("S5: buildStartupFrame validates shape and authenticates", () => {
+  const key = crypto.randomBytes(32);
+  assert.throws(
+    () => plugin.buildStartupFrame("", key),
+    /unavailable/
+  );
+  assert.throws(
+    () => plugin.buildStartupFrame("   ", key),
+    /unavailable/
+  );
+  assert.throws(
+    () => plugin.buildStartupFrame("x".repeat(2049), key),
+    /oversize/
+  );
+  assert.throws(
+    () => plugin.buildStartupFrame(123, key),
+    /unavailable/
+  );
+  const frame = plugin.buildStartupFrame("tok-123", key);
+  const parsed = parseStartupFrame(frame, key);
+  assert.equal(parsed.schema, "nullone.publish-startup.v1");
+  assert.equal(parsed.publish_token, "tok-123");
+  // Tampering breaks the MAC.
+  const bad = Buffer.from(frame);
+  bad[bad.length - 1] ^= 0x01;
+  assert.throws(() => parseStartupFrame(bad, key));
+});
+
+test("S6: resolvePublishToken accepts strings, resolves store refs, rejects rest", async () => {
+  const { resolvePublishToken } = plugin;
+  assert.equal(await resolvePublishToken("abc", {}), "abc");
+  await assert.rejects(resolvePublishToken("", {}), /unavailable/);
+  await assert.rejects(resolvePublishToken("   ", {}), /unavailable/);
+  await assert.rejects(resolvePublishToken("x".repeat(2049), {}), /unavailable/);
+  await assert.rejects(resolvePublishToken(undefined, {}), /unavailable/);
+  await assert.rejects(resolvePublishToken(null, {}), /unavailable/);
+  await assert.rejects(
+    resolvePublishToken({ source: "env", provider: "default", id: "X" }, {}),
+    /unavailable/
+  );
+  await assert.rejects(
+    resolvePublishToken({ source: "store", provider: "", id: "X" }, {}),
+    /unavailable/
+  );
+  await assert.rejects(
+    resolvePublishToken({ source: "store" }, {}),
+    /unavailable/
+  );
+});
+
+test("S7: store SecretRef resolves through the SDK surface only", async () => {
+  const { resolvePublishToken } = plugin;
+  const value = await resolvePublishToken(
+    { source: "store", provider: "default", id: "ZERNIO_PUBLISH_API_TOKEN" },
+    { secrets: {} }
+  );
+  assert.equal(value, "resolved-store-token");
+  await assert.rejects(
+    resolvePublishToken(
+      { source: "store", provider: "default", id: "SOMETHING_ELSE" },
+      {}
+    ),
+    /unavailable/
+  );
 });

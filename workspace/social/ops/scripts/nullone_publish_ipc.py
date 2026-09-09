@@ -69,6 +69,25 @@ ENVELOPE_KEYS = frozenset(
 _MAX_ID_LEN = 128
 _POST_ID_RE = frozenset("0123456789abcdefABCDEF")
 
+# Startup credential delivery (publication secret, #90).
+#
+# After the per-boot channel key, the plugin sends EXACTLY ONE startup
+# frame carrying the publication credential resolved from the protected
+# store SecretRef. Same wire security as callback frames (MAGIC/VERSION/
+# BODY_LEN/BODY/MAC under K); a dedicated schema tag keeps it
+# distinguishable from callback envelopes. The daemon refuses READY
+# until a well-formed non-blank credential arrives. The credential is
+# memory-only end to end: never argv/env/file/log/receipt.
+STARTUP_SCHEMA = "nullone.publish-startup.v1"
+
+# Exact startup body key set. Anything else rejects the frame.
+STARTUP_KEYS = frozenset({"schema", "publish_token"})
+
+# Publication credentials are short bearer strings; anything larger is
+# hostile/malformed. The bound keeps the startup message small and the
+# daemon's memory exposure minimal.
+MAX_TOKEN_LEN = 2048
+
 
 class IpcError(RuntimeError):
     """Base fail-closed IPC error. Never carries key material or raw ids."""
@@ -212,6 +231,77 @@ def read_frame(stream: BinaryIO, key: bytes) -> dict[str, Any]:
     rest = _read_exact(stream, body_len + MAC_LEN)
     envelope, _consumed = decode_frame(header + rest, key)
     return envelope
+
+
+def encode_startup_frame(publish_token: str, key: bytes) -> bytes:
+    """Build the one authenticated startup credential frame.
+
+    Key must be exactly KEY_LEN bytes. The token must be a non-blank
+    string within MAX_TOKEN_LEN; anything else is a programming defect
+    (ValueError/TypeError, never a domain result) so malformed
+    credentials fail before any byte is framed.
+    """
+    if len(key) != KEY_LEN:
+        raise IpcError("channel key length invalid")
+    if not isinstance(publish_token, str):
+        raise TypeError("startup credential must be a string")
+    if (
+        not publish_token
+        or publish_token.isspace()
+        or len(publish_token) > MAX_TOKEN_LEN
+    ):
+        raise ValueError("startup credential is blank or oversize")
+    body = canonical_envelope_bytes(
+        {"schema": STARTUP_SCHEMA, "publish_token": publish_token}
+    )
+    if len(body) > MAX_BODY_LEN:
+        raise FrameTooLargeError("startup frame exceeds frame bound")
+    header = MAGIC + bytes((VERSION,)) + LEN_STRUCT.pack(len(body))
+    mac = hmac.new(key, header + body, hashlib.sha256).digest()
+    return header + body + mac
+
+
+def read_startup_frame(stream: BinaryIO, key: bytes) -> str:
+    """Read exactly one authenticated startup credential frame.
+
+    Verifies wire auth (magic/version/length/MAC under K) BEFORE parsing,
+    then enforces the exact startup key set, schema tag, and a non-blank
+    length-bounded token. Any deviation raises a typed IpcError that
+    never carries the credential. Returns the token string (still
+    secret: callers must wrap it immediately and never log it).
+    """
+    prefix = len(MAGIC) + 1 + LEN_STRUCT.size
+    header = _read_exact(stream, prefix)
+    if header[: len(MAGIC)] != MAGIC:
+        raise MalformedFrameError("startup frame magic mismatch")
+    if header[len(MAGIC)] != VERSION:
+        raise MalformedFrameError("startup frame version unsupported")
+    (body_len,) = LEN_STRUCT.unpack(header[len(MAGIC) + 1 :])
+    if body_len > MAX_BODY_LEN:
+        raise FrameTooLargeError("startup frame length exceeds bound")
+    rest = _read_exact(stream, body_len + MAC_LEN)
+    body, _consumed = verify_frame(header + rest, key)
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except Exception:
+        raise MalformedFrameError(
+            "startup frame body is not JSON"
+        ) from None
+    if not isinstance(parsed, dict) or set(parsed.keys()) != set(
+        STARTUP_KEYS
+    ):
+        raise MalformedFrameError("startup frame key set mismatch")
+    if parsed.get("schema") != STARTUP_SCHEMA:
+        raise MalformedFrameError("startup frame schema mismatch")
+    token = parsed.get("publish_token")
+    if (
+        not isinstance(token, str)
+        or not token
+        or token.isspace()
+        or len(token) > MAX_TOKEN_LEN
+    ):
+        raise MalformedFrameError("startup credential is blank or oversize")
+    return token
 
 
 def _read_exact(stream: BinaryIO, count: int) -> bytes:

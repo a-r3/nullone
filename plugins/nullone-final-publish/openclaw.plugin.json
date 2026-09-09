@@ -3,5 +3,15 @@
   "version": "1.0.0",
   "name": "NullOne Final Publish Handoff",
   "description": "Claims texbrif:publish callbacks on Telegram and routes them through the authenticated deterministic Python controller (#89). All other texbrif:* callbacks fall through to existing agent flow.",
-  "entry": "index.js"
+  "entry": "index.js",
+  "configContracts": {
+    "secretInputs": {
+      "paths": [
+        {
+          "path": "plugins.entries.nullone-final-publish.config.publishToken",
+          "expected": "string"
+        }
+      ]
+    }
+  }
 }

@@ -18,12 +18,14 @@ const POST = "0123456789abcdef01234567";
 let plugin;
 let registrations;
 
-function makeApi() {
+function makeApi(opts) {
   registrations = [];
   return {
     registerInteractiveHandler: (reg) => {
       registrations.push(reg);
     },
+    pluginConfig:
+      (opts && opts.pluginConfig) || {},
   };
 }
 
@@ -83,6 +85,20 @@ before(() => {
   Module._load = function (request, parent, isMain) {
     if (request === "openclaw/plugin-sdk/plugin-entry") {
       return { definePluginEntry: (entry) => entry };
+    }
+    if (request === "openclaw/plugin-sdk/secret-input-runtime") {
+      return {
+        resolveRequiredConfiguredSecretRefInputString: async ({ value }) => {
+          if (
+            value &&
+            value.source === "store" &&
+            value.id === "ZERNIO_PUBLISH_API_TOKEN"
+          ) {
+            return { value: "resolved-store-token" };
+          }
+          return { unresolvedRefReason: "not configured" };
+        },
+      };
     }
     return originalLoad.call(this, request, parent, isMain);
   };
@@ -287,6 +303,7 @@ test("C: default registration spawns the exact production-relative path", async 
   const { EventEmitter } = require("node:events");
   const seen = { argv: null, key: null };
   const { canonicalStringify } = plugin;
+  const STARTUP_TOKEN = "test-e2e-token";
   function replyFrame(payload, key) {
     const body = Buffer.from(canonicalStringify(payload), "utf8");
     const header = Buffer.alloc(8);
@@ -313,6 +330,11 @@ test("C: default registration spawns the exact production-relative path", async 
             )
           )
         );
+        return true;
+      }
+      if (!seen.startup) {
+        // Second write is the bounded startup credential frame (#90).
+        seen.startup = data;
         return true;
       }
       if (!seen.envelope) {
@@ -346,7 +368,7 @@ test("C: default registration spawns the exact production-relative path", async 
     seen.opts = opts;
     return fake;
   };
-  const api = makeApi();
+  const api = makeApi({ pluginConfig: { publishToken: STARTUP_TOKEN } });
   plugin.default.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
@@ -364,6 +386,24 @@ test("C: default registration spawns the exact production-relative path", async 
   assert.deepEqual(seen.argv.slice(1), ["daemon"]);
   assert.ok(!seen.argv[0].includes("workspace/workspace"), seen.argv[0]);
   assert.ok(ctx._replies[0].includes("Nəşr tamamlandı"));
+  // Startup credential frame (#90): HMAC'd, exact schema, carries the
+  // resolved token, sent before the first envelope.
+  assert.ok(seen.startup, "startup frame must be the second write");
+  const startupLen = seen.startup.readUInt32BE(4);
+  const startupBody = seen.startup.subarray(8, 8 + startupLen);
+  const startupMac = seen.startup.subarray(8 + startupLen, 8 + startupLen + 32);
+  const startupExpected = crypto
+    .createHmac("sha256", seen.key)
+    .update(seen.startup.subarray(0, 8))
+    .update(startupBody)
+    .digest();
+  assert.ok(crypto.timingSafeEqual(startupMac, startupExpected));
+  const startupParsed = JSON.parse(startupBody.toString("utf8"));
+  assert.equal(startupParsed.schema, "nullone.publish-startup.v1");
+  assert.equal(startupParsed.publish_token, STARTUP_TOKEN);
+  // Token never enters spawn argv or environment.
+  assert.ok(!JSON.stringify(seen.argv).includes(STARTUP_TOKEN));
+  assert.ok(!JSON.stringify(seen.opts.env).includes(STARTUP_TOKEN));
 });
 
 test("D: missing workspace fails closed with zero spawn", async () => {
@@ -387,7 +427,7 @@ test("E: spawn failure consumes safely and never routes to LLM", async () => {
   const spawnFn = () => {
     throw new Error("spawn exploded");
   };
-  const api = makeApi();
+  const api = makeApi({ pluginConfig: { publishToken: "test-token" } });
   plugin.default.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
@@ -404,7 +444,7 @@ test("pre-dispatch spawn failure says request was not sent (exact)", async () =>
   const spawnFn = () => {
     throw new Error("spawn exploded");
   };
-  const api = makeApi();
+  const api = makeApi({ pluginConfig: { publishToken: "test-token" } });
   plugin.default.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
@@ -469,4 +509,182 @@ test("pre-dispatch rejection keeps the not-sent wording", async () => {
     assert.ok(ctx._replies[0].includes("Heç nə yayımlanmadı"));
     assert.ok(!ctx._replies[0].includes("qeyri-müəyyən"));
   }
+});
+
+test("manifest declares the publishToken SecretInput path", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "../../plugins/nullone-final-publish/openclaw.plugin.json"),
+      "utf8"
+    )
+  );
+  const paths =
+    manifest.configContracts &&
+    manifest.configContracts.secretInputs &&
+    manifest.configContracts.secretInputs.paths;
+  assert.ok(Array.isArray(paths), "secretInputs.paths must exist");
+  const entry = paths.find(
+    (p) =>
+      p.path ===
+      "plugins.entries.nullone-final-publish.config.publishToken"
+  );
+  assert.ok(entry, "publishToken secret input must be declared");
+  assert.equal(entry.expected, "string");
+});
+
+test("missing publishToken fails closed with zero spawn", async () => {
+  let spawned = false;
+  const api = makeApi({ pluginConfig: {} });
+  plugin.default.register(
+    api,
+    makeCtx({
+      workspace: "/tmp/nullone-workspace",
+      spawnFn: () => {
+        spawned = true;
+        throw new Error("must not spawn");
+      },
+    })
+  );
+  assert.equal(registrations.length, 1);
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(spawned, false);
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /hazır deyil/);
+});
+
+test("blank publishToken fails closed with zero spawn", async () => {
+  let spawned = false;
+  const api = makeApi({ pluginConfig: { publishToken: "   " } });
+  plugin.default.register(
+    api,
+    makeCtx({
+      workspace: "/tmp/nullone-workspace",
+      spawnFn: () => {
+        spawned = true;
+        throw new Error("must not spawn");
+      },
+    })
+  );
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(spawned, false);
+  assert.match(ctx._replies[0], /hazır deyil/);
+});
+
+test("non-store SecretRef fails closed with zero spawn", async () => {
+  let spawned = false;
+  const api = makeApi({
+    pluginConfig: {
+      publishToken: {
+        source: "env",
+        provider: "default",
+        id: "ZERNIO_PUBLISH_API_TOKEN",
+      },
+    },
+  });
+  plugin.default.register(
+    api,
+    makeCtx({
+      workspace: "/tmp/nullone-workspace",
+      spawnFn: () => {
+        spawned = true;
+        throw new Error("must not spawn");
+      },
+    })
+  );
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(spawned, false);
+  assert.match(ctx._replies[0], /hazır deyil/);
+});
+
+test("store SecretRef resolves through the SDK and reaches the pipe", async () => {
+  const crypto = require("node:crypto");
+  const { EventEmitter } = require("node:events");
+  const seen = {};
+  const { canonicalStringify } = plugin;
+  function replyFrame(payload, key) {
+    const body = Buffer.from(canonicalStringify(payload), "utf8");
+    const header = Buffer.alloc(8);
+    Buffer.from("NP1", "utf8").copy(header, 0);
+    header.writeUInt8(1, 3);
+    header.writeUInt32BE(body.length, 4);
+    const mac = crypto.createHmac("sha256", key).update(header).update(body).digest();
+    return Buffer.concat([header, body, mac]);
+  }
+  const fake = new EventEmitter();
+  fake.stdout = new EventEmitter();
+  fake.stdin = {
+    write: (chunk) => {
+      const data = Buffer.from(chunk);
+      if (!seen.key) {
+        seen.key = data;
+        setImmediate(() =>
+          fake.stdout.emit(
+            "data",
+            replyFrame(
+              { schema: "nullone.publish-reply.v1", t: "ready", reconciled: "0/0/0" },
+              seen.key
+            )
+          )
+        );
+        return true;
+      }
+      if (!seen.startup) {
+        seen.startup = data;
+        return true;
+      }
+      const bodyLen = data.readUInt32BE(4);
+      const envelope = JSON.parse(data.subarray(8, 8 + bodyLen).toString("utf8"));
+      setImmediate(() =>
+        fake.stdout.emit(
+          "data",
+          replyFrame(
+            {
+              schema: "nullone.publish-reply.v1",
+              t: "result",
+              outcome: "SETTLED",
+              code: "0",
+              publication_state: "PUBLISHED",
+              request_id: envelope.request_id,
+            },
+            seen.key
+          )
+        )
+      );
+      return true;
+    },
+  };
+  const api = makeApi({
+    pluginConfig: {
+      publishToken: {
+        source: "store",
+        provider: "default",
+        id: "ZERNIO_PUBLISH_API_TOKEN",
+      },
+    },
+    config: { secrets: {} },
+  });
+  // makeApi only models pluginConfig; attach host config for resolution.
+  api.config = { secrets: {} };
+  plugin.default.register(
+    api,
+    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn: () => fake })
+  );
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.ok(seen.startup, "startup frame must be sent");
+  const startupLen = seen.startup.readUInt32BE(4);
+  const startupParsed = JSON.parse(
+    seen.startup.subarray(8, 8 + startupLen).toString("utf8")
+  );
+  assert.equal(startupParsed.publish_token, "resolved-store-token");
+  assert.ok(ctx._replies[0].includes("Nəşr tamamlandı"));
 });

@@ -150,20 +150,39 @@ def authorize_for_publish(m: dict) -> None:
     )
 
 
-class ScriptedProvider:
-    def __init__(self, *steps):
-        self.steps = list(steps)
-        self.calls: list[dict] = []
+class ScriptedPublishProvider:
+    """Fake ZernioPublishProvider with scripted per-method outcomes.
 
-    def __call__(self, **kwargs):
-        self.calls.append(kwargs)
-        if not self.steps:
-            raise AssertionError("unexpected provider call")
+    Each script is a list consumed in order; an entry is either a return
+    value or a BaseException to raise. Unexpected calls fail the test.
+    """
 
-        step = self.steps.pop(0)
+    def __init__(self, preflight=(), promote=(), readback=()):
+        self._preflight = list(preflight)
+        self._promote = list(promote)
+        self._readback = list(readback)
+        self.get_count = 0
+        self.put_count = 0
+
+    def _next(self, script, what):
+        if not script:
+            raise AssertionError(f"unexpected publish {what}")
+        step = script.pop(0)
         if isinstance(step, BaseException):
             raise step
-        return copy.deepcopy(step)
+        return step
+
+    def preflight(self, post_id, expected):
+        self.get_count += 1
+        return self._next(self._preflight, "preflight GET")
+
+    def promote_once(self, post_id):
+        self.put_count += 1
+        return self._next(self._promote, "promote PUT")
+
+    def readback(self, post_id, expected):
+        self.get_count += 1
+        return self._next(self._readback, "readback GET")
 
 
 class BehavioralRegressionTests(unittest.TestCase):
@@ -226,19 +245,28 @@ class BehavioralRegressionTests(unittest.TestCase):
                 publish.require_final_authorization(consumed)
 
     def test_ambiguous_publish_consumes_attempt_and_never_readbacks(self):
+        # #90 deterministic transport: an ambiguous PUT is followed by a
+        # read-only clarification readback (which here also fails), the
+        # attempt stays consumed, and no second PUT is ever issued.
+        from nullone_zernio_publish_adapter import (
+            PublishAmbiguousError,
+            PublishReadbackFailedError,
+        )
+
         with isolated_workspace() as root:
             manifest_path, m = make_manifest(root)
             authorize_for_publish(m)
 
-            provider = ScriptedProvider(
-                {
-                    "status": "READY",
-                    "review_draft_ok": True,
-                    "account_ok": True,
-                    "media_ok": True,
-                    "error": "",
-                },
-                common.BridgeError("synthetic ambiguous provider result"),
+            provider = ScriptedPublishProvider(
+                preflight=[None],
+                promote=[
+                    PublishAmbiguousError("synthetic ambiguous PUT")
+                ],
+                readback=[
+                    PublishReadbackFailedError(
+                        "synthetic readback failure"
+                    )
+                ],
             )
 
             events: list[str] = []
@@ -251,8 +279,8 @@ class BehavioralRegressionTests(unittest.TestCase):
                 ),
                 patch.object(
                     publish,
-                    "run_structured",
-                    side_effect=provider,
+                    "provider_factory",
+                    return_value=provider,
                 ),
                 patch.object(
                     publish,
@@ -272,29 +300,36 @@ class BehavioralRegressionTests(unittest.TestCase):
 
             self.assertEqual(m["publication"]["attempts"], 1)
             self.assertEqual(m["publication"]["state"], "UNKNOWN")
-            self.assertEqual(len(provider.calls), 2)
+            self.assertEqual(provider.put_count, 1)
+            # Preflight GET + clarification readback GET, nothing else.
+            self.assertEqual(provider.get_count, 2)
             self.assertEqual(events, [])
 
     def test_readback_failure_never_republishes(self):
+        # #90 deterministic transport: accepted PUT + failed readback is
+        # terminal READBACK_FAILED with exactly one PUT and no retry.
+        from nullone_zernio_publish_adapter import (
+            PublishReadbackFailedError,
+        )
+
         with isolated_workspace() as root:
             manifest_path, m = make_manifest(root)
             authorize_for_publish(m)
 
-            provider = ScriptedProvider(
-                {
-                    "status": "READY",
-                    "review_draft_ok": True,
-                    "account_ok": True,
-                    "media_ok": True,
-                    "error": "",
-                },
-                {
-                    "status": "PUBLISH_CALLED",
-                    "live_zernio_post_id": "000000000000000000000002",
-                    "returned_status": "publishing",
-                    "error": "",
-                },
-                common.BridgeError("synthetic readback failure"),
+            provider = ScriptedPublishProvider(
+                preflight=[None],
+                promote=[
+                    (
+                        "NEEDS_READBACK",
+                        200,
+                        {"post": {"_id": "000000000000000000000001"}},
+                    )
+                ],
+                readback=[
+                    PublishReadbackFailedError(
+                        "synthetic readback failure"
+                    )
+                ],
             )
 
             events: list[str] = []
@@ -307,8 +342,8 @@ class BehavioralRegressionTests(unittest.TestCase):
                 ),
                 patch.object(
                     publish,
-                    "run_structured",
-                    side_effect=provider,
+                    "provider_factory",
+                    return_value=provider,
                 ),
                 patch.object(
                     publish,
@@ -323,13 +358,14 @@ class BehavioralRegressionTests(unittest.TestCase):
                     ),
                 ),
             ):
-                with self.assertRaises(common.BridgeError):
-                    publish.execute("synthetic")
+                code = publish.execute("synthetic")
 
+            self.assertEqual(code, 0)
             self.assertEqual(m["publication"]["attempts"], 1)
             self.assertEqual(m["publication"]["state"], "READBACK_FAILED")
-            self.assertEqual(len(provider.calls), 3)
-            self.assertEqual(events, ["PUBLISH_ACCEPTED"])
+            self.assertEqual(provider.put_count, 1)
+            self.assertEqual(provider.get_count, 2)
+            self.assertEqual(events, ["PUBLISH_ACCEPTED", "READBACK_FAILED"])
 
     def test_draft_ambiguous_create_is_unsafe_to_repeat(self):
         with isolated_workspace() as root:
@@ -521,9 +557,32 @@ class BehavioralRegressionTests(unittest.TestCase):
                     schema=schema,
                 )
 
-        # The direct adapter must not perform real network calls.
-        # The UrllibDraftTransport uses urllib.request.urlopen, which is
-        # imported at module level in nullone_zernio_draft_adapter.
+        # The deterministic publisher (#90) must not perform real network
+        # calls either. UrllibPublishTransport never uses the shared
+        # urlopen entry point; it goes through a private no-redirect
+        # opener, so the harness blocks OpenerDirector.open instead.
+        import nullone_zernio_publish_adapter as publish_adapter_mod
+        from urllib import request as urllib_request_mod
+
+        with patch.object(
+            urllib_request_mod.OpenerDirector,
+            "open",
+            side_effect=AssertionError(
+                "real network is forbidden in behavioral tests"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                AssertionError,
+                "real network is forbidden",
+            ):
+                from nullone_secret_provider import SecretValue
+
+                publish_transport = (
+                    publish_adapter_mod.build_authenticated_transport(
+                        token=SecretValue("fake-token")
+                    )
+                )
+                publish_transport.get("/posts/000000000000000000000001")
         import nullone_zernio_draft_adapter as adapter_mod
 
         with isolated_workspace() as root:

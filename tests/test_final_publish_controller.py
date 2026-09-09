@@ -610,8 +610,13 @@ class DaemonProtocolTests(unittest.TestCase):
 
         thread = threading.Thread(target=_target, daemon=True)
         thread.start()
-        # Handshake: raw key first (private spawn pipe), then framed READY.
+        # Handshake: raw key first (private spawn pipe), then the single
+        # authenticated startup credential frame (#90), then framed READY.
         os.write(w_in, key)
+        os.write(
+            w_in,
+            ipc.encode_startup_frame("test-startup-credential", key),
+        )
         reply = DaemonProtocolTests._read_reply(r_out, key, "READY")
         assert reply.get("t") == "ready", reply
         return thread, result, w_in, r_out
