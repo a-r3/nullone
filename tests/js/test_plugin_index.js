@@ -563,6 +563,24 @@ test("manifest declares the publishToken SecretInput path", () => {
   assert.equal(entry.expected, "string");
 });
 
+test("manifest declares Gateway-startup activation (regression)", () => {
+  // The installed OpenClaw 2026.8.2 startup planner only imports a plugin
+  // ahead of any live callback if its manifest sets activation.onStartup
+  // (installed-plugin-index-scope-lookup: shouldConsiderForGatewayStartup).
+  // Without it, the plugin is silently skipped every boot -- no error, no
+  // diagnostic -- and its telegram/texbrif interactive handler never
+  // reaches the active registry before a human clicks publish.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "../../plugins/nullone-final-publish/openclaw.plugin.json"),
+      "utf8"
+    )
+  );
+  assert.equal(manifest.activation && manifest.activation.onStartup, true);
+});
+
 test("missing publishToken fails closed with zero spawn", async () => {
   let spawned = false;
   const api = makeApi({ pluginConfig: {} });
