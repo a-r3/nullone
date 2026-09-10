@@ -258,10 +258,9 @@ async function resolvePublishToken(rawInput, hostConfig) {
       path: SECRET_CONFIG_PATH,
       env: process.env,
     });
-    const value =
-      resolved && typeof resolved.value === "string"
-        ? resolved.value
-        : "";
+    // Installed OpenClaw 2026.8.2 contract:
+    // resolveRequiredConfiguredSecretRefInputString(...) -> Promise<string | undefined>
+    const value = typeof resolved === "string" ? resolved : "";
     if (
       value.length > 0 &&
       value.length <= MAX_TOKEN_LEN &&

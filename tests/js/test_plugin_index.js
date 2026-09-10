@@ -97,15 +97,17 @@ before(() => {
     }
     if (request === "openclaw/plugin-sdk/secret-input-runtime") {
       return {
+        // Faithful to the installed 2026.8.2 contract:
+        // resolveRequiredConfiguredSecretRefInputString(...) -> Promise<string | undefined>
         resolveRequiredConfiguredSecretRefInputString: async ({ value }) => {
           if (
             value &&
             value.source === "store" &&
             value.id === "ZERNIO_PUBLISH_API_TOKEN"
           ) {
-            return { value: "resolved-store-token" };
+            return "resolved-store-token";
           }
-          return { unresolvedRefReason: "not configured" };
+          return undefined;
         },
       };
     }
@@ -734,4 +736,33 @@ test("store SecretRef resolves through the SDK and reaches the pipe", async () =
   );
   assert.equal(startupParsed.publish_token, "resolved-store-token");
   assert.ok(ctx._replies[0].includes("Nəşr tamamlandı"));
+});
+
+test("required SecretRef resolver bare-string result is accepted", async () => {
+  // Installed OpenClaw 2026.8.2 contract: resolveRequiredConfiguredSecretRefInputString(...)
+  // -> Promise<string | undefined>. Calls the REAL resolvePublishToken() directly
+  // (not through the daemon pipe) so this fails against the old `.value` extraction
+  // even when the stub already returns the correct bare-string shape.
+  const ref = {
+    source: "store",
+    provider: "default",
+    id: "ZERNIO_PUBLISH_API_TOKEN",
+  };
+  const value = await plugin.resolvePublishToken(ref, { secrets: {} });
+  assert.equal(value, "resolved-store-token");
+});
+
+test("required SecretRef resolver undefined result fails closed", async () => {
+  // The real resolver returns bare `undefined` (never `{unresolvedRefReason}`)
+  // when the ref is not configured/resolvable -- resolvePublishToken must
+  // still fail closed with zero token exposure.
+  const ref = {
+    source: "store",
+    provider: "default",
+    id: "SOME_OTHER_UNCONFIGURED_ID",
+  };
+  await assert.rejects(
+    () => plugin.resolvePublishToken(ref, { secrets: {} }),
+    /publish credential unavailable/
+  );
 });
