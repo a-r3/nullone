@@ -10,6 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import parse as urllib_parse
 
 from PIL import Image
 
@@ -313,6 +314,78 @@ def load_manifest(path: str | Path) -> tuple[Path, dict[str, Any]]:
     validate_manifest(data)
 
     return p, data
+
+
+# ---------------------------------------------------------------------------
+# Shared Zernio media-URL identity rule (draft readback + publish preflight)
+# ---------------------------------------------------------------------------
+
+# The exact Zernio-managed media host that may rewrite storage paths while
+# preserving the exact filename. Confirmed by the 2026-09-10 production
+# readback incident: Zernio returned the same host and filename but a
+# rewritten storage path.
+ZERNIO_MEDIA_HOST = "media.zernio.com"
+
+
+def media_url_identity_matches(expected_url: Any, returned_url: Any) -> bool:
+    """Shared, deterministic media-URL identity rule.
+
+    Used by BOTH the review-draft readback validator
+    (nullone_zernio_draft_adapter.py) and the publisher remote-draft
+    preflight/readback validator (nullone_zernio_publish_adapter.py) so the
+    two safety boundaries never disagree.
+
+    A. Exact string equality always PASSES.
+    B. Zernio-managed uploaded media (the 2026-09-10 production case) may
+       PASS on filename identity alone -- Zernio's own storage is
+       documented to rewrite the path prefix on echo -- when ALL of the
+       following hold for BOTH the expected and returned URL:
+       - scheme is exactly https
+       - hostname is exactly `media.zernio.com`
+       - no userinfo (username/password) is present
+       - no query string is present
+       - no fragment is present
+       - the non-empty basename (final path segment) is identical
+    C. Any other host (external/CDN media) requires exact string equality;
+       arbitrary URLs are never relaxed to filename-only identity.
+
+    No fuzzy string similarity. No URL-length heuristics. Malformed input
+    (non-string, unparseable) fails closed to False.
+    """
+    if not isinstance(expected_url, str) or not isinstance(returned_url, str):
+        return False
+
+    if expected_url == returned_url:
+        return True
+
+    try:
+        want = urllib_parse.urlsplit(expected_url)
+        got = urllib_parse.urlsplit(returned_url)
+    except ValueError:
+        return False
+
+    if want.scheme != "https" or got.scheme != "https":
+        return False
+
+    if want.hostname != ZERNIO_MEDIA_HOST or got.hostname != ZERNIO_MEDIA_HOST:
+        return False
+
+    if want.username or want.password or got.username or got.password:
+        return False
+
+    if want.query or got.query:
+        return False
+
+    if want.fragment or got.fragment:
+        return False
+
+    want_name = want.path.rsplit("/", 1)[-1]
+    got_name = got.path.rsplit("/", 1)[-1]
+
+    if not want_name or not got_name:
+        return False
+
+    return want_name == got_name
 
 
 def find_manifest_by_review_post_id(

@@ -1224,5 +1224,223 @@ class PublicationTransportCapabilityNegativeTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Shared media-URL identity rule tests (publish remote-draft preflight /
+# readback safety boundary).
+#
+# nullone_bridge_common.media_url_identity_matches is the ONE shared rule
+# used by BOTH this adapter's remote-draft preflight/readback validator
+# and the draft adapter's readback validator (tests/test_zernio_draft_
+# adapter.py :: MediaIdentityReadbackTests). Fixes the confirmed defect
+# from the 2026-09-10 production readback: Zernio returned the same
+# HTTPS host and exact filename but rewrote the storage path, so an
+# exact full-URL equality check falsely forced REVIEW_UNKNOWN on a
+# legitimate, fully-identified draft. This suite proves the fix does not
+# weaken caption, account, platform, Story, count, order, or type
+# checking.
+# ---------------------------------------------------------------------------
+
+
+class MediaUrlIdentityPreflightTests(unittest.TestCase):
+    """Direct tests through the exact function used at the publish safety
+    boundary (validate_preflight_remote_draft -> _check_remote_draft)."""
+
+    @staticmethod
+    def _expected(*, media_urls=(MEDIA_URL_1,), fmt="FEED"):
+        return {
+            "post_id": POST_ID,
+            "caption": CAPTION_TEXT,
+            "media_items": [{"type": "image", "url": u} for u in media_urls],
+            "account_id": CANONICAL_ACCOUNT_ID,
+            "format": fmt,
+        }
+
+    # -- PASS -------------------------------------------------------------
+
+    def test_exact_same_url_passes_preflight(self):
+        expected = self._expected(media_urls=(MEDIA_URL_1,))
+        body = remote_draft_doc(media_urls=(MEDIA_URL_1,))
+        adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_zernio_same_basename_different_directory_passes_preflight(self):
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/temp/abc123_1/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=(
+                "https://media.zernio.com/posts/6aa298cd08781ff66238fc89/img.png",
+            )
+        )
+        adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_sep10_production_readback_case_passes_preflight(self):
+        """Named regression: 2026-09-10 production incident. Sanitized
+        shape observed live: same https scheme, same media.zernio.com
+        host, identical filename, minimally rewritten directory path;
+        every other condition (caption, account, platform, count, order,
+        type) already matched."""
+        expected = self._expected(
+            media_urls=(
+                "https://media.zernio.com/temp/abc123_1/"
+                "2026-09-10-mistral-samsung-series-d.png",
+            )
+        )
+        body = remote_draft_doc(
+            media_urls=(
+                "https://media.zernio.com/posts/6aa298cd08781ff66238fc89/"
+                "2026-09-10-mistral-samsung-series-d.png",
+            )
+        )
+        adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    # -- FAIL ---------------------------------------------------------------
+
+    def test_same_filename_different_host_blocks_preflight(self):
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/a/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=("https://cdn.other.example/a/img.png",)
+        )
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_same_host_different_filename_blocks_preflight(self):
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/a/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=("https://media.zernio.com/a/other.png",)
+        )
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_http_url_blocks_preflight(self):
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/a/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=("http://media.zernio.com/a/img.png",)
+        )
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_external_cdn_same_filename_different_path_blocks_preflight(self):
+        # Rule C: non-Zernio hosts are never relaxed to filename identity.
+        expected = self._expected(
+            media_urls=("https://cdn.example.com/a/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=("https://cdn.example.com/b/img.png",)
+        )
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_query_string_manufactured_match_blocks_preflight(self):
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/a/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=("https://media.zernio.com/b/img.png?sig=x",)
+        )
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_fragment_manufactured_match_blocks_preflight(self):
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/a/img.png",)
+        )
+        body = remote_draft_doc(
+            media_urls=("https://media.zernio.com/b/img.png#frag",)
+        )
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_changed_media_order_blocks_preflight(self):
+        expected = self._expected(media_urls=(MEDIA_URL_1, MEDIA_URL_2))
+        body = remote_draft_doc(media_urls=(MEDIA_URL_2, MEDIA_URL_1))
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_changed_media_type_blocks_preflight(self):
+        expected = self._expected(media_urls=(MEDIA_URL_1,))
+        body = remote_draft_doc(media_urls=(MEDIA_URL_1,))
+        body["post"]["mediaItems"][0]["type"] = "video"
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_missing_media_item_blocks_preflight(self):
+        expected = self._expected(media_urls=(MEDIA_URL_1, MEDIA_URL_2))
+        body = remote_draft_doc(media_urls=(MEDIA_URL_1,))
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    def test_extra_media_item_blocks_preflight(self):
+        expected = self._expected(media_urls=(MEDIA_URL_1,))
+        body = remote_draft_doc(media_urls=(MEDIA_URL_1, MEDIA_URL_2))
+        with self.assertRaises(adapter.PublishPreflightBlockedError):
+            adapter.validate_preflight_remote_draft(body, expected=expected)
+
+    # -- Readback (clarification-only, never authorizes a second PUT) -----
+
+    def test_readback_zernio_rewritten_path_passes(self):
+        transport = FakePublishTransport(
+            get_responses=[
+                (
+                    200,
+                    remote_draft_doc(
+                        media_urls=(
+                            "https://media.zernio.com/posts/xyz/img.png",
+                        )
+                    ),
+                )
+            ]
+        )
+        provider = adapter.ZernioPublishProvider(transport)
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/temp/abc/img.png",)
+        )
+        summary = provider.readback(POST_ID, expected)
+        self.assertEqual(summary["live_status"], "draft")
+
+    def test_readback_same_host_different_filename_fails(self):
+        transport = FakePublishTransport(
+            get_responses=[
+                (
+                    200,
+                    remote_draft_doc(
+                        media_urls=(
+                            "https://media.zernio.com/posts/xyz/other.png",
+                        )
+                    ),
+                )
+            ]
+        )
+        provider = adapter.ZernioPublishProvider(transport)
+        expected = self._expected(
+            media_urls=("https://media.zernio.com/temp/abc/img.png",)
+        )
+        with self.assertRaises(adapter.PublishReadbackFailedError):
+            provider.readback(POST_ID, expected)
+
+    def test_readback_external_cdn_different_path_fails(self):
+        transport = FakePublishTransport(
+            get_responses=[
+                (
+                    200,
+                    remote_draft_doc(
+                        media_urls=("https://cdn.example.com/b/img.png",)
+                    ),
+                )
+            ]
+        )
+        provider = adapter.ZernioPublishProvider(transport)
+        expected = self._expected(
+            media_urls=("https://cdn.example.com/a/img.png",)
+        )
+        with self.assertRaises(adapter.PublishReadbackFailedError):
+            provider.readback(POST_ID, expected)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
