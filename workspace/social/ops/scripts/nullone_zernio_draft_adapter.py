@@ -63,6 +63,7 @@ from nullone_bridge_common import (
     BridgeError,
     atomic_write_json,
     load_manifest,
+    media_url_identity_matches,
     now_iso,
     resolve_workspace_path,
     validate_manifest,
@@ -743,7 +744,10 @@ def _validate_readback_response(
     - post.platforms is exactly the one intended target: a single entry,
       platform instagram, account resolving to the canonical account id
     - Story platformSpecificData matches wherever the contract exposes it
-    - exact content/media identity matches wherever GET exposes those fields
+    - exact content identity matches wherever GET exposes it; media identity
+      matches wherever GET exposes it, via the shared
+      media_url_identity_matches rule (exact equality, or filename-only
+      equality bound to the exact media.zernio.com host on both sides)
 
     Fields the API does not expose are not invented as proof; a missing
     optional exposure is accepted, while any present-but-contradictory field
@@ -810,7 +814,7 @@ def _validate_readback_response(
         for got, want in zip(exposed, expected_media_items):
             if not isinstance(got, dict):
                 raise DraftReadbackFailedError(READBACK_FAILED_REASON)
-            if got.get("url") != want.get("url"):
+            if not media_url_identity_matches(want.get("url"), got.get("url")):
                 raise DraftReadbackFailedError(READBACK_FAILED_REASON)
             if "type" in got and got.get("type") != want.get("type"):
                 raise DraftReadbackFailedError(READBACK_FAILED_REASON)

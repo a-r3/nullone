@@ -2177,5 +2177,402 @@ class IntegrationTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Shared media-URL identity rule tests (draft readback safety boundary).
+#
+# nullone_bridge_common.media_url_identity_matches is the ONE shared rule
+# used by BOTH this adapter's readback validator and the publish adapter's
+# remote-draft preflight/readback validator (tests/test_zernio_publish_
+# adapter.py :: MediaUrlIdentityPreflightTests). Fixes the confirmed
+# defect from the 2026-09-10 production readback: Zernio returned the
+# same HTTPS host and exact filename but rewrote the storage path, so an
+# exact full-URL equality check falsely forced REVIEW_UNKNOWN on a
+# legitimate, fully-identified draft.
+# ---------------------------------------------------------------------------
+
+
+class MediaUrlIdentityHelperTests(unittest.TestCase):
+    """Direct unit tests of the shared identity rule itself."""
+
+    def test_exact_equality_passes(self):
+        self.assertTrue(
+            bridge_common.media_url_identity_matches(
+                "https://cdn.example.com/a/b/img.png",
+                "https://cdn.example.com/a/b/img.png",
+            )
+        )
+
+    def test_zernio_same_basename_different_directory_passes(self):
+        self.assertTrue(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/uploads/2026/09/10/img-abc123.png",
+                "https://media.zernio.com/storage/rewritten/path/img-abc123.png",
+            )
+        )
+
+    def test_sep10_production_readback_case_passes(self):
+        """Named regression: 2026-09-10 production incident. Sanitized
+        shape observed live: same https scheme, same media.zernio.com
+        host, identical filename, minimally rewritten directory path."""
+        self.assertTrue(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/temp/abc123_1/"
+                "2026-09-10-mistral-samsung-series-d.png",
+                "https://media.zernio.com/posts/6aa298cd08781ff66238fc89/"
+                "2026-09-10-mistral-samsung-series-d.png",
+            )
+        )
+
+    def test_same_filename_different_host_fails(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png",
+                "https://cdn.other.example/a/img.png",
+            )
+        )
+
+    def test_same_zernio_host_different_filename_fails(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png",
+                "https://media.zernio.com/a/other.png",
+            )
+        )
+
+    def test_http_scheme_never_passes(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "http://media.zernio.com/a/img.png",
+                "https://media.zernio.com/a/img.png",
+            )
+        )
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png",
+                "http://media.zernio.com/a/img.png",
+            )
+        )
+
+    def test_external_cdn_same_filename_different_path_fails(self):
+        # Rule C: non-Zernio hosts are never relaxed to filename identity.
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://cdn.example.com/a/img.png",
+                "https://cdn.example.com/b/img.png",
+            )
+        )
+
+    def test_query_string_never_manufactures_a_match(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png",
+                "https://media.zernio.com/b/img.png?sig=abc",
+            )
+        )
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png?sig=abc",
+                "https://media.zernio.com/b/img.png",
+            )
+        )
+
+    def test_fragment_never_manufactures_a_match(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png",
+                "https://media.zernio.com/b/img.png#frag",
+            )
+        )
+
+    def test_userinfo_credentials_rejected(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://user:pass@media.zernio.com/a/img.png",
+                "https://media.zernio.com/b/img.png",
+            )
+        )
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img.png",
+                "https://user:pass@media.zernio.com/b/img.png",
+            )
+        )
+
+    def test_empty_basename_rejected(self):
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/",
+                "https://media.zernio.com/b/",
+            )
+        )
+
+    def test_no_fuzzy_similarity_no_length_authority(self):
+        # A near-identical but non-identical filename must fail even
+        # though the strings are very similar / same length.
+        self.assertFalse(
+            bridge_common.media_url_identity_matches(
+                "https://media.zernio.com/a/img-1.png",
+                "https://media.zernio.com/a/img-2.png",
+            )
+        )
+
+
+class MediaIdentityReadbackTests(unittest.TestCase):
+    """Integration tests through the real draft-readback safety boundary
+    (ZernioDraftProvider._readback -> _validate_readback_response)."""
+
+    def setUp(self):
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir_ctx.name)
+        self.addCleanup(self._tmpdir_ctx.cleanup)
+
+    def _run_single_media_case(self, expected_url, returned_url):
+        manifest_path, _m = make_manifest(self.tmp_path, fmt="FEED")
+        transport = FakeTransport()
+        setup_valid_transport(transport, post_id="draft-123", fmt="FEED")
+        transport.post_responses["/media/presign"] = (
+            200,
+            {
+                "uploadUrl": UPLOAD_URL_1,
+                "publicUrl": expected_url,
+                "key": "temp/abc123_1.png",
+                "expiresIn": 3600,
+            },
+        )
+        transport.post_responses["/tools/validate/media"] = (
+            media_validation_success(url=expected_url)
+        )
+        transport.get_responses["/posts/draft-123"] = (
+            200,
+            {
+                "post": {
+                    "_id": "draft-123",
+                    "status": "draft",
+                    "content": CAPTION_TEXT,
+                    "platforms": [
+                        {
+                            "platform": "instagram",
+                            "accountId": CANONICAL_ACCOUNT_ID,
+                        }
+                    ],
+                    "mediaItems": [{"type": "image", "url": returned_url}],
+                }
+            },
+        )
+        provider = make_provider(transport)
+        return provider, manifest_path
+
+    # -- PASS -----------------------------------------------------------
+
+    def test_exact_same_url_passes_readback(self):
+        provider, manifest_path = self._run_single_media_case(
+            PUBLIC_URL_1, PUBLIC_URL_1
+        )
+        provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "DRAFT_CREATED")
+
+    def test_zernio_rewritten_path_same_basename_passes_readback(self):
+        expected = "https://media.zernio.com/temp/abc123_1/mistral-samsung.png"
+        returned = "https://media.zernio.com/posts/xyz789/mistral-samsung.png"
+        provider, manifest_path = self._run_single_media_case(
+            expected, returned
+        )
+        provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "DRAFT_CREATED")
+
+    def test_sep10_production_readback_regression_passes(self):
+        """Named regression for the 2026-09-10 production incident: exact
+        caption/account/platform/media-count/type/order already matched;
+        only the media URL's storage path differed by Zernio's own
+        rewrite while the filename stayed identical. Before this fix the
+        deployed validator's exact full-URL equality falsely forced
+        REVIEW_UNKNOWN on this legitimate draft."""
+        expected = (
+            "https://media.zernio.com/temp/abc123_1/"
+            "2026-09-10-mistral-samsung-series-d.png"
+        )
+        returned = (
+            "https://media.zernio.com/posts/6aa298cd08781ff66238fc89/"
+            "2026-09-10-mistral-samsung-series-d.png"
+        )
+        provider, manifest_path = self._run_single_media_case(
+            expected, returned
+        )
+        provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "DRAFT_CREATED")
+        self.assertEqual(m["review"]["zernio_draft_id"], "draft-123")
+
+    # -- FAIL -------------------------------------------------------------
+
+    def test_same_filename_different_host_fails_readback(self):
+        provider, manifest_path = self._run_single_media_case(
+            "https://media.zernio.com/a/img.png",
+            "https://cdn.other.example/a/img.png",
+        )
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_same_host_different_filename_fails_readback(self):
+        provider, manifest_path = self._run_single_media_case(
+            "https://media.zernio.com/a/img.png",
+            "https://media.zernio.com/a/other.png",
+        )
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_http_url_fails_readback(self):
+        provider, manifest_path = self._run_single_media_case(
+            "https://media.zernio.com/a/img.png",
+            "http://media.zernio.com/a/img.png",
+        )
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_external_cdn_same_filename_different_path_fails_readback(self):
+        provider, manifest_path = self._run_single_media_case(
+            "https://cdn.example.com/a/img.png",
+            "https://cdn.example.com/b/img.png",
+        )
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_query_fragment_manufactured_match_fails_readback(self):
+        provider, manifest_path = self._run_single_media_case(
+            "https://media.zernio.com/a/img.png",
+            "https://media.zernio.com/b/img.png?sig=xyz",
+        )
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+
+class MediaIdentityCarouselStructuralTests(unittest.TestCase):
+    """Order/type/count must still fail closed under the new shared rule
+    (CAROUSEL, 2 Zernio-hosted media items each individually eligible for
+    the relaxed filename match)."""
+
+    def setUp(self):
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmpdir_ctx.name)
+        self.addCleanup(self._tmpdir_ctx.cleanup)
+
+    def _carousel_setup(self):
+        manifest_path, _m = make_manifest(
+            self.tmp_path, fmt="CAROUSEL", media_count=2
+        )
+        transport = FakeTransport()
+        setup_valid_transport(transport, fmt="CAROUSEL")
+        expected_urls = [
+            "https://media.zernio.com/temp/a/img-0.png",
+            "https://media.zernio.com/temp/a/img-1.png",
+        ]
+        presign_count = [0]
+
+        def dynamic_post(path, *, json_body=None, headers=None, idempotency_key=None):
+            transport.post_calls.append((path, json_body, headers, idempotency_key))
+            if path == "/media/presign":
+                idx = presign_count[0]
+                presign_count[0] += 1
+                return (
+                    200,
+                    {
+                        "uploadUrl": f"https://upload.example.com/put-{idx}",
+                        "publicUrl": expected_urls[idx],
+                        "key": f"temp/a/img-{idx}.png",
+                        "expiresIn": 3600,
+                    },
+                )
+            if path == "/tools/validate/media":
+                return media_validation_success(url=(json_body or {}).get("url"))
+            return transport.post_responses.get(path, transport.default_post)
+
+        transport.post = dynamic_post
+        return transport, manifest_path, expected_urls
+
+    def _readback_body(self, media_items):
+        return (
+            200,
+            {
+                "post": {
+                    "_id": "draft-123",
+                    "status": "draft",
+                    "content": CAPTION_TEXT,
+                    "platforms": [
+                        {
+                            "platform": "instagram",
+                            "accountId": CANONICAL_ACCOUNT_ID,
+                        }
+                    ],
+                    "mediaItems": media_items,
+                }
+            },
+        )
+
+    def test_changed_media_order_fails_readback(self):
+        transport, manifest_path, urls = self._carousel_setup()
+        # Same two Zernio-rewritten filenames, but positions swapped.
+        returned = [
+            "https://media.zernio.com/final/x/img-1.png",
+            "https://media.zernio.com/final/x/img-0.png",
+        ]
+        transport.get_responses["/posts/draft-123"] = self._readback_body(
+            [{"type": "image", "url": u} for u in returned]
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_changed_media_type_fails_readback(self):
+        transport, manifest_path, urls = self._carousel_setup()
+        transport.get_responses["/posts/draft-123"] = self._readback_body(
+            [
+                {"type": "video", "url": urls[0]},
+                {"type": "image", "url": urls[1]},
+            ]
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_missing_media_item_fails_readback(self):
+        transport, manifest_path, urls = self._carousel_setup()
+        transport.get_responses["/posts/draft-123"] = self._readback_body(
+            [{"type": "image", "url": urls[0]}]
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+    def test_extra_media_item_fails_readback(self):
+        transport, manifest_path, urls = self._carousel_setup()
+        extra = urls + ["https://media.zernio.com/temp/a/img-2.png"]
+        transport.get_responses["/posts/draft-123"] = self._readback_body(
+            [{"type": "image", "url": u} for u in extra]
+        )
+        provider = make_provider(transport)
+        with self.assertRaises(adapter.DraftReadbackFailedError):
+            provider.create_review_draft(manifest_path)
+        _, m = load_manifest(manifest_path)
+        self.assertEqual(m["review"]["state"], "REVIEW_UNKNOWN")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

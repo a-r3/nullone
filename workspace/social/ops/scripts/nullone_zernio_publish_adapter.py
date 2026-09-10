@@ -77,6 +77,7 @@ from urllib import request as urllib_request
 
 from nullone_bridge_common import (
     CANONICAL_ACCOUNT_ID,
+    media_url_identity_matches,
     resolve_workspace_path,
 )
 from nullone_secret_provider import (
@@ -552,8 +553,10 @@ def _check_remote_draft(
 
     Requires where the current API exposes the field: same review post
     id, draft status (preflight only), exact caption/content, exact
-    ordered media items (url + type where exposed), exactly one
-    Instagram target resolving to the canonical account, STORY
+    ordered media items (type where exposed, url via the shared
+    media_url_identity_matches rule -- exact equality, or filename-only
+    equality bound to the exact media.zernio.com host on both sides),
+    exactly one Instagram target resolving to the canonical account, STORY
     settings/contentType when STORY (and never story-typed for
     non-STORY), and no extra publication target. Fields the API does not
     expose are not invented as proof; any present-but-contradictory
@@ -617,7 +620,7 @@ def _check_remote_draft(
         for got, want_item in zip(exposed, want):
             if not isinstance(got, dict):
                 raise error_cls(reason)
-            if got.get("url") != want_item.get("url"):
+            if not media_url_identity_matches(want_item.get("url"), got.get("url")):
                 raise error_cls(reason)
             if "type" in got and got.get("type") != want_item.get("type"):
                 raise error_cls(reason)
