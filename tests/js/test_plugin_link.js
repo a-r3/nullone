@@ -32,15 +32,17 @@ before(() => {
     }
     if (request === "openclaw/plugin-sdk/secret-input-runtime") {
       return {
+        // Faithful to the installed 2026.8.2 contract:
+        // resolveRequiredConfiguredSecretRefInputString(...) -> Promise<string | undefined>
         resolveRequiredConfiguredSecretRefInputString: async ({ value }) => {
           if (
             value &&
             value.source === "store" &&
             value.id === "ZERNIO_PUBLISH_API_TOKEN"
           ) {
-            return { value: "resolved-store-token" };
+            return "resolved-store-token";
           }
-          return { unresolvedRefReason: "not configured" };
+          return undefined;
         },
       };
     }
