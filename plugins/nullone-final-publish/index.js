@@ -705,24 +705,23 @@ function buildHandler(link) {
   };
 }
 
-module.exports = {
-  routeCallback,
-  canonicalStringify,
-  buildFrame,
-  buildStartupFrame,
-  buildHandler,
-  DaemonLink,
-  outcomeText,
-  SAFE_TEXT,
-  resolveControllerPath,
-  resolvePublishToken,
-  SECRET_CONFIG_PATH,
-  MAX_TOKEN_LEN,
-  STARTUP_SCHEMA,
-  CONTROLLER_RELATIVE,
-};
-
-module.exports.default = definePluginEntry({
+// Canonical CommonJS export: the plugin entry object ITSELF (id, name,
+// description, configSchema, register) is the top-level module export.
+// OpenClaw's loader reads the entry directly off `require(...)` / the
+// resolved `import().default` — it never reaches into a nested
+// `.default.register`. A prior revision exported the helpers at
+// module.exports and buried the real entry at module.exports.default,
+// which the production loader never unwraps: register() was never called,
+// so api.registerInteractiveHandler({channel:"telegram", namespace:"texbrif"})
+// never ran and the live interactive registry stayed empty (Sep 11 live
+// callback fallthrough). Test/helper exports are attached as properties on
+// the SAME entry object so existing offline tests keep working via
+// `require(...).routeCallback` etc.
+const entry = definePluginEntry({
+  id: "nullone-final-publish",
+  name: "NullOne Final Publish Handoff",
+  description:
+    "Claims texbrif:publish Telegram callbacks and routes them to the deterministic NullOne publication controller.",
   register(api, ctx) {
     const workspace =
       (ctx && ctx.workspace) || process.env.NULLONE_WORKSPACE || "";
@@ -764,3 +763,22 @@ module.exports.default = definePluginEntry({
     });
   },
 });
+
+Object.assign(entry, {
+  routeCallback,
+  canonicalStringify,
+  buildFrame,
+  buildStartupFrame,
+  buildHandler,
+  DaemonLink,
+  outcomeText,
+  SAFE_TEXT,
+  resolveControllerPath,
+  resolvePublishToken,
+  SECRET_CONFIG_PATH,
+  MAX_TOKEN_LEN,
+  STARTUP_SCHEMA,
+  CONTROLLER_RELATIVE,
+});
+
+module.exports = entry;

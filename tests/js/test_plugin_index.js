@@ -84,7 +84,16 @@ before(() => {
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     if (request === "openclaw/plugin-sdk/plugin-entry") {
-      return { definePluginEntry: (entry) => entry };
+      // Faithful-enough stand-in for the real SDK: passes id/name/
+      // description/register through unchanged and defaults configSchema
+      // (the real helper always exposes one, even when the caller omits
+      // it), without pulling in the full host SDK offline.
+      return {
+        definePluginEntry: ({ configSchema, ...rest }) => ({
+          configSchema: configSchema || {},
+          ...rest,
+        }),
+      };
     }
     if (request === "openclaw/plugin-sdk/secret-input-runtime") {
       return {
@@ -107,7 +116,7 @@ before(() => {
 
 function registeredHandler(link) {
   const api = makeApi();
-  plugin.default.register(api, makeCtx());
+  plugin.register(api, makeCtx());
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
@@ -115,9 +124,29 @@ function registeredHandler(link) {
   return plugin.buildHandler(link);
 }
 
+test("OpenClaw loader sees top-level plugin entry (regression)", () => {
+  // The production loader reads the plugin entry directly off the module
+  // export (require(...) / import().default) -- it never unwraps a nested
+  // `.default`. This is the exact shape the Sep-11 live callback fallthrough
+  // proved missing: FAILS against pre-fix main, where the entry lived only
+  // at module.exports.default and module.exports itself had no `register`.
+  assert.equal(typeof plugin.register, "function");
+  assert.equal(plugin.id, "nullone-final-publish");
+  assert.equal(plugin.name, "NullOne Final Publish Handoff");
+  assert.equal(typeof plugin.description, "string");
+  assert.ok(plugin.description.length > 0);
+  assert.ok("configSchema" in plugin);
+
+  const api = makeApi();
+  plugin.register(api, makeCtx());
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].channel, "telegram");
+  assert.equal(registrations[0].namespace, "texbrif");
+});
+
 test("registration claims telegram/texbrif exactly once", () => {
   const api = makeApi();
-  plugin.default.register(api, makeCtx());
+  plugin.register(api, makeCtx());
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
@@ -369,7 +398,7 @@ test("C: default registration spawns the exact production-relative path", async 
     return fake;
   };
   const api = makeApi({ pluginConfig: { publishToken: STARTUP_TOKEN } });
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
   );
@@ -413,7 +442,7 @@ test("D: missing workspace fails closed with zero spawn", async () => {
     throw new Error("must not spawn");
   };
   const api = makeApi();
-  plugin.default.register(api, makeCtx({ workspace: "", spawnFn }));
+  plugin.register(api, makeCtx({ workspace: "", spawnFn }));
   assert.equal(registrations.length, 1);
   const ctx = makeHandlerCtx();
   const result = await registrations[0].handler(ctx);
@@ -428,7 +457,7 @@ test("E: spawn failure consumes safely and never routes to LLM", async () => {
     throw new Error("spawn exploded");
   };
   const api = makeApi({ pluginConfig: { publishToken: "test-token" } });
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
   );
@@ -445,7 +474,7 @@ test("pre-dispatch spawn failure says request was not sent (exact)", async () =>
     throw new Error("spawn exploded");
   };
   const api = makeApi({ pluginConfig: { publishToken: "test-token" } });
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
   );
@@ -537,7 +566,7 @@ test("manifest declares the publishToken SecretInput path", () => {
 test("missing publishToken fails closed with zero spawn", async () => {
   let spawned = false;
   const api = makeApi({ pluginConfig: {} });
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({
       workspace: "/tmp/nullone-workspace",
@@ -559,7 +588,7 @@ test("missing publishToken fails closed with zero spawn", async () => {
 test("blank publishToken fails closed with zero spawn", async () => {
   let spawned = false;
   const api = makeApi({ pluginConfig: { publishToken: "   " } });
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({
       workspace: "/tmp/nullone-workspace",
@@ -587,7 +616,7 @@ test("non-store SecretRef fails closed with zero spawn", async () => {
       },
     },
   });
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({
       workspace: "/tmp/nullone-workspace",
@@ -673,7 +702,7 @@ test("store SecretRef resolves through the SDK and reaches the pipe", async () =
   });
   // makeApi only models pluginConfig; attach host config for resolution.
   api.config = { secrets: {} };
-  plugin.default.register(
+  plugin.register(
     api,
     makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn: () => fake })
   );
