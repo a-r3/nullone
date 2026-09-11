@@ -21,8 +21,10 @@ from nullone_editorial_runtime import (  # noqa: E402
     OCCURRENCE_FAILURE_BUDGET_SECONDS,
     PROVIDER_CALL_TIMEOUT_SECONDS,
     RETRY_BACKOFF_SECONDS,
+    ProviderExecutionTimeoutError,
     ProviderUnreachableError,
     UnsafeRetryPolicyError,
+    morning_to_first_story_gap_seconds,
     run_morning_editorial,
     validate_occurrence_policy,
     worst_case_occurrence_seconds,
@@ -44,16 +46,23 @@ runner = _load_script(
     "nullone-morning-editorial-run.py",
 )
 
-# Confirmed 2026-09-05 evidence (issue #28): failed Morning Editorial
-# occurrences were spaced as little as this many seconds apart. The
-# bounded retry policy's worst case must stay under this window so a
-# persistent reachability failure cannot still be running when the next
-# scheduled occurrence starts.
-OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS = 600
+# Reviewed replacement for the retired historical "occurrences spaced
+# ~600s apart" assumption (issue #28): Morning owns exactly one daily
+# slot, so the real downstream safety constraint is the schedule-
+# registry-derived gap to Story's earliest daily check, not a same-
+# workflow re-occurrence. See `morning_to_first_story_gap_seconds()`.
+EXPECTED_MORNING_TO_FIRST_STORY_GAP_SECONDS = 7200
 
 # Verified real Morning Editorial run on 2026-09-04: completed in
 # ~118s and produced a valid editorial board. The provider timeout
 # must leave comfortable headroom above this healthy baseline.
+#
+# Proven live evidence (2026-09-11, run run_28849dc4436e74d25ae99dbf):
+# the prior 210s ceiling killed both natural attempts while they were
+# still doing genuine, successful agent/tool work (WebSearch/WebFetch/
+# Bash calls actively succeeding) -- 210s was never a realistic budget
+# for the full research/verification/board/handoff workload the
+# current prompt performs, only for the single historical fast sample.
 VERIFIED_HEALTHY_RUN_SECONDS = 118
 
 
@@ -243,6 +252,120 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             self.assertEqual(result["reason_code"], "EDITORIAL_PROVIDER_ERROR")
             self.assertEqual(len(calls), 1)
 
+    def test_process_timeout_is_typed_separately_from_unreachable(self):
+        # Proven live evidence (2026-09-11): a whole-process wall-clock
+        # timeout is not proof the provider was unreachable. The two
+        # exception types must be distinct, and neither may subclass
+        # the other.
+        self.assertFalse(
+            issubclass(ProviderExecutionTimeoutError, ProviderUnreachableError)
+        )
+        self.assertFalse(
+            issubclass(ProviderUnreachableError, ProviderExecutionTimeoutError)
+        )
+
+    def test_process_timeout_maps_to_its_own_non_retryable_reason_code(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            calls: list[int] = []
+
+            def times_out() -> None:
+                calls.append(1)
+                raise ProviderExecutionTimeoutError(
+                    "Claude invocation exceeded its execution deadline"
+                )
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-11T08:30:00+04:00",
+                board_date="2026-09-11",
+                invoke_provider=times_out,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "PROVIDER_EXECUTION_TIMEOUT")
+            self.assertNotEqual(result["reason_code"], "PROVIDER_UNREACHABLE")
+            # Non-retryable: exactly one attempt, no backoff sleep.
+            self.assertEqual(len(calls), 1)
+
+    def test_process_timeout_is_not_retried_even_with_attempts_remaining(self):
+        # With MAX_ATTEMPTS=2 a retryable failure on attempt 1 would be
+        # retried; a PROVIDER_EXECUTION_TIMEOUT must NOT be, proving the
+        # non-retryable classification -- not merely that it happens to
+        # be the last attempt.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            calls: list[int] = []
+
+            def times_out_then_would_succeed() -> None:
+                calls.append(1)
+                if len(calls) == 1:
+                    raise ProviderExecutionTimeoutError("exceeded deadline")
+                write_morning_artifacts(root, "2026-09-11")
+
+            sleeps: list[float] = []
+            result = run_morning_editorial(
+                occurrence_id="2026-09-11T08:30:00+04:00",
+                board_date="2026-09-11",
+                invoke_provider=times_out_then_would_succeed,
+                sleep=sleeps.append,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["reason_code"], "PROVIDER_EXECUTION_TIMEOUT")
+            self.assertEqual(len(calls), 1, "must not have attempted a retry")
+            self.assertEqual(len(sleeps), 0, "must not have slept for a backoff")
+
+    def test_reachability_failure_still_retries_after_timeout_type_added(self):
+        # Regression guard: introducing ProviderExecutionTimeoutError must
+        # not change proven ENOTFOUND/reachability retry behavior.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            provider = UnreachableStub()
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-11T08:30:00+04:00",
+                board_date="2026-09-11",
+                invoke_provider=provider,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(result["reason_code"], "PROVIDER_UNREACHABLE")
+            self.assertEqual(provider.calls, MAX_ATTEMPTS)
+
+    def test_material_progress_guard_applies_to_execution_timeout_too(self):
+        # The #28 material-progress guard (never re-invoke the provider
+        # once any artifact for this occurrence exists) must protect
+        # PROVIDER_EXECUTION_TIMEOUT identically to PROVIDER_UNREACHABLE
+        # -- no artifact duplication semantics were weakened by adding
+        # the new error type.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            calls: list[int] = []
+
+            def wrote_board_then_timed_out() -> None:
+                calls.append(1)
+                write_board_only(root, "2026-09-11")
+                raise ProviderExecutionTimeoutError("exceeded deadline")
+
+            result = run_morning_editorial(
+                occurrence_id="2026-09-11T08:30:00+04:00",
+                board_date="2026-09-11",
+                invoke_provider=wrote_board_then_timed_out,
+                sleep=lambda _s: None,
+                artifact_root=root,
+                output_root=root / "run-outcomes",
+            )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(result["domain_outcome"], "FAILED")
+            self.assertEqual(result["reason_code"], "HANDOFF_INCOMPLETE")
+
     def test_publication_is_never_referenced_by_the_retry_module(self):
         for filename in (
             "nullone_editorial_runtime.py",
@@ -252,7 +375,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             self.assertNotIn("publish", source)
             self.assertNotIn("zernio", source)
 
-    def test_configured_worst_case_is_exactly_480_seconds(self):
+    def test_configured_worst_case_is_exactly_1260_seconds(self):
         # No sleeping and no real provider calls: this is pure arithmetic
         # over the configured default policy constants.
         computed = worst_case_occurrence_seconds(
@@ -262,17 +385,27 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(MAX_ATTEMPTS, 2)
-        self.assertEqual(PROVIDER_CALL_TIMEOUT_SECONDS, 210)
+        self.assertEqual(PROVIDER_CALL_TIMEOUT_SECONDS, 600)
         self.assertEqual(RETRY_BACKOFF_SECONDS, (60,))
-        self.assertEqual(computed, 480)
-        self.assertEqual(OCCURRENCE_FAILURE_BUDGET_SECONDS, 480)
-        self.assertEqual(computed, OCCURRENCE_FAILURE_BUDGET_SECONDS)
+        self.assertEqual(computed, 1260)
+        self.assertEqual(OCCURRENCE_FAILURE_BUDGET_SECONDS, 1800)
+        self.assertLess(computed, OCCURRENCE_FAILURE_BUDGET_SECONDS)
 
-    def test_declared_budget_is_under_observed_occurrence_spacing(self):
+    def test_morning_to_first_story_gap_is_exactly_7200_seconds(self):
+        # Schedule-registry-derived, not a duplicated cron string: Morning
+        # owns 08:30 Asia/Baku and Story's earliest daily slot is 10:30
+        # Asia/Baku (`nullone_schedule_registry`).
+        self.assertEqual(
+            morning_to_first_story_gap_seconds(),
+            EXPECTED_MORNING_TO_FIRST_STORY_GAP_SECONDS,
+        )
+
+    def test_declared_budget_is_strictly_under_the_first_story_gap(self):
         self.assertLess(
             OCCURRENCE_FAILURE_BUDGET_SECONDS,
-            OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS,
+            morning_to_first_story_gap_seconds(),
         )
+        self.assertEqual(morning_to_first_story_gap_seconds(), 7200)
 
     def test_provider_timeout_has_comfortable_headroom_over_healthy_baseline(
         self,
@@ -283,7 +416,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             PROVIDER_CALL_TIMEOUT_SECONDS,
             VERIFIED_HEALTHY_RUN_SECONDS,
         )
-        self.assertEqual(headroom, 92)
+        self.assertEqual(headroom, 482)
         self.assertGreaterEqual(headroom, 60)
 
     def test_validator_accepts_the_configured_default_policy(self):
@@ -296,9 +429,9 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
         )
 
     def test_validator_rejects_a_policy_that_would_overrun_the_budget(self):
-        # The pre-fix policy (3 attempts, 900s timeout, (30, 90) backoff)
-        # must be actually rejected by the validator, not merely shown to
-        # be numerically larger.
+        # A policy that overruns the declared budget must be actually
+        # rejected by the validator, not merely shown to be numerically
+        # larger.
         with self.assertRaises(UnsafeRetryPolicyError):
             validate_occurrence_policy(
                 max_attempts=3,
@@ -307,14 +440,35 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
                 budget_seconds=OCCURRENCE_FAILURE_BUDGET_SECONDS,
             )
 
-    def test_validator_rejects_a_budget_at_or_above_observed_spacing(self):
+    def test_validator_rejects_a_budget_at_or_above_the_first_story_gap(self):
         with self.assertRaises(UnsafeRetryPolicyError):
             validate_occurrence_policy(
                 max_attempts=MAX_ATTEMPTS,
                 provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
                 backoff_seconds=RETRY_BACKOFF_SECONDS,
-                budget_seconds=OBSERVED_MIN_OCCURRENCE_SPACING_SECONDS,
+                budget_seconds=EXPECTED_MORNING_TO_FIRST_STORY_GAP_SECONDS,
             )
+
+    def test_validator_gap_seconds_override_is_honored(self):
+        # Explicit gap_seconds lets a test exercise the boundary without
+        # depending on the schedule registry's current live numbers.
+        with self.assertRaises(UnsafeRetryPolicyError):
+            validate_occurrence_policy(
+                max_attempts=MAX_ATTEMPTS,
+                provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
+                backoff_seconds=RETRY_BACKOFF_SECONDS,
+                budget_seconds=100,
+                gap_seconds=100,
+            )
+
+        # Does not raise: budget strictly under the overridden gap.
+        validate_occurrence_policy(
+            max_attempts=MAX_ATTEMPTS,
+            provider_call_timeout_seconds=PROVIDER_CALL_TIMEOUT_SECONDS,
+            backoff_seconds=RETRY_BACKOFF_SECONDS,
+            budget_seconds=OCCURRENCE_FAILURE_BUDGET_SECONDS,
+            gap_seconds=OCCURRENCE_FAILURE_BUDGET_SECONDS + 1,
+        )
 
     def test_cli_wrapper_passes_provider_timeout_to_subprocess(self):
         captured: dict = {}
@@ -331,6 +485,33 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             captured["kwargs"]["timeout"],
             PROVIDER_CALL_TIMEOUT_SECONDS,
         )
+
+    def test_cli_wrapper_subprocess_timeout_raises_execution_timeout_not_unreachable(
+        self,
+    ):
+        # This is the exact live 2026-09-11 failure shape: the outer
+        # `claude -p` process exceeds its wall-clock deadline. It must
+        # surface as ProviderExecutionTimeoutError, never
+        # ProviderUnreachableError.
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+        with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(claude_editorial_provider.ProviderExecutionTimeoutError):
+                runner._default_invoke_provider()
+
+    def test_cli_wrapper_actual_reachability_failure_still_unreachable(self):
+        # Regression guard: a real reachability failure (non-zero exit,
+        # matching output) must still raise ProviderUnreachableError,
+        # unaffected by the new timeout error type.
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "API Error: Can't reach the API server — ENOTFOUND"
+            )
+
+        with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(ProviderUnreachableError):
+                runner._default_invoke_provider()
 
     def test_concurrent_same_occurrence_serializes_to_one_provider_call(self):
         # Two threads calling run_morning_editorial() with distinct

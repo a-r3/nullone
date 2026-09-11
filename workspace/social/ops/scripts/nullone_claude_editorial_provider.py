@@ -12,9 +12,13 @@ this module; only the two CLI/runner layers do, per
 provider-specific invocation details stop at the infrastructure adapter
 boundary.
 
-Not exercised by any test in this repository: tests inject a fake
+Not exercised by most tests in this repository: most inject a fake
 `invoke_provider` into `run_morning_editorial`/`run_morning_workflow`
-instead. Production wiring of this default path has not been deployed.
+instead. This default path IS the deployed production wiring -- it is
+imported directly by `nullone_scheduled_run_dispatch.run_morning_trigger`
+and confirmed executed by the real 2026-09-11 natural Morning Editorial
+occurrence (run `run_28849dc4436e74d25ae99dbf`); it is not a dormant or
+unused default.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_runtime import (
     PROVIDER_CALL_TIMEOUT_SECONDS,
     REACHABILITY_PATTERN,
+    ProviderExecutionTimeoutError,
     ProviderUnreachableError,
 )
 
@@ -55,8 +60,14 @@ def default_invoke_provider() -> None:
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        raise ProviderUnreachableError(
-            "Claude invocation timed out"
+        # The whole `claude -p` agent process exceeded its outer
+        # wall-clock deadline. This is NOT proof the provider/runtime
+        # was unreachable -- proven live evidence (2026-09-11) shows
+        # the child can still be actively succeeding at WebSearch/
+        # WebFetch/Bash calls when it is killed. Keep this distinct
+        # from ProviderUnreachableError so it is never auto-retried.
+        raise ProviderExecutionTimeoutError(
+            "Claude invocation exceeded its execution deadline"
         ) from e
     except FileNotFoundError as e:
         raise BridgeError("claude binary not found") from e
