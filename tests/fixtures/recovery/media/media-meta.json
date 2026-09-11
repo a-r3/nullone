@@ -1,0 +1,10 @@
+{
+  "artifacts": [
+    {
+      "bytes": 64,
+      "dimensions": "16x4",
+      "path": "media/artifact-fix001.bin",
+      "sha256": "17ff3615c8f2285b470ee569e15b37503eae49e36882b63ccc1aceb055d7f082"
+    }
+  ]
+}

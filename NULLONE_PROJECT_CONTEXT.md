@@ -1758,3 +1758,13 @@ infrastructure; issue #10 will provide empirical restore proof. Issue
 #37 remains open; production stabilization state unchanged. Do not claim
 recovery guarantees are operational until implemented and proven by the
 issue #10 restore drill.
+
+J. PR #106 merged as `1b4d48551457c523d960780a76f84633dc9293ad`:
+recovery guarantees are on main; issue #9 is CLOSED with accepted
+ordinary DESIGN TARGETS (RPO=900s, RTO=14400s). Issue #10 fixture
+restore drill work (`scripts/recovery/restore_drill.py`, sanitized
+fixtures, `docs/operations/restore-drill.md`) is repository-only:
+publisher-disabled restore proven on fixtures with zero side effects;
+private snapshot validation requires separate explicit authorization;
+production RPO/RTO remain UNPROVEN. Issue #37 remains open; production
+stabilization state unchanged.
