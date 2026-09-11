@@ -40,9 +40,10 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def make_snapshot(base: Path = FIXTURE, mutate=None) -> Path:
+def make_snapshot(base: Path = FIXTURE, mutate=None, remanifest: bool = True) -> Path:
     """Copy the sanitized fixture to temp, apply mutate(dir), and rewrite
-    the snapshot manifest to match (tests opt into each break explicitly)."""
+    the snapshot manifest to match (tests opt into each break explicitly).
+    remanifest=False keeps a deliberately broken manifest untouched."""
     td = Path(tempfile.mkdtemp(prefix="nullone-snap-"))
     for src in sorted(base.rglob("*")):
         if not src.is_file():
@@ -52,7 +53,8 @@ def make_snapshot(base: Path = FIXTURE, mutate=None) -> Path:
         shutil.copy2(str(src), str(dest))
     if mutate is not None:
         mutate(td)
-    rewrite_manifest(td)
+    if remanifest:
+        rewrite_manifest(td)
     return td
 
 
@@ -84,8 +86,8 @@ class RestoreDrillTests(unittest.TestCase):
         for s in self.snaps:
             shutil.rmtree(s, ignore_errors=True)
 
-    def _snap(self, mutate=None) -> Path:
-        s = make_snapshot(mutate=mutate)
+    def _snap(self, mutate=None, remanifest: bool = True) -> Path:
+        s = make_snapshot(mutate=mutate, remanifest=remanifest)
         self.snaps.append(s)
         return s
 
@@ -192,16 +194,23 @@ class RestoreDrillTests(unittest.TestCase):
         self.assertEqual(report["fake_provider_publish_count"], 0)
         self.assertNotIn("reconciled", report)
 
-    # -- G: provider unreachable --
+    # -- G: provider unreachable forces CHECK_REQUIRED (never SUCCESS) --
     def test_provider_unreachable_check_required(self):
         snap = self._snap()
         root = self._root("rG")
         report = run_drill(snapshot_dir=snap, restore_root=root, scenario="G",
                            provider_state="UNREACHABLE")
         self.assertEqual(report["provider_truth"], "UNKNOWN")
-        self.assertEqual(report["recovery_result"], "SUCCESS")
+        self.assertEqual(report["provider_reachability"], "UNREACHABLE")
+        self.assertEqual(report["recovery_result"], "CHECK_REQUIRED")
         self.assertEqual(report["publisher_state"], "DISABLED")
+        self.assertFalse(report["automatic_retry_allowed"])
+        self.assertFalse((root / "RESTORE_READY").is_file(),
+                         "PROVIDER_UNREACHABLE_READY_MARKER must be NO")
         self.assertEqual(report["fake_provider_publish_count"], 0)
+        self.assertEqual(report["fake_provider_write_count"], 0)
+        self.assertIn("PROVIDER_UNREACHABLE_DURING_RECOVERY",
+                      " ".join(report["gaps"]))
 
     # -- notifier history missing: no auto resend --
     def test_missing_notifier_no_auto_resend(self):
@@ -342,12 +351,99 @@ class RestoreDrillTests(unittest.TestCase):
                       "checksum_result", "record_count_result",
                       "referential_result", "media_result",
                       "critical_history_result", "provider_truth",
+                      "provider_reachability", "notifier_auto_resend_allowed",
                       "publisher_state", "automatic_retry_allowed",
                       "fake_provider_read_count", "fake_provider_write_count",
                       "fake_provider_publish_count", "fake_telegram_send_count",
                       "recovery_result", "gaps", "external_gates"):
             self.assertIn(field, report, f"report missing {field}")
         self.assertGreaterEqual(report["duration_ms"], 0)
+
+    def test_complete_report_schema_all_outcomes(self):
+        required = ("checksum_result", "record_count_result",
+                    "referential_result", "media_result",
+                    "critical_history_result", "provider_truth",
+                    "provider_reachability", "notifier_auto_resend_allowed",
+                    "publisher_state", "automatic_retry_allowed",
+                    "fake_provider_read_count", "fake_provider_write_count",
+                    "fake_provider_publish_count", "fake_telegram_send_count",
+                    "recovery_result", "gaps", "external_gates",
+                    "started_at", "finished_at", "duration_ms")
+
+        def check(report, result):
+            self.assertEqual(report["recovery_result"], result)
+            for field in required:
+                self.assertIn(field, report, f"{result} report missing {field}")
+            self.assertEqual(report["publisher_state"], "DISABLED")
+            self.assertFalse(report["automatic_retry_allowed"])
+            self.assertEqual(report["fake_provider_write_count"], 0)
+            self.assertEqual(report["fake_provider_publish_count"], 0)
+            self.assertEqual(report["fake_telegram_send_count"], 0)
+
+        snap = self._snap()
+        check(run_drill(snapshot_dir=snap, restore_root=self._root("s-ok"),
+                         scenario="A"), "SUCCESS")
+        check(run_drill(snapshot_dir=snap, restore_root=self._root("s-blk"),
+                         scenario="B", require_decryption_key=True,
+                         decryption_key_available=False), "BLOCKED")
+
+        def drop_receipt(d: Path):
+            shutil.rmtree(d / "receipts" / "POST_fix001")
+
+        snap_c = self._snap(mutate=drop_receipt)
+        check(run_drill(snapshot_dir=snap_c, restore_root=self._root("s-chk"),
+                         scenario="C"), "CHECK_REQUIRED")
+        check(run_drill(snapshot_dir=snap, restore_root=self._root("s-int"),
+                         scenario="L", interrupt_at="before_finalize"),
+              "INTERRUPTED")
+
+        def break_manifest(d: Path):
+            (d / "snapshot-manifest.json").write_text("{invalid")
+
+        snap_bad = self._snap(mutate=break_manifest, remanifest=False)
+        rep = run_drill(snapshot_dir=snap_bad, restore_root=self._root("s-bad"),
+                        scenario="X")
+        check(rep, "FAILED")
+
+    def test_invalid_manifest_schema_refused_with_report(self):
+        def bad_schema(d: Path):
+            m = json.loads((d / "snapshot-manifest.json").read_text())
+            m["schema"] = "evil-schema"
+            (d / "snapshot-manifest.json").write_text(json.dumps(m))
+
+        snap = self._snap(mutate=bad_schema, remanifest=False)
+        root = self._root("rSCH")
+        report = run_drill(snapshot_dir=snap, restore_root=root, scenario="X")
+        self.assertEqual(report["recovery_result"], "REFUSED")
+        self.assertEqual(report["publisher_state"], "DISABLED")
+        self.assertIn("checksum_result", report)
+
+    def test_production_snapshot_source_blocked(self):
+        from restore_drill import refuse_unsafe_snapshot_source
+
+        snap = self._snap()
+        home = Path.home()
+        oc = home / ".openclaw"
+        for forbidden in (oc, oc / "workspace", oc / "workspace" / "social", home):
+            with self.subTest(path=str(forbidden)):
+                with self.assertRaises(DrillRefused) as cm:
+                    run_drill(snapshot_dir=forbidden,
+                              restore_root=self._root("rPS"), scenario="A")
+                self.assertIn("SNAPSHOT_SOURCE_FORBIDDEN", str(cm.exception))
+                with self.assertRaises(DrillRefused):
+                    refuse_unsafe_snapshot_source(forbidden)
+        # Temp sanitized fixture copy stays accepted.
+        root = self._root("rPSok")
+        report = run_drill(snapshot_dir=snap, restore_root=root, scenario="A")
+        self.assertEqual(report["recovery_result"], "SUCCESS")
+
+    def test_snapshot_source_refusal_writes_nothing(self):
+        home = Path.home()
+        probe_root = Path(self.tmp.name) / "untouched"
+        with self.assertRaises(DrillRefused):
+            run_drill(snapshot_dir=home / ".openclaw",
+                      restore_root=probe_root, scenario="A")
+        self.assertFalse(probe_root.exists())
 
     def test_no_secret_fixture_leakage(self):
         # Every fixture file must be committable: repo secret-safety

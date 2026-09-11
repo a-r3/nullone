@@ -47,6 +47,19 @@ def _home() -> Path:
     return Path.home().resolve()
 
 
+def _is_production_path(resolved: Path) -> str | None:
+    """Return a refusal reason if the resolved path is a live/production
+    location, else None. Shared by destination and snapshot-source guards."""
+    home = _home()
+    oc = home / ".openclaw"
+    if resolved == home or resolved == oc or str(resolved).startswith(str(oc) + "/"):
+        return ("inside live runtime (~/.openclaw); "
+                "disposable fixture roots only")
+    if resolved == Path("/"):
+        return "refusing filesystem root"
+    return None
+
+
 def refuse_unsafe_root(restore_root: Path) -> Path:
     """Resolve and refuse production-ish or non-fresh destinations."""
     root = Path(restore_root)
@@ -54,19 +67,29 @@ def refuse_unsafe_root(restore_root: Path) -> Path:
         resolved = root.resolve()
     except OSError as e:
         raise DrillRefused(f"RESTORE_ROOT_UNRESOLVABLE: {e}") from e
-    home = _home()
-    oc = home / ".openclaw"
-    if resolved == home or resolved == oc or str(resolved).startswith(str(oc) + "/"):
-        raise DrillRefused(
-            "RESTORE_ROOT_FORBIDDEN: destination is inside live runtime "
-            "(~/.openclaw); disposable fixture roots only")
-    if resolved == Path("/") or resolved == home:
-        raise DrillRefused("RESTORE_ROOT_FORBIDDEN: refusing filesystem/home root")
-    if resolved.exists():
-        if not resolved.is_dir():
-            raise DrillRefused("RESTORE_ROOT_NOT_A_DIRECTORY")
-        if any(resolved.iterdir()):
-            raise DrillRefused("RESTORE_ROOT_NOT_EMPTY: restore root must be empty/new")
+    reason = _is_production_path(resolved)
+    if reason is not None:
+        raise DrillRefused(f"RESTORE_ROOT_FORBIDDEN: destination {reason}")
+    if not resolved.exists():
+        return resolved
+    if not resolved.is_dir():
+        raise DrillRefused("RESTORE_ROOT_NOT_A_DIRECTORY")
+    if any(resolved.iterdir()):
+        raise DrillRefused("RESTORE_ROOT_NOT_EMPTY: restore root must be empty/new")
+    return resolved
+
+
+def refuse_unsafe_snapshot_source(snapshot_dir: str | Path) -> Path:
+    """Resolve and refuse production/private snapshot sources BEFORE any
+    read. Temp-dir copies of sanitized fixtures are accepted; the manifest
+    must still prove source_kind=SANITIZED_FIXTURE afterwards."""
+    try:
+        resolved = Path(snapshot_dir).resolve()
+    except OSError as e:
+        raise DrillRefused(f"SNAPSHOT_SOURCE_UNRESOLVABLE: {e}") from e
+    reason = _is_production_path(resolved)
+    if reason is not None:
+        raise DrillRefused(f"SNAPSHOT_SOURCE_FORBIDDEN: snapshot source {reason}")
     return resolved
 
 
@@ -318,7 +341,9 @@ def run_drill(*,
     from datetime import datetime, timezone
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     root = refuse_unsafe_root(Path(restore_root))
-    snapshot = Path(snapshot_dir)
+    snapshot = refuse_unsafe_snapshot_source(snapshot_dir)
+    # Complete report shape from the start: unevaluated phases stay
+    # explicit so every exit path emits all required fields.
     report: dict = {
         "schema": REPORT_SCHEMA,
         "scenario": scenario,
@@ -326,6 +351,14 @@ def run_drill(*,
         "restore_root": str(root),
         "publisher_state": PUBLISHER_STATE,
         "automatic_retry_allowed": False,
+        "checksum_result": "NOT_EVALUATED",
+        "record_count_result": "NOT_EVALUATED",
+        "referential_result": "NOT_EVALUATED",
+        "media_result": "NOT_EVALUATED",
+        "critical_history_result": "NOT_EVALUATED",
+        "provider_truth": "UNKNOWN",
+        "provider_reachability": "UNKNOWN",
+        "notifier_auto_resend_allowed": False,
         "fake_provider_read_count": 0,
         "fake_provider_write_count": 0,
         "fake_provider_publish_count": 0,
@@ -357,7 +390,14 @@ def run_drill(*,
         report["gaps"].append("ENCRYPTED_BACKUP_UNUSABLE_WITHOUT_KEY")
         return finish("BLOCKED")
 
-    manifest = load_snapshot_manifest(snapshot)
+    try:
+        manifest = load_snapshot_manifest(snapshot)
+    except DrillFailed as e:
+        report["gaps"].append(str(e))
+        # Policy refusal (wrong schema/kind) vs integrity failure.
+        if "SCHEMA_MISMATCH" in str(e) or "SOURCE_UNTRUSTED" in str(e):
+            return finish("REFUSED")
+        return finish("FAILED")
 
     # Stage: copy with per-file hash verification.
     staging = root / STAGING_DIRNAME
@@ -402,10 +442,16 @@ def run_drill(*,
     report["critical_history_result"] = critical_status
     report["gaps"].extend(critical_gaps)
 
-    # Read-only provider truth (never a write).
+    # Read-only provider truth (never a write). UNREACHABLE is distinct
+    # from ordinary UNKNOWN: it forces CHECK_REQUIRED, never SUCCESS.
     truth = provider.read_status("fixture-probe")
     report["provider_truth"] = truth
+    report["provider_reachability"] = (
+        "UNREACHABLE" if provider_state == "UNREACHABLE" else "REACHABLE")
     report["fake_provider_read_count"] = provider.read_calls
+    if report["provider_reachability"] == "UNREACHABLE":
+        report["gaps"].append(
+            "PROVIDER_UNREACHABLE_DURING_RECOVERY: UNKNOWN, no retry")
 
     # Reconciliation semantics (ADR-01): forward-only on positive proof.
     reconciled = None
@@ -433,11 +479,14 @@ def run_drill(*,
         report["gaps"].append("REMOTE_BACKUP_OUTAGE: ordinary availability degraded")
 
     # Verdict: integrity failures already returned FAILED above.
-    # Critical gaps and media gaps need operator review; everything else
-    # restores successfully with publisher unconditionally disabled.
+    # Critical gaps, media gaps, and unreachable providers need operator
+    # review; everything else restores successfully with publisher
+    # unconditionally disabled.
     if critical_status != "COMPLETE":
         result = "CHECK_REQUIRED"
     elif any(g.startswith("MEDIA_RECOVERY_GAP") for g in report["gaps"]):
+        result = "CHECK_REQUIRED"
+    elif report["provider_reachability"] == "UNREACHABLE":
         result = "CHECK_REQUIRED"
     else:
         result = "SUCCESS"

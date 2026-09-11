@@ -23,7 +23,10 @@ Fixtures: `tests/fixtures/recovery/` (`source_kind=SANITIZED_FIXTURE`).
 - Stale `attempts=0` + remote DRAFT + missing history → CHECK_REQUIRED,
   no retry (scenario H). Remote DRAFT proves nothing.
 - Partial/corrupt critical history → CHECK_REQUIRED, publisher disabled
-  (scenarios C, K). Provider unreachable → UNKNOWN/CHECK_REQUIRED (G).
+  (scenarios C, K). Provider UNREACHABLE → `provider_truth=UNKNOWN`,
+  `provider_reachability=UNREACHABLE`, CHECK_REQUIRED, no READY marker
+  (scenario G) — UNREACHABLE is never collapsed into a successful
+  ordinary UNKNOWN.
 - Missing notifier history forbids auto-resend (no NOTIFIER certainty
   fabricated). Expired-reference-without-bytes → MEDIA_RECOVERY_GAP (E).
 - Truncated counts, missing files, and checksum mismatches fail closed
@@ -61,7 +64,7 @@ Fixtures: `tests/fixtures/recovery/` (`source_kind=SANITIZED_FIXTURE`).
 | D stale + PUBLISHED | provider PUBLISHED | SUCCESS + forward reconcile, NO RETRY | DISABLED |
 | E URL expired | bytes removed | MEDIA_RECOVERY_GAP | DISABLED |
 | F backup outage | remote unavailable flag | SUCCESS + degradation gap | DISABLED |
-| G unreachable | provider UNREACHABLE | UNKNOWN / CHECK_REQUIRED | DISABLED |
+| G unreachable | provider UNREACHABLE | UNKNOWN / CHECK_REQUIRED, no READY | DISABLED |
 | H attempts=0 + DRAFT + missing | receipt removed, DRAFT | CHECK_REQUIRED, NO RETRY | DISABLED |
 | I truncated JSONL | hash/count mismatch | FAILED | DISABLED |
 | J missing file | manifest declares absent file | FAILED | DISABLED |
@@ -70,3 +73,16 @@ Fixtures: `tests/fixtures/recovery/` (`source_kind=SANITIZED_FIXTURE`).
 
 Determinism claim: STRUCTURAL (same checks, same verdicts) — never
 cross-host byte identity, never production RPO/RTO proof.
+
+Report shape: every safe-root drill attempt emits a complete
+`restore-report.json` (all phase fields explicit, unevaluated phases as
+`NOT_EVALUATED`/`UNKNOWN`). Reports are written for SUCCESS, BLOCKED,
+CHECK_REQUIRED, FAILED, INTERRUPTED, and invalid-manifest outcomes. No
+report — and zero writes of any kind — is produced when the DESTINATION
+itself is refused as unsafe.
+
+Snapshot sources: the fixture CLI refuses production/private source
+paths (`~/.openclaw` subtree, HOME, filesystem root) before any read
+(`SNAPSHOT_SOURCE_FORBIDDEN`); temp-dir fixture copies are accepted and
+must then prove `source_kind=SANITIZED_FIXTURE`. Private snapshots stay
+exclusively behind the authorization-gated interface.
