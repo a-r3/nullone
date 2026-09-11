@@ -1,0 +1,5 @@
+# NullOne dev/test dependencies.
+# Deliberately empty: offline tests use Python stdlib (unittest) only.
+# Optional tooling, NOT required:
+# - node >= 20 (release-CLI JS --check hook; skipped when absent)
+# - gh CLI (release-CLI live CI proof; offline tests inject the adapter)

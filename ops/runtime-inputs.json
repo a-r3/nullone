@@ -1,0 +1,58 @@
+{
+  "inputs": {
+    ".github/workflows/ci.yml": {
+      "bytes": 2752,
+      "sha256": "fb2493ee4463c8e0feec2b6e336fd0dd64b0dfc844dedbb64ded9290025bbf89"
+    },
+    "requirements-dev.txt": {
+      "bytes": 277,
+      "sha256": "613c86109e027618bd1ce47cc07029c27797a43def91189ce5706ffc0df1ba93"
+    },
+    "requirements-runtime.txt": {
+      "bytes": 277,
+      "sha256": "d51105c9932a091dc16d1603526dbfcf78409df24b8e455a35887897d02adbde"
+    },
+    "scripts/capture-runtime-versions.py": {
+      "bytes": 3353,
+      "sha256": "c2b88ed2bc34075db39ea3641982ec22e1ccb77cce4a47fdb86b73340df1a57a"
+    },
+    "scripts/validate-offline.sh": {
+      "bytes": 2498,
+      "sha256": "9c0c4bb3ef899509dec2ae0e276427ecde6f1bc62b59b0bfc87c18ba519f9281"
+    },
+    "tests/fixtures/offline-render-carousel.json": {
+      "bytes": 468,
+      "sha256": "ff67b1f989193f75226c1bf576c2bb84fe9ba2bab1749012a349fc9dfb46b5ca"
+    },
+    "tests/fixtures/offline-render-feed.json": {
+      "bytes": 126,
+      "sha256": "97df39e789ff3e372b646a8e84745a54c5d04e359e7a1f244bdd532195acf443"
+    },
+    "tests/fixtures/offline-render-story.json": {
+      "bytes": 227,
+      "sha256": "bc02275220f45d15676babe0dbc40809ea8c276150254bf07cf3e66a90f0c273"
+    },
+    "workspace/social/references/style-profile.md": {
+      "bytes": 10173,
+      "sha256": "9b3eebef75495c9dcb1381bc92c12c3b9e6376616a5c76562d388ba189af65bc"
+    },
+    "workspace/social/references/visual-rules.md": {
+      "bytes": 8730,
+      "sha256": "b969c3425fa03254877cc79b17a5c9419a76751c635e33f116995daa646e8842"
+    },
+    "workspace/social/tools/render_carousel_v2.py": {
+      "bytes": 9233,
+      "sha256": "ef79b46c25f747c4d7deec18abbbf5456e180ecc7fba79cb1019b3416378f507"
+    },
+    "workspace/social/tools/render_story_v2.py": {
+      "bytes": 6052,
+      "sha256": "86a49ab8b3ca679e51479bc32eb7268fd3f68474a1cf0697c59b9b58f09e5fb3"
+    },
+    "workspace/social/tools/render_texbrif_v2.py": {
+      "bytes": 4741,
+      "sha256": "1cf16bdc574e5d1a474d68dd79006ff8f605d8d4432e10e37189f6456c691b36"
+    }
+  },
+  "note": "Immutable renderer/test inputs only. Never secrets, ledgers, manifests, state, sessions, or deploy-state.",
+  "schema": "nullone.runtime-inputs/v1"
+}

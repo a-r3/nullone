@@ -146,7 +146,10 @@ single proven filesystem root behind `--production-root`.
 externally-controlled components (repository-only classification in the
 policy): their live destinations (Gateway plugin dir, agent runtime) are
 separate, unproven filesystem roots, so the tool never copies those files
-anywhere and never guesses multi-root paths.
+anywhere and never guesses multi-root paths. The release CLI does NOT
+install host packages, fonts, OpenClaw, or models; it syncs reviewed
+workspace file bytes only (host/runtime dependencies are inventoried
+separately in `docs/operations/runtime-inventory.md`).
 
 If a reviewed release range touches an external component, the plan
 reports `EXTERNAL_COMPONENT_CHANGES` (count and paths) and ordinary
