@@ -14,12 +14,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from ops.lib import gitops  # noqa: E402
+from ops.lib import ci_gate, gitops  # noqa: E402
+
+# Original live fetch (setUp patches ci_gate._fetch_runs_via_gh; tests needing
+# the real function use this reference to bypass the patch explicitly).
+_REAL_FETCH_RUNS = ci_gate._fetch_runs_via_gh
 from ops.lib.policy import (  # noqa: E402
     PolicyError,
     assert_prod_path_safe,
@@ -145,10 +151,23 @@ def snapshot_tree(prod: Path) -> dict[str, str]:
     return out
 
 
+def _cli_main():
+    """Import the extensionless ops/nullone entrypoint for in-process tests."""
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+
+    mod = sys.modules.get("nullone_cli_entry")
+    if mod is None:
+        loader = SourceFileLoader("nullone_cli_entry", str(ROOT / "ops" / "nullone"))
+        spec = importlib.util.spec_from_loader("nullone_cli_entry", loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["nullone_cli_entry"] = mod
+        loader.exec_module(mod)
+    return mod.main
+
+
 def snapshot_full(prod: Path) -> dict[str, str]:
-    """Map relative path -> identity for the ENTIRE production tree,
-    including deploy-state. Symlinks are recorded as links (never
-    followed), so failure-path tests prove zero artifacts anywhere."""
+    """Full-tree snapshot including deploy-state. Symlinks recorded, never followed."""
     import os as _os
 
     out: dict[str, str] = {}
@@ -180,20 +199,68 @@ BASE_FILES = {
 }
 
 
+def _runs_for(sha: str, name: str = "NullOne CI", status: str = "completed",
+              conclusion: str | None = "success") -> list[dict]:
+    return [{"name": name, "head_sha": sha, "status": status, "conclusion": conclusion}]
+
+
+@contextmanager
+def mock_ci(mode: str = "nullone-success"):
+    """Explicit Python-only CI adapter injection for offline tests.
+
+    Patches ci_gate._fetch_runs_via_gh; the live check_ci_success path
+    (including the real evaluator) is otherwise untouched. No environment
+    variable influences the gate.
+    """
+    other = {"name": "Some Other Check", "status": "completed", "conclusion": "success"}
+
+    def _fetch(sha: str) -> list[dict]:
+        nul = {"name": "NullOne CI", "head_sha": sha}
+        if mode in ("nullone-success", "success"):
+            return [{**nul, "status": "completed", "conclusion": "success"}]
+        if mode in ("nullone-failure", "failure"):
+            return [{**nul, "status": "completed", "conclusion": "failure"}]
+        if mode == "nullone-cancelled":
+            return [{**nul, "status": "completed", "conclusion": "cancelled"}]
+        if mode in ("nullone-pending", "pending"):
+            return [{**nul, "status": "in_progress", "conclusion": None}]
+        if mode == "nullone-queued":
+            return [{**nul, "status": "queued", "conclusion": None}]
+        if mode in ("nullone-missing", "missing"):
+            return []
+        if mode == "unrelated-only":
+            return [{**other, "head_sha": sha}]
+        if mode == "unrelated-only-plus-pending":
+            return [{**other, "head_sha": sha},
+                    {**nul, "status": "in_progress", "conclusion": None}]
+        if mode in ("error", "ci-error"):
+            raise ci_gate.CIError("CI_STATUS_UNKNOWN (mock transport error)")
+        raise AssertionError(f"unknown mock_ci mode: {mode!r}")
+
+    with mock.patch.object(ci_gate, "_fetch_runs_via_gh", side_effect=_fetch):
+        yield
+
+
 class ReleaseCLITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="nullone-t-")
         self.addCleanup(self.tmp.cleanup)
-        self.old_ci = os.environ.get("NULONE_CI_MOCK")
-        os.environ["NULONE_CI_MOCK"] = "nullone-success"
-        self.addCleanup(self._restore_ci)
+        # Default: explicit success adapter for all offline flows.
+        patcher = mock.patch.object(
+            ci_gate, "_fetch_runs_via_gh",
+            side_effect=lambda sha: _runs_for(sha))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # The (removed) env bypass must not exist: fail loudly if leaked in.
+        self._saved_ci_env = os.environ.pop("NULONE_CI_MOCK", None)
+        self.addCleanup(self._restore_ci_env)
         self.policy = load_policy(POLICY_PATH)
 
-    def _restore_ci(self):
-        if self.old_ci is None:
-            os.environ.pop("NULONE_CI_MOCK", None)
+    def _restore_ci_env(self):
+        if self._saved_ci_env is not None:
+            os.environ["NULONE_CI_MOCK"] = self._saved_ci_env
         else:
-            os.environ["NULONE_CI_MOCK"] = self.old_ci
+            os.environ.pop("NULONE_CI_MOCK", None)
 
     def _prod(self, name="prod") -> Path:
         p = Path(self.tmp.name) / name
@@ -369,7 +436,7 @@ class ReleaseCLITests(unittest.TestCase):
             run_update(repo, prod, target_arg="abc123", assume_yes=True, do_fetch=False)
         self.assertIn("TARGET_MUST_BE_FULL_SHA", str(cm.exception))
 
-    # -- CI gate: NullOne CI specifically --
+    # -- CI gate: NullOne CI specifically (explicit adapter injection) --
     def test_ci_unproven_rejected(self):
         repo = make_repo(dict(BASE_FILES))
         prod = self._prod()
@@ -389,19 +456,44 @@ class ReleaseCLITests(unittest.TestCase):
             ("missing", "CI_MISSING"),
             ("error", "CI_STATUS_UNKNOWN"),
         ]:
-            os.environ["NULONE_CI_MOCK"] = mode
-            with self.assertRaises(Exception) as cm:
-                run_update(repo, prod, assume_yes=True, do_fetch=False)
+            with mock_ci(mode):
+                with self.assertRaises(Exception) as cm:
+                    run_update(repo, prod, assume_yes=True, do_fetch=False)
             self.assertIn("CI_GATE_BLOCKED", str(cm.exception), mode)
             self.assertIn(needle, str(cm.exception), mode)
-        os.environ["NULONE_CI_MOCK"] = "nullone-success"
 
     def test_ci_nullone_success_passes(self):
         repo = make_repo(dict(BASE_FILES))
         prod = self._prod()
-        os.environ["NULONE_CI_MOCK"] = "nullone-success"
-        res = self._adopt(repo, prod)
+        with mock_ci("nullone-success"):
+            res = self._adopt(repo, prod)
         self.assertEqual(res["RESULT"], "BOOTSTRAPPED")
+
+    def test_ci_env_bypass_has_zero_effect(self):
+        # NULONE_CI_MOCK must not influence the live gate: with the env var
+        # set and NO adapter patch, the gate still uses the real fetch path.
+        from ops.lib import ci_gate as _ci
+
+        seen: dict = {}
+
+        class _Boom(Exception):
+            pass
+
+        def _fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            raise FileNotFoundError("no gh here")
+
+        os.environ["NULONE_CI_MOCK"] = "nullone-success"
+        try:
+            with mock.patch.object(ci_gate, "_fetch_runs_via_gh", new=_REAL_FETCH_RUNS):
+                with mock.patch.object(_ci.subprocess, "run", side_effect=_fake_run):
+                    with self.assertRaises(_ci.CIError) as cm:
+                        _ci.check_ci_success(".", "a" * 40)
+        finally:
+            os.environ.pop("NULONE_CI_MOCK", None)
+        self.assertIn("CI_STATUS_UNKNOWN", str(cm.exception))
+        self.assertIn("gh", seen.get("cmd", []),
+                      "live gate must consult the real adapter despite the env var")
 
     def test_gh_api_uses_explicit_get(self):
         from unittest import mock
@@ -427,8 +519,9 @@ class ReleaseCLITests(unittest.TestCase):
             seen["cmd"] = cmd2
             return _FakeCP()
 
-        with mock.patch.object(ci_gate.subprocess, "run", side_effect=_fake_run):
-            runs = ci_gate._fetch_runs_via_gh(sha)
+        with mock.patch.object(ci_gate, "_fetch_runs_via_gh", new=_REAL_FETCH_RUNS):
+            with mock.patch.object(ci_gate.subprocess, "run", side_effect=_fake_run):
+                runs = ci_gate._fetch_runs_via_gh(sha)
         self.assertEqual(runs, [])
         self.assertIn("--method", seen["cmd"])
         self.assertEqual(seen["cmd"][seen["cmd"].index("--method") + 1], "GET")
@@ -977,42 +1070,214 @@ class ReleaseCLITests(unittest.TestCase):
             self.assertNotIn(needle, blob)
 
     def test_cli_commands_against_fixture(self):
+        # In-process CLI run with explicit Python adapter injection (no env).
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        cli_main = _cli_main()
+
         repo = make_repo(dict(BASE_FILES))
         prod = self._prod()
-        env = dict(os.environ, NULONE_CI_MOCK="nullone-success", NULONE_NO_FETCH="1")
-        cp = subprocess.run([sys.executable, str(ROOT / "ops" / "nullone"), "version"],
-                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        cp = subprocess.run([sys.executable, str(ROOT / "ops" / "nullone"), "status",
-                             "--production-root", str(prod), "--repo-root", str(repo)],
-                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("DEPLOY_STATE_MISSING", cp.stdout)
-        # ordinary update refused without bootstrap
-        cp = subprocess.run([sys.executable, str(ROOT / "ops" / "nullone"), "update",
-                             "--production-root", str(prod), "--repo-root", str(repo), "--yes"],
-                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("BOOTSTRAP_REQUIRED", cp.stderr + cp.stdout)
-        # bootstrap then update then preflight
+
+        def run_cli(argv):
+            buf_out, buf_err = io.StringIO(), io.StringIO()
+            with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                rc = cli_main(argv)
+            return rc, buf_out.getvalue(), buf_err.getvalue()
+
+        rc, out, _ = run_cli(["version"])
+        self.assertEqual(rc, 0)
+        self.assertIn("nullone-release", out)
+        rc, out, _ = run_cli(["status", "--production-root", str(prod),
+                              "--repo-root", str(repo), "--no-fetch"])
+        self.assertEqual(rc, 0)
+        self.assertIn("DEPLOY_STATE_MISSING", out)
+        # ordinary update refused without bootstrap (before any CI proof)
+        rc, out, err = run_cli(["update", "--production-root", str(prod),
+                                "--repo-root", str(repo), "--yes", "--no-fetch"])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("BOOTSTRAP_REQUIRED", out + err)
+        # bootstrap then update then preflight then rollback
         sha = gitops.origin_main_sha(repo)
         materialize(repo, sha, prod)
-        cp = subprocess.run([sys.executable, str(ROOT / "ops" / "nullone"), "bootstrap",
-                             "--production-root", str(prod), "--repo-root", str(repo),
-                             "--baseline", sha],
-                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("BOOTSTRAPPED", cp.stdout)
-        cp = subprocess.run([sys.executable, str(ROOT / "ops" / "nullone"), "update",
-                             "--production-root", str(prod), "--repo-root", str(repo), "--yes"],
-                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("TARGET_SHA=", cp.stdout)
-        cp = subprocess.run([sys.executable, str(ROOT / "ops" / "nullone"), "preflight",
-                             "--production-root", str(prod), "--repo-root", str(repo)],
-                            capture_output=True, text=True, cwd=str(ROOT), env=env)
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertIn("TARGET_SHA=", cp.stdout)
+        rc, out, err = run_cli(["bootstrap", "--production-root", str(prod),
+                                "--repo-root", str(repo), "--baseline", sha,
+                                "--no-fetch"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("BOOTSTRAPPED", out)
+        rc, out, err = run_cli(["update", "--production-root", str(prod),
+                                "--repo-root", str(repo), "--yes", "--no-fetch"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("TARGET_SHA=", out)
+        rc, out, err = run_cli(["preflight", "--production-root", str(prod),
+                                "--repo-root", str(repo), "--no-fetch"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("TARGET_SHA=", out)
+        self.assertIn("EXTERNAL_COMPONENT_CHANGES=0", out)
+        # new workspace-only change -> update creates a backup -> rollback works
+        commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('a2')\n"}, msg="v2")
+        rc, out, err = run_cli(["update", "--production-root", str(prod),
+                                "--repo-root", str(repo), "--yes", "--no-fetch"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("BACKUP_ID=", out)
+        rc, out, err = run_cli(["rollback", "--production-root", str(prod),
+                                "--repo-root", str(repo)])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("ROLLED_BACK", out)
+
+    # -- real-production mode: dev overrides forbidden --
+    def _fake_home(self):
+        home = Path(self.tmp.name) / "fakehome"
+        (home / ".openclaw").mkdir(parents=True, exist_ok=True)
+        return home
+
+    def _run_cli_real_prod(self, argv, extra_env=None):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        cli_main = _cli_main()
+
+        home = self._fake_home()
+        env = {"HOME": str(home), "NULONE_ALLOW_REAL_PROD": "1"}
+        env.update(extra_env or {})
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False):
+            # HOME must resolve through Path.home(); patch it explicitly.
+            with mock.patch.object(Path, "home", return_value=home):
+                try:
+                    with redirect_stdout(buf_out), redirect_stderr(buf_err):
+                        rc = cli_main(argv)
+                    return rc, buf_out.getvalue(), buf_err.getvalue(), None
+                except SystemExit as e:
+                    return None, buf_out.getvalue(), buf_err.getvalue(), e.code
+
+    def test_real_prod_rejects_policy_override(self):
+        repo = make_repo(dict(BASE_FILES))
+        home = self._fake_home()
+        prod = home / ".openclaw" / "prod"
+        _, _, err, code = self._run_cli_real_prod(
+            ["update", "--production-root", str(prod), "--repo-root", str(repo),
+             "--yes", "--policy", str(POLICY_PATH)])
+        self.assertEqual(code, 2)
+        self.assertIn("DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION", err)
+
+    def test_real_prod_rejects_no_fetch_flag(self):
+        repo = make_repo(dict(BASE_FILES))
+        home = self._fake_home()
+        prod = home / ".openclaw" / "prod"
+        _, _, err, code = self._run_cli_real_prod(
+            ["update", "--production-root", str(prod), "--repo-root", str(repo),
+             "--yes", "--no-fetch"])
+        self.assertEqual(code, 2)
+        self.assertIn("DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION", err)
+
+    def test_real_prod_rejects_no_fetch_env(self):
+        repo = make_repo(dict(BASE_FILES))
+        home = self._fake_home()
+        prod = home / ".openclaw" / "prod"
+        _, _, err, code = self._run_cli_real_prod(
+            ["status", "--production-root", str(prod), "--repo-root", str(repo)],
+            extra_env={"NULONE_NO_FETCH": "1"})
+        self.assertEqual(code, 2)
+        self.assertIn("DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION", err)
+
+    def test_real_prod_rejects_ci_mock_env(self):
+        repo = make_repo(dict(BASE_FILES))
+        home = self._fake_home()
+        prod = home / ".openclaw" / "prod"
+        _, _, err, code = self._run_cli_real_prod(
+            ["preflight", "--production-root", str(prod), "--repo-root", str(repo)],
+            extra_env={"NULONE_CI_MOCK": "nullone-success"})
+        self.assertEqual(code, 2)
+        self.assertIn("DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION", err)
+
+    def test_real_prod_without_overrides_passes_guard(self):
+        # Guard passes (no DEV_OVERRIDE refusal); the command then fails only
+        # on real fetch/CI authority, proving the guard itself did not block.
+        repo = make_repo(dict(BASE_FILES))
+        home = self._fake_home()
+        prod = home / ".openclaw" / "prod"
+        prod.mkdir(parents=True, exist_ok=True)
+        rc, out, err, code = self._run_cli_real_prod(
+            ["status", "--production-root", str(prod), "--repo-root", str(repo)])
+        combined = out + err
+        self.assertNotIn("DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION", combined)
+
+    # -- forward-only update --
+    def test_forward_update_allowed_and_same_is_uptodate(self):
+        repo = make_repo(dict(BASE_FILES))
+        prod = self._prod()
+        sha_a = gitops.origin_main_sha(repo)
+        self._adopt(repo, prod, sha_a)
+        sha_b = commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('b')\n"}, msg="B")
+        res = run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertEqual(res["RESULT"], "UPDATED")
+        self.assertEqual(res["TARGET_SHA"], sha_b)
+        res = run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertEqual(res["RESULT"], "ALREADY_UP_TO_DATE")
+
+    def test_backward_update_rejected_zero_mutation(self):
+        repo = make_repo(dict(BASE_FILES))
+        prod = self._prod()
+        commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('b')\n"}, msg="B")
+        sha_c = commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('c')\n"}, msg="C")
+        self._adopt(repo, prod, sha_c)
+        before = snapshot_full(prod)
+        sha_b = self._sha_before(repo, sha_c)
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, target_arg=sha_b, assume_yes=True, do_fetch=False)
+        self.assertIn("NON_FORWARD_UPDATE_REJECTED", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), before)
+        self.assertEqual(read_current(prod)["deployed_sha"], sha_c)
+
+    def _sha_before(self, repo: Path, sha: str) -> str:
+        return git("rev-parse", f"{sha}~1", cwd=repo)
+
+    def test_divergent_deployed_sha_rejected(self):
+        repo = make_repo(dict(BASE_FILES))
+        prod = self._prod()
+        sha_b = commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('b')\n"}, msg="B")
+        self._adopt(repo, prod, sha_b)
+        # side commit diverging from A (exists, but not an ancestor of B)
+        git("checkout", "-b", "side", f"{sha_b}~1", cwd=repo)
+        git("commit", "--allow-empty", "-m", "side", "--no-gpg-sign", cwd=repo)
+        side_sha = git("rev-parse", "HEAD", cwd=repo)
+        git("checkout", "main", cwd=repo)
+        cur = read_current(prod)
+        cur["deployed_sha"] = side_sha
+        write_current(prod, cur)
+        before = snapshot_full(prod)
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertIn("NON_FORWARD_UPDATE_REJECTED", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), before)
+
+    def test_unknown_deployed_sha_rejected(self):
+        repo = make_repo(dict(BASE_FILES))
+        prod = self._prod()
+        self._adopt(repo, prod)
+        cur = read_current(prod)
+        cur["deployed_sha"] = "f" * 40
+        write_current(prod, cur)
+        before = snapshot_full(prod)
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertIn("DEPLOYED_SHA_UNKNOWN", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), before)
+
+    def test_fetch_failure_blocks_update_zero_mutation(self):
+        from ops.lib import gitops as _g
+
+        repo = make_repo(dict(BASE_FILES))
+        prod = self._prod()
+        self._adopt(repo, prod)
+        commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('b')\n"}, msg="B")
+        before = snapshot_full(prod)
+        with mock.patch.object(_g, "fetch_origin_main",
+                               side_effect=_g.GitError("GIT_FAILED: simulated fetch outage")):
+            with self.assertRaises(Exception):
+                run_update(repo, prod, assume_yes=True, do_fetch=True)
+        self.assertEqual(snapshot_full(prod), before)
 
 
 if __name__ == "__main__":

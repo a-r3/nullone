@@ -115,6 +115,7 @@ def cmd_status(args) -> int:
                 return 2
     prod_root = Path(args.production_root).resolve()
     _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
     avail = args.available_sha if getattr(args, "available_sha", None) else None
     try:
         st = get_status(repo_root, policy, prod_root, available_sha=avail)
@@ -146,6 +147,7 @@ def cmd_preflight(args) -> int:
     override, override_digest = _explicit_policy(args)
     prod_root = Path(args.production_root).resolve()
     _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
     do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
     try:
         pf = run_preflight(repo_root, prod_root,
@@ -191,6 +193,7 @@ def cmd_update(args) -> int:
     override, override_digest = _explicit_policy(args)
     prod_root = Path(args.production_root).resolve()
     _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
     do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
     # Resolve + plan first so operator sees exact target SHA and files before confirming.
     # Preview uses the same commit-policy authority as the mutation path.
@@ -254,6 +257,7 @@ def cmd_bootstrap(args) -> int:
     override, override_digest = _explicit_policy(args)
     prod_root = Path(args.production_root).resolve()
     _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
     do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
     try:
         res = run_bootstrap(repo_root, prod_root, baseline_arg=getattr(args, "baseline", None),
@@ -275,6 +279,7 @@ def cmd_rollback(args) -> int:
     override, override_digest = _explicit_policy(args)
     prod_root = Path(args.production_root).resolve()
     _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
     try:
         res = run_rollback(repo_root, prod_root, backup_arg=getattr(args, "backup", None),
                            policy_override=override, policy_override_sha256=override_digest)
@@ -301,6 +306,49 @@ def _guard_prod_root(prod_root: Path) -> None:
         if os.environ.get("NULONE_ALLOW_REAL_PROD", "") != "1":
             print(f"REFUSED: production-root {pr} is live runtime; tests must use fixture roots.", file=sys.stderr)
             raise SystemExit(2)
+
+
+# Developer conveniences that must never modify authority on the real
+# production path. Fixture/synthetic tests may use them freely.
+DEV_ENV_PREFIXES = ("NULONE_CI_", "NULONE_MOCK_", "NULONE_TEST_")
+DEV_ENV_EXACT = frozenset({"NULONE_CI_MOCK", "NULONE_NO_FETCH"})
+
+
+def _dev_override_hit(args) -> str | None:
+    """Return a reason if developer overrides are active, else None."""
+    if getattr(args, "policy", None):
+        return "--policy"
+    if getattr(args, "no_fetch", False):
+        return "--no-fetch"
+    for key in sorted(os.environ):
+        if key in DEV_ENV_EXACT or key.startswith(DEV_ENV_PREFIXES):
+            if os.environ.get(key, "") != "":
+                return key
+    return None
+
+
+def _enforce_prod_authority(args, prod_root: Path) -> None:
+    """Against the explicitly unlocked real production root, fail closed if
+    ANY developer authority override is present. The real path must always
+    fetch origin/main, load policy from the exact target commit, and perform
+    real NullOne CI proof."""
+    home = Path.home().resolve()
+    oc = home / ".openclaw"
+    try:
+        pr = prod_root.resolve()
+    except OSError:
+        return
+    real_prod = pr == home or pr == oc or str(pr).startswith(str(oc) + "/")
+    if not real_prod:
+        return
+    if os.environ.get("NULONE_ALLOW_REAL_PROD", "") != "1":
+        return  # _guard_prod_root already refused this case
+    hit = _dev_override_hit(args)
+    if hit is not None:
+        print(f"DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION: {hit} must not modify "
+              "authority for real production (fetch + commit policy + real CI required).",
+              file=sys.stderr)
+        raise SystemExit(2)
 
 
 def _jsonable(o):

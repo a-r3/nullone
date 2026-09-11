@@ -169,8 +169,11 @@ def build_plan(repo_root: Path, policy: dict, target_sha: str, prod_root: Path,
     if deployed_for_diff and deployed_for_diff != target_sha:
         try:
             changed_names = gitops.diff_names(repo_root, deployed_for_diff, target_sha)
-        except gitops.GitError as e:
-            raise ReleaseError(str(e)) from e
+        except gitops.GitError:
+            # Unprovable range (e.g. corrupt deploy state): report no
+            # external changes here; run_update's forward gate rejects the
+            # unprovable deployed SHA explicitly before any mutation.
+            changed_names = []
         for rp in sorted(changed_names):
             if is_forbidden_repo_path(rp, policy):
                 continue
@@ -537,6 +540,23 @@ def _prod_to_repo(prod_rel: str, policy: dict) -> str | None:
     return None
 
 
+def require_forward_update(repo_root: Path, deployed_sha: str | None, target_sha: str) -> None:
+    """Ordinary update must be forward-only: the deployed SHA must be proven
+    as a commit and be an ancestor of (or equal to) the target. Backward or
+    divergent moves are rejected with zero mutation; rollback is the only
+    normal downgrade mechanism."""
+    if deployed_sha == target_sha:
+        return
+    if not deployed_sha or not gitops.commit_exists(repo_root, deployed_sha):
+        raise ReleaseError(
+            f"DEPLOYED_SHA_UNKNOWN: recorded {(deployed_sha or 'None')[:12]} "
+            "cannot be proven as a commit; refusing update")
+    if not gitops.is_ancestor(repo_root, deployed_sha, target_sha):
+        raise ReleaseError(
+            f"NON_FORWARD_UPDATE_REJECTED: deployed {deployed_sha[:12]} is not "
+            f"an ancestor of target {target_sha[:12]}; use rollback to move backward")
+
+
 # ---------- update ----------
 
 def run_update(
@@ -550,16 +570,10 @@ def run_update(
     policy_override_sha256: str | None = None,
 ) -> dict:
     # Phase 0: read-only eligibility. No lock, no production mutation:
-    # resolving, CI, planning, and drift reads must never create state.
+    # resolving, planning, and drift reads must never create state.
     target_sha = gitops.resolve_target(repo_root, target_arg, do_fetch=do_fetch)
     policy, policy_sha256, _ = resolve_policy(
         repo_root, target_sha, policy_override, policy_override_sha256)
-    # CI gate BEFORE any mutation
-    try:
-        _proven, detail = ci_gate.check_ci_success(str(repo_root), target_sha)
-    except ci_gate.CIError as e:
-        raise ReleaseError(f"CI_GATE_BLOCKED: {e}") from e
-    check_no_forbidden(build_plan(repo_root, policy, target_sha, prod_root, policy_sha256))
     cur0 = read_current(prod_root)
     if cur0 is None:
         # Never silently adopt an existing production tree as a first
@@ -567,10 +581,20 @@ def run_update(
         raise ReleaseError(
             "BOOTSTRAP_REQUIRED: no deploy state; ordinary update refused "
             "(use explicit `nullone bootstrap --baseline <full-sha>` for one-time adoption)")
+    prev0 = cur0.get("deployed_sha")
+    # Forward-only BEFORE any plan/drift work so an unprovable deployed SHA
+    # fails with an explicit reason instead of a downstream git error.
+    require_forward_update(repo_root, prev0, target_sha)
+    check_no_forbidden(build_plan(repo_root, policy, target_sha, prod_root, policy_sha256))
     check_no_external_changes(
         build_plan(repo_root, policy, target_sha, prod_root, policy_sha256))
+    # CI gate BEFORE any mutation
+    try:
+        _proven, detail = ci_gate.check_ci_success(str(repo_root), target_sha)
+    except ci_gate.CIError as e:
+        raise ReleaseError(f"CI_GATE_BLOCKED: {e}") from e
     require_clean_drift(prod_root, policy, "UPDATE")
-    if cur0.get("deployed_sha") == target_sha:
+    if prev0 == target_sha:
         plan0 = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
         return {"RESULT": "ALREADY_UP_TO_DATE", "TARGET_SHA": target_sha,
                 "PLAN": plan0, "CI": detail, "POLICY_SHA256": policy_sha256}
@@ -587,14 +611,16 @@ def run_update(
             raise ReleaseError(
                 "BOOTSTRAP_REQUIRED: no deploy state; ordinary update refused "
                 "(use explicit `nullone bootstrap --baseline <full-sha>` for one-time adoption)")
-        require_clean_drift(prod_root, policy, "UPDATE")
         prev_sha = cur.get("deployed_sha")
+        require_forward_update(repo_root, prev_sha, target_sha)
+        require_clean_drift(prod_root, policy, "UPDATE")
         if prev_sha == target_sha:
             plan = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
             return {"RESULT": "ALREADY_UP_TO_DATE", "TARGET_SHA": target_sha,
                     "PLAN": plan, "CI": detail, "POLICY_SHA256": policy_sha256}
         plan = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
         check_no_forbidden(plan)
+        check_no_external_changes(plan)
         check_no_external_changes(plan)
         write_txn(prod_root, {"status": "IN_PROGRESS", "phase": "backup",
                               "target_sha": target_sha, "started_at": time.time()})

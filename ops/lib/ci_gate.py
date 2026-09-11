@@ -1,12 +1,13 @@
 """CI gate: prove the `NullOne CI` workflow itself succeeded for the exact target SHA.
 
-Fail closed. Real implementation uses authenticated local `gh` read-only
-API tooling. Tests inject a mock via NULONE_CI_MOCK env var.
+Fail closed. The live path always uses the real GitHub/gh adapter; no
+environment variable can manufacture CI success. Tests inject the adapter
+explicitly in Python (mock.patch of _fetch_runs_via_gh or an equivalent
+explicit double) — never through process environment.
 """
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 
 
@@ -14,14 +15,8 @@ class CIError(Exception):
     pass
 
 
-MOCK_VAR = "NULONE_CI_MOCK"
 NULONE_WORKFLOW_NAME = "NullOne CI"
 NULONE_REPO = "a-r3/nullone"
-
-
-def check_ci_mock_mode() -> str | None:
-    v = os.environ.get(MOCK_VAR, "").strip().lower()
-    return v or None
 
 
 def evaluate_runs(runs: list[dict], sha: str) -> tuple[bool, str]:
@@ -45,42 +40,14 @@ def evaluate_runs(runs: list[dict], sha: str) -> tuple[bool, str]:
     return True, f"NULONE_CI_SUCCESS: {len(nul)} run(s) completed/success for {sha[:12]}"
 
 
-def _mock_runs(mode: str, sha: str) -> list[dict]:
-    nul = {"name": NULONE_WORKFLOW_NAME, "head_sha": sha}
-    other = {"name": "Some Other Check", "head_sha": sha,
-             "status": "completed", "conclusion": "success"}
-    table = {
-        # legacy modes (kept for compatibility)
-        "success": [{**nul, "status": "completed", "conclusion": "success"}],
-        "failure": [{**nul, "status": "completed", "conclusion": "failure"}],
-        "pending": [{**nul, "status": "in_progress", "conclusion": None}],
-        "missing": [],
-        # explicit NullOne-CI modes
-        "nullone-success": [{**nul, "status": "completed", "conclusion": "success"}],
-        "nullone-failure": [{**nul, "status": "completed", "conclusion": "failure"}],
-        "nullone-cancelled": [{**nul, "status": "completed", "conclusion": "cancelled"}],
-        "nullone-pending": [{**nul, "status": "in_progress", "conclusion": None}],
-        "nullone-queued": [{**nul, "status": "queued", "conclusion": None}],
-        "nullone-missing": [],
-        "unrelated-only": [other],
-        "unrelated-only-plus-pending": [
-            other,
-            {**nul, "status": "in_progress", "conclusion": None},
-        ],
-    }
-    if mode == "error" or mode == "ci-error":
-        raise CIError("CI_STATUS_UNKNOWN (mock transport error)")
-    if mode not in table:
-        raise CIError(f"CI_MOCK_INVALID: {mode!r}")
-    return table[mode]
-
-
 def check_ci_success(repo_root: str, sha: str) -> tuple[bool, str]:
-    """Return (proven_success, detail). Raises CIError when status cannot be proven."""
-    mock = check_ci_mock_mode()
-    if mock:
-        runs = _mock_runs(mock, sha)
-        return evaluate_runs(runs, sha)
+    """Return (proven_success, detail) via the real gh adapter.
+
+    Raises CIError when status cannot be proven. There is intentionally no
+    environment-variable override: NULONE_CI_MOCK (or any similar selector)
+    has zero effect on this path. Offline tests patch _fetch_runs_via_gh
+    explicitly in Python.
+    """
     runs = _fetch_runs_via_gh(sha)
     return evaluate_runs(runs, sha)
 

@@ -13,7 +13,10 @@ MERGE != DEPLOY
 Merging to `main` never deploys. Production deployment happens only through
 an explicit human-triggered `nullone update` run that resolves an exact
 reviewed `origin/main` SHA, proves `NullOne CI` success for that SHA, and
-installs only the allowlisted files from that exact commit.
+installs only the allowlisted files from that exact commit. Ordinary
+update is forward-only (deployed SHA must be an ancestor of the target;
+rollback is the only downgrade path), and `fetch origin/main` must
+succeed — stale refs are never used for a real production update.
 
 There are **no automatic background updates**. `--yes` exists for future
 controlled automation only; unattended deployment is never the default.
@@ -126,7 +129,8 @@ exact head SHA, completed, success) via authenticated local `gh`
 read-only API calls (`gh api --method GET .../actions/runs`, since
 `gh api -f` would otherwise imply POST). Unrelated successful checks
 never count as proof; missing/pending/failed/cancelled/ambiguous/
-unreachable all fail closed.
+unreachable all fail closed. The live gate has no environment-variable
+bypass: tests inject the CI adapter explicitly in Python only.
 
 V1 performs **no Gateway restart**. Validation hooks are offline only
 (`py_compile`, JSON parse, `node --check` where available). A deployment
@@ -152,3 +156,13 @@ workspace-managed changes proceeds normally (`EXTERNAL_COMPONENT_CHANGES=0`).
 
 Future V2 may add reviewed multi-root deployment support after the actual
 OpenClaw plugin/agent filesystem roots are explicitly modeled.
+
+## Real-production authority
+
+Against the explicitly unlocked real production root, developer authority
+modifiers are forbidden: `--policy`, `--no-fetch`, `NULONE_NO_FETCH`, and
+any CI mock/test selector fail closed with
+`DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION`. The real path always fetches
+`origin/main`, loads the policy from the exact target commit, and performs
+real `NullOne CI` proof. Fixture/synthetic tests remain free to use
+explicit test adapters and options.

@@ -143,7 +143,9 @@ def repo_toplevel(start: Path) -> Path:
 
 
 def fetch_origin_main(repo_root: Path) -> None:
-    # best-effort fetch; offline tests may have no network — caller may skip via env
+    # Required authority step for real production updates: failure blocks
+    # the operation (never silently "best effort"). Offline fixture tests
+    # skip it explicitly outside real-production mode.
     _run_git(repo_root, "fetch", "origin", "main")
 
 
@@ -169,6 +171,16 @@ def is_reachable_from_main(repo_root: Path, sha: str) -> bool:
     """True iff sha is an ancestor of (or equal to) origin/main."""
     cp = subprocess.run(
         ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", sha, "origin/main"],
+        capture_output=True,
+        text=True,
+    )
+    return cp.returncode == 0
+
+
+def is_ancestor(repo_root: Path, old_sha: str, new_sha: str) -> bool:
+    """True iff old_sha is an ancestor of (or equal to) new_sha."""
+    cp = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", old_sha, new_sha],
         capture_output=True,
         text=True,
     )
