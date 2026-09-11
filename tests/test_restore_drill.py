@@ -302,7 +302,7 @@ class RestoreDrillTests(unittest.TestCase):
 
     def test_corrupt_receipt_fail_closed(self):
         def corrupt(d: Path):
-            (d / "receipts" / "POST_fix001" / "auth-uuid-fix001.json").write_text(
+            (d / "receipts" / "POST_fix001" / "receipt-uuid-fix001.json").write_text(
                 "{not json")
 
         snap = self._snap(mutate=corrupt)
@@ -350,6 +350,27 @@ class RestoreDrillTests(unittest.TestCase):
         self.assertGreaterEqual(report["duration_ms"], 0)
 
     def test_no_secret_fixture_leakage(self):
+        # Every fixture file must be committable: repo secret-safety
+        # ignore rules (auth*, token*, secrets*, ...) must not silently
+        # exclude fixture content from checkouts (regression: an
+        # auth-uuid receipt once went missing in CI for exactly this reason).
+        import subprocess as _sp
+
+        for p in sorted(FIXTURE.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = str(p.relative_to(ROOT))
+            cp = _sp.run(["git", "check-ignore", "-q", rel],
+                         capture_output=True, cwd=str(ROOT))
+            self.assertNotEqual(
+                cp.returncode, 0,
+                f"fixture file is git-ignored and would vanish from checkouts: {rel}")
+        tracked = subprocess.run(
+            ["git", "ls-files", "tests/fixtures/recovery/"],
+            capture_output=True, text=True, cwd=str(ROOT)).stdout.split()
+        for p in sorted(FIXTURE.rglob("*")):
+            if p.is_file():
+                self.assertIn(str(p.relative_to(ROOT)), tracked)
         blob_parts = []
         for p in FIXTURE.rglob("*"):
             if p.is_file():

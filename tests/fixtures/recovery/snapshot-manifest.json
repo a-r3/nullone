@@ -43,9 +43,9 @@
       "sha256": "05e9c085b5c05608502f69c6ee33071065027e7667c4e4ece1c02996d497b757"
     },
     {
-      "bytes": 124,
-      "path": "receipts/POST_fix001/auth-uuid-fix001.json",
-      "sha256": "2b506bfceed75fa580ee3944957c61650c0957a550c755129b92f0f2ede3dd0d"
+      "bytes": 137,
+      "path": "receipts/POST_fix001/receipt-uuid-fix001.json",
+      "sha256": "0a14401fa6043d8b7cafaa3fb52efd21a2413ab645ebb9a7354873bfb7e7fc9c"
     },
     {
       "bytes": 121,
