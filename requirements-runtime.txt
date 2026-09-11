@@ -1,0 +1,5 @@
+# NullOne runtime dependencies (exact pins for behavior-critical packages).
+# Install: pip install -r requirements-runtime.txt
+# This file is the reviewed source of truth for the Pillow pin.
+# Nothing here is upgraded by the inventory change that introduced it.
+Pillow==10.2.0

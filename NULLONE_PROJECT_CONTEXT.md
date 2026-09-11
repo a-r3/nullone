@@ -1735,3 +1735,14 @@ unchanged. Issue #6 repository hardening only
 protocol, capability matrix, legacy-skill ownership decision), no
 production deployment; legacy production automations remain live until a
 #37 controlled cutover replaces them.
+
+H. PR #104 merged as `9e3436972f1b209655e91e7b0659b87fbd178fd5`:
+runtime instruction authority is on main; issue #6 is CLOSED.
+workspace/AGENTS.md changes are merged but NOT deployed. Issue #37
+remains open; production stabilization proof unchanged. Issue #8 work
+(`docs/operations/runtime-inventory.md`, dependency manifests,
+`ops/runtime-inputs.json`, offline render proofs, disposable validator)
+is repository-only reproducibility hardening; determinism claimed as
+STRUCTURAL_DETERMINISM, never cross-host BIT_IDENTICAL. Reviewer
+identity convention remains: Rauf Alizada (@a-r3). Current main is NOT
+deployed.
