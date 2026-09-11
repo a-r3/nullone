@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,12 +27,14 @@ ALLOWED_OUTCOMES = {
     "RECENT_ACTIVITY",
     "DUPLICATE_SUPPRESSED",
     "SOURCE_UNAVAILABLE",
-    "TARGET_MET",
+    "TARGET_BAND_REACHED",
+    "TARGET_MAX_REACHED",
 }
 ALLOWED_AUDIENCE = {
     "AUDIENCE_GAP",
     "AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW",
-    "TARGET_MET",
+    "TARGET_BAND_REACHED",
+    "TARGET_MAX_REACHED",
 }
 ALLOWED_ACTIONS = {"NONE", "CANDIDATE_SEARCH_AND_PREPARE"}
 
@@ -41,12 +44,15 @@ OUTCOME_FOR_RECOMMENDATION = {
     "NO_ACTION": ALLOWED_OUTCOMES - {"PREPARED"},
 }
 
-TARGET_MIN = {
-    "NORMAL": {"MAIN": 2, "STORY": 3},
-    "STRONG_NEWS": {"MAIN": 2, "STORY": 4},
-    "EXCEPTIONAL": {"MAIN": 2, "STORY": 4},
-    "QUIET": {"MAIN": 1, "STORY": 2},
+# (target_min, target_max) per day profile and surface.
+TARGETS = {
+    "NORMAL": {"MAIN": (2, 2), "STORY": (3, 5)},
+    "STRONG_NEWS": {"MAIN": (2, 2), "STORY": (4, 6)},
+    "EXCEPTIONAL": {"MAIN": (2, 3), "STORY": (4, 6)},
+    "QUIET": {"MAIN": (1, 2), "STORY": (2, 4)},
 }
+
+BREAKING_OPPORTUNITIES = {"MATERIAL_BREAKING", "EXCEPTIONAL_BREAKING"}
 
 FORBIDDEN_LITERAL_PATTERNS = [
     re.compile(r"6a982bbf77555aae01c28f21", re.I),
@@ -67,14 +73,22 @@ def reference_evaluate(cin: dict) -> dict:
     load = cin["main_load"] if surface == "MAIN" else cin["story_load"]
     published = load["published_today"]
     pending = load["pending"]
-    target_min = TARGET_MIN[cin["day_profile"]][surface]
-    audience_met = published >= target_min
-    if audience_met:
-        audience_status = "TARGET_MET"
-    elif pending > 0:
-        audience_status = "AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW"
+    target_min, target_max = TARGETS[cin["day_profile"]][surface]
+    if published < target_min:
+        position = "gap"
+    elif published < target_max:
+        position = "band"
     else:
-        audience_status = "AUDIENCE_GAP"
+        position = "max"
+    if position == "gap":
+        audience_status = (
+            "AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW"
+            if pending > 0 else "AUDIENCE_GAP"
+        )
+    elif position == "band":
+        audience_status = "TARGET_BAND_REACHED"
+    else:
+        audience_status = "TARGET_MAX_REACHED"
 
     cand = cin["candidate"]
     if cand["source_class"] == "NONE":
@@ -83,16 +97,40 @@ def reference_evaluate(cin: dict) -> dict:
         return ("NO_ACTION", "NO_QUALITY_CANDIDATE", audience_status)
     if not cand["incremental_value"]:
         return ("NO_ACTION", "DUPLICATE_SUPPRESSED", audience_status)
+    if position == "max":
+        # Hard maximum is never exceeded: breaking bypasses the
+        # minimum, never the maximum.
+        return ("NO_ACTION", "TARGET_MAX_REACHED", audience_status)
+    opportunity = cin["opportunity"]
+    last = load.get("last_published_at")
+    if last is not None and opportunity not in BREAKING_OPPORTUNITIES:
+        now = datetime.fromisoformat(cin["now"])
+        prev = datetime.fromisoformat(last)
+        elapsed_minutes = (now - prev).total_seconds() / 60
+        if elapsed_minutes < cin["config"]["min_spacing_minutes"]:
+            return ("NO_ACTION", "RECENT_ACTIVITY", audience_status)
     if (
-        cin["opportunity"] == "RECOVERY"
-        and audience_met
+        opportunity == "RECOVERY"
+        and position != "gap"
         and not cin["signal"]["exceptional_development"]
     ):
-        return ("NO_ACTION", "TARGET_MET", audience_status)
+        return (
+            "NO_ACTION",
+            "TARGET_BAND_REACHED" if position == "band" else "TARGET_MAX_REACHED",
+            audience_status,
+        )
     if pending > 0:
         return ("NO_ACTION", "BLOCKED_PENDING_REVIEW", audience_status)
-    if audience_met:
-        return ("NO_ACTION", "TARGET_MET", audience_status)
+    if surface == "MAIN" and position == "band":
+        exceptional = (
+            opportunity == "EXCEPTIONAL_BREAKING"
+            and (
+                cin["day_profile"] == "EXCEPTIONAL"
+                or cin["signal"]["exceptional_development"]
+            )
+        )
+        if not exceptional:
+            return ("NO_ACTION", "TARGET_BAND_REACHED", audience_status)
     recommendation = "PREPARE_MAIN" if surface == "MAIN" else "PREPARE_STORY"
     return (recommendation, "PREPARED", audience_status)
 
@@ -122,7 +160,8 @@ def main() -> int:
         cin = case["input"]
         for field in (
             "schema", "surface", "opportunity", "day_profile", "now",
-            "timezone", "main_load", "story_load", "candidate", "signal",
+            "timezone", "config", "main_load", "story_load",
+            "candidate", "signal",
         ):
             if field not in cin:
                 fail(f"{name}: input missing field {field!r}")
@@ -132,10 +171,29 @@ def main() -> int:
             fail(f"{name}: timezone must be Asia/Baku")
         if cin["surface"] not in ("MAIN", "STORY"):
             fail(f"{name}: surface must be MAIN or STORY")
+        if cin["day_profile"] not in TARGETS:
+            fail(f"{name}: unknown day_profile {cin['day_profile']!r}")
+        spacing = cin["config"].get("min_spacing_minutes")
+        if not isinstance(spacing, int) or spacing < 0:
+            fail(f"{name}: config.min_spacing_minutes must be a non-negative int")
+        try:
+            now_dt = datetime.fromisoformat(cin["now"])
+            if now_dt.tzinfo is None:
+                fail(f"{name}: now must be offset-aware ISO8601")
+        except ValueError:
+            fail(f"{name}: now is not valid ISO8601")
         for load_key in ("main_load", "story_load"):
             load = cin[load_key]
             if load["published_today"] < 0 or load["pending"] < 0:
                 fail(f"{name}: {load_key} has a negative counter")
+            last = load.get("last_published_at")
+            if last is not None:
+                try:
+                    prev = datetime.fromisoformat(last)
+                except ValueError:
+                    fail(f"{name}: {load_key}.last_published_at is not valid ISO8601")
+                if prev.tzinfo is None:
+                    fail(f"{name}: {load_key}.last_published_at must be offset-aware")
 
         cout = case["expected_output"]
         for field in ("recommendation", "outcome", "audience_status", "permitted_action"):
@@ -162,9 +220,18 @@ def main() -> int:
             fail(f"{name}: PREPARE_MAIN from a non-MAIN surface evaluation")
         if rec == "PREPARE_STORY" and cin["surface"] != "STORY":
             fail(f"{name}: PREPARE_STORY from a non-STORY surface evaluation")
-        # Audience/pending truthfulness: pending-blocked implies a real gap.
-        if outcome == "BLOCKED_PENDING_REVIEW" and audience != "AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW":
-            fail(f"{name}: backpressure must report the audience gap truthfully")
+        # Audience/pending truthfulness: pending-blocked below the
+        # minimum implies a real gap; pending-blocked inside the band
+        # reports the band (minimum reached, maximum not reached).
+        if outcome == "BLOCKED_PENDING_REVIEW" and audience not in (
+            "AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW", "TARGET_BAND_REACHED",
+        ):
+            fail(f"{name}: backpressure must report audience state truthfully")
+        # Terminal outcomes agree with the audience status.
+        if outcome == "TARGET_MAX_REACHED" and audience != "TARGET_MAX_REACHED":
+            fail(f"{name}: TARGET_MAX_REACHED outcome requires max-reached audience")
+        if outcome == "TARGET_BAND_REACHED" and audience != "TARGET_BAND_REACHED":
+            fail(f"{name}: TARGET_BAND_REACHED outcome requires band audience")
 
         # Deterministic replay: the contract's evaluation order must
         # reproduce the hand-authored expected output exactly.
@@ -172,8 +239,23 @@ def main() -> int:
         if got != (rec, outcome, audience):
             fail(f"{name}: reference replay {got} != authored {(rec, outcome, audience)}")
 
-    if len(cases) < 10:
-        fail(f"expected at least 10 worked examples, found {len(cases)}")
+    if len(cases) < 18:
+        fail(f"expected at least 18 worked examples, found {len(cases)}")
+
+    # Review-gate coverage: every required semantic scenario must be
+    # present by name.
+    for required in (
+        "story_band_optional_capacity",
+        "story_max_reached",
+        "strong_news_band_optional_capacity",
+        "exceptional_main_third",
+        "ordinary_main_band_stop",
+        "material_breaking_after_min",
+        "story_inside_spacing_held",
+        "story_outside_spacing_eligible",
+    ):
+        if required not in names:
+            fail(f"missing required worked example: {required}")
 
     raw_fixture = FIXTURE.read_text(encoding="utf-8")
     for pattern in FORBIDDEN_LITERAL_PATTERNS:
@@ -186,8 +268,14 @@ def main() -> int:
         "PREPARE_* != PUBLISH",
         "Asia/Baku",
         "AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW",
+        "TARGET_BAND_REACHED",
+        "TARGET_MAX_REACHED",
+        "target_min",
+        "target_max",
+        "min_spacing_minutes",
         "surface = MAIN | STORY",
         "QUIET_DAY_WEAK_FILLER=FORBIDDEN",
+        "fail-closed default profile",
     ):
         if required_phrase not in doc:
             fail(f"required contract statement missing from doc: {required_phrase}")

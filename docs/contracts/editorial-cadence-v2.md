@@ -60,6 +60,40 @@ forced publication quotas. Not reaching a target never forces weak
 content; exceeding a minimum never forbids a genuinely stronger
 verified candidate. `QUIET_DAY_WEAK_FILLER=FORBIDDEN`.
 
+Reviewed min/max baseline (both modeled; max is a hard ceiling, never
+a quota obligation):
+
+| Day profile | MAIN min | MAIN max | STORY min | STORY max |
+|---|---|---|---|---|
+| NORMAL | 2 | 2 | 3 | 5 |
+| STRONG_NEWS | 2 | 2 | 4 | 6 |
+| EXCEPTIONAL | 2 | 3 | 4 | 6 |
+| QUIET | 1 | 2 | 2 | 4 |
+
+Semantics per surface:
+
+- `published < min` → `AUDIENCE_GAP`;
+- `min <= published < max` → `TARGET_BAND_REACHED` /
+  optional capacity (a high-quality verified ordinary candidate MAY
+  be prepared while inside the band when no pending backpressure,
+  spacing allows, the candidate is non-duplicate, and the surface
+  max is not reached — optional quality capacity, never a quota
+  obligation);
+- `published >= max` → `TARGET_MAX_REACHED` (hard stop; neither
+  MATERIAL nor EXCEPTIONAL may exceed the configured hard maximum
+  without a future explicit policy revision).
+
+For MAIN, ordinary NORMAL/STRONG_NEWS evaluation normally stops at
+max=2. The third MAIN is permitted only when the day profile or
+signal establishes EXCEPTIONAL, `opportunity ==
+EXCEPTIONAL_BREAKING`, `published MAIN < 3`, and all normal
+quality/safety gates pass.
+
+For STORY, NORMAL may continue from 3 up to 5 when strong verified
+candidates exist; STRONG_NEWS / EXCEPTIONAL may continue up to 6;
+QUIET may continue up to 4 only when useful verified Story
+candidates exist.
+
 ### NORMAL DAY
 
 - main target: 2
@@ -167,14 +201,24 @@ review) must never be collapsed into a single "activity satisfied"
 claim. Pending drafts count for OPERATOR BACKPRESSURE (do not flood
 Rauf with previews) but do not satisfy the public activity target.
 
-Observability distinguishes exactly three audience states per
-surface:
+Observability distinguishes exactly four audience states per
+surface (reaching the minimum does not mean the target band is
+exhausted; never claim the channel is fully saturated merely because
+min is reached):
 
 | Audience status | Meaning |
 |---|---|
-| `AUDIENCE_GAP` | `published_today` below target and no pending work blocks a new preparation. |
-| `AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW` | `published_today` below target, but pending review work suppresses new preparation. The public target is truthfully UNMET. |
-| `TARGET_MET` | `published_today` meets today's guidance. |
+| `AUDIENCE_GAP` | `published_today` below `target_min` and no pending work blocks a new preparation. |
+| `AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW` | `published_today` below `target_min`, but pending review work suppresses new preparation. The public target is truthfully UNMET. |
+| `TARGET_BAND_REACHED` | `target_min <= published_today < target_max`. The public minimum is reached; the maximum is not. Further preparation is optional capacity, not obligation. |
+| `TARGET_MAX_REACHED` | `published_today >= target_max`. The surface is full for today. |
+
+Backpressure remains a separate outcome (`BLOCKED_PENDING_REVIEW`),
+not part of the audience status. Example: `published=3`,
+`pending=1`, NORMAL Story target 3–5 → `audience_status=
+TARGET_BAND_REACHED` with outcome `BLOCKED_PENDING_REVIEW`:
+minimum reached, maximum not reached, no new draft because pending
+review exists.
 
 Example: `story_published_today=1`, `story_pending=3`,
 `story_target_min=3` → the system must NOT create more drafts
@@ -296,7 +340,8 @@ Per opportunity, report the outcome (Story and main equivalents):
 - `RECENT_ACTIVITY`
 - `DUPLICATE_SUPPRESSED`
 - `SOURCE_UNAVAILABLE`
-- `TARGET_MET` (no gap; valid quiet `NO_ACTION`)
+- `TARGET_BAND_REACHED` (no gap pressure; valid quiet `NO_ACTION`)
+- `TARGET_MAX_REACHED` (surface full; valid quiet `NO_ACTION`)
 
 Also track per publication: local time, format, content_type,
 topic_cluster, source class, and where available reach, shares,
@@ -319,8 +364,17 @@ owns it. This contract defines signature and behavior only.
   "day_profile": "NORMAL",
   "now": "2026-09-06T11:00:00+04:00",
   "timezone": "Asia/Baku",
-  "main_load": {"published_today": 1, "pending": 0},
-  "story_load": {"published_today": 4, "pending": 0},
+  "config": {"min_spacing_minutes": 120},
+  "main_load": {
+    "published_today": 1,
+    "pending": 0,
+    "last_published_at": "2026-09-06T09:50:00+04:00"
+  },
+  "story_load": {
+    "published_today": 4,
+    "pending": 0,
+    "last_published_at": "2026-09-06T10:35:00+04:00"
+  },
   "candidate": {
     "quality_available": true,
     "verification": "PASS",
@@ -334,6 +388,21 @@ owns it. This contract defines signature and behavior only.
 }
 ```
 
+`config.min_spacing_minutes` is the versioned anti-burst spacing for
+the requested surface (defaults live in fixture `default_config`:
+MAIN 120, STORY 45 — guidance, not immutable policy).
+`load.last_published_at` is the offset-aware ISO8601 timestamp of the
+last audience-facing publication of that surface, or `null` when
+there is none today. `request.now` remains authoritative; the
+evaluator never invents the current time.
+
+Spacing rule: if `last_published_at` is not null and `now -
+last_published_at < min_spacing_minutes`, the surface is held with
+`NO_ACTION` / `RECENT_ACTIVITY` — except that MATERIAL_BREAKING and
+EXCEPTIONAL_BREAKING opportunities bypass the spacing hold for the
+requested surface (breaking timing policy governs instead). A null
+`last_published_at` never holds.
+
 Enums: `surface` ∈ {`MAIN`, `STORY`}; `opportunity` ∈ {`NORMAL`,
 `MATERIAL_BREAKING`, `EXCEPTIONAL_BREAKING`, `RECOVERY`};
 `day_profile` ∈ {`NORMAL`, `STRONG_NEWS`, `EXCEPTIONAL`, `QUIET`};
@@ -341,12 +410,24 @@ Enums: `surface` ∈ {`MAIN`, `STORY`}; `opportunity` ∈ {`NORMAL`,
 `source_class` ∈ {`MORNING_HANDOFF`, `RADAR_COMMITTED`,
 `DURABLE_QUEUE`, `NONE`}.
 
-Targets resolved from `day_profile` (§1): NORMAL → main 2, story
-3–5; STRONG_NEWS → main 2, story 4–6; EXCEPTIONAL → main max 3,
-story max 6; QUIET → main 1 acceptable, story 2–4 acceptable. The
-minimum used for gap computation: main {NORMAL:2, STRONG_NEWS:2,
-EXCEPTIONAL:2, QUIET:1}; story {NORMAL:3, STRONG_NEWS:4,
-EXCEPTIONAL:4, QUIET:2}.
+Targets resolved from `day_profile` (§1 table): NORMAL → main
+2/2, story 3/5; STRONG_NEWS → main 2/2, story 4/6; EXCEPTIONAL →
+main 2/3, story 4/6; QUIET → main 1/2, story 2/4.
+
+### `day_profile` authority (boundary only, no resolver)
+
+- The cadence evaluator does NOT let a writer/model choose
+  `day_profile`.
+- NORMAL is the fail-closed default profile.
+- STRONG_NEWS / QUIET / EXCEPTIONAL require a versioned
+  authoritative upstream deterministic/profile signal (resolver
+  owned by a future implementation issue — not this contract).
+- EXCEPTIONAL_BREAKING assessment may establish exceptional
+  treatment only through the existing reviewed breaking severity
+  contract (`docs/contracts/breaking-routing-policy-v1.md`).
+- If profile authority is absent or invalid, fall back to NORMAL
+  rather than guessing. This contract defines the boundary only;
+  it does not implement the profile resolver.
 
 ### Response
 
@@ -363,9 +444,10 @@ EXCEPTIONAL:4, QUIET:2}.
 `recommendation` ∈ {`PREPARE_MAIN`, `PREPARE_STORY`, `NO_ACTION`};
 `outcome` ∈ {`PREPARED`, `NO_QUALITY_CANDIDATE`,
 `BLOCKED_PENDING_REVIEW`, `RECENT_ACTIVITY`, `DUPLICATE_SUPPRESSED`,
-`SOURCE_UNAVAILABLE`, `TARGET_MET`}; `audience_status` ∈
-{`AUDIENCE_GAP`, `AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW`,
-`TARGET_MET`}; `permitted_action` ∈ {`NONE`,
+`SOURCE_UNAVAILABLE`, `TARGET_BAND_REACHED`, `TARGET_MAX_REACHED`};
+`audience_status` ∈ {`AUDIENCE_GAP`,
+`AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW`, `TARGET_BAND_REACHED`,
+`TARGET_MAX_REACHED`}; `permitted_action` ∈ {`NONE`,
 `CANDIDATE_SEARCH_AND_PREPARE`} and is never `PUBLISH`.
 
 ### Deterministic per-surface evaluation order
@@ -373,26 +455,42 @@ EXCEPTIONAL:4, QUIET:2}.
 For the requested `surface` only (the other surface's load is
 reported context, never a blocking input):
 
-1. Resolve `target_min` from `day_profile`; compute `audience_met =
-   published_today(surface) >= target_min`.
-2. Compute `audience_status`: `TARGET_MET` if met; else
-   `AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW` if `pending(surface) >
-   0`; else `AUDIENCE_GAP`.
+1. Resolve `target_min`/`target_max` from `day_profile` (§1 table).
+   Compute position: gap (`published < min`), band (`min <=
+   published < max`), or max (`published >= max`).
+2. Compute `audience_status`: `AUDIENCE_GAP` if gap and
+   `pending == 0`; `AUDIENCE_GAP_BLOCKED_BY_PENDING_REVIEW` if gap
+   and `pending > 0`; `TARGET_BAND_REACHED` if band;
+   `TARGET_MAX_REACHED` if max.
 3. If `source_class == NONE` (or no candidate record): `NO_ACTION` /
    `SOURCE_UNAVAILABLE`.
 4. If `verification != PASS` or `quality_available == false`:
-   `NO_ACTION` / `NO_QUALITY_CANDIDATE` — regardless of gap,
+   `NO_ACTION` / `NO_QUALITY_CANDIDATE` — regardless of gap, band,
    opportunity, or restart state (`quality > quota` is absolute).
 5. If `incremental_value == false` (same facts, no distinct audience
    role): `NO_ACTION` / `DUPLICATE_SUPPRESSED`.
-6. If `opportunity == RECOVERY` and `audience_met` and no
-   `exceptional_development`: `NO_ACTION` / `TARGET_MET`.
-7. If `pending(surface) > 0`: `NO_ACTION` /
-   `BLOCKED_PENDING_REVIEW` (audience gap stays truthful per step 2).
-8. If `audience_met`: `NO_ACTION` / `TARGET_MET` (or
-   `RECENT_ACTIVITY` when anti-burst spacing holds).
-9. Else `PREPARE_MAIN` (surface MAIN) or `PREPARE_STORY` (surface
-   STORY) / `PREPARED`.
+6. If position is max: `NO_ACTION` / `TARGET_MAX_REACHED`. The hard
+   maximum is never exceeded — breaking bypasses the minimum, never
+   the maximum.
+7. If the spacing hold applies (non-null `last_published_at` within
+   `min_spacing_minutes` of `now`) and `opportunity` is neither
+   MATERIAL_BREAKING nor EXCEPTIONAL_BREAKING: `NO_ACTION` /
+   `RECENT_ACTIVITY`.
+8. If `opportunity == RECOVERY` and position is not gap and no
+   `exceptional_development`: `NO_ACTION` with `TARGET_BAND_REACHED`
+   or `TARGET_MAX_REACHED` matching the position.
+9. If `pending(surface) > 0`: `NO_ACTION` /
+   `BLOCKED_PENDING_REVIEW` (audience status stays truthful per
+   step 2).
+10. If surface is MAIN and position is band and `opportunity !=
+    EXCEPTIONAL_BREAKING` (or exceptional justification absent):
+    `NO_ACTION` / `TARGET_BAND_REACHED`. The ordinary second main
+    slot stops at the band; only a justified exceptional third main
+    proceeds.
+11. Else `PREPARE_MAIN` (surface MAIN) or `PREPARE_STORY` (surface
+    STORY) / `PREPARED` — covering the gap case, the optional
+    in-band Story capacity case, the breaking-bypasses-minimum case,
+    and the justified exceptional MAIN #3 case.
 
 Cross-surface loads never appear in steps 3–9. `PREPARE_*` remains
 permission to search for and prepare a candidate subject to scoring,
@@ -402,8 +500,8 @@ second final confirmation. `PREPARE_* != PUBLISH`, unconditionally.
 ## 11. Worked examples (deterministic)
 
 Machine-readable fixtures:
-`tests/fixtures/editorial_cadence_v2_examples.json` (10 cases,
-one per item below). Validated offline by
+`tests/fixtures/editorial_cadence_v2_examples.json` (18 cases,
+items 1–18 above). Validated offline by
 `tests/test_editorial_cadence_v2_contract.py`, which checks fixture
 shape/hygiene and replays a test-local reference evaluator over the
 fixtures — no production runtime is added or changed.
@@ -428,7 +526,7 @@ fixtures — no production runtime is added or changed.
    safety gates).
 6. `recovery_no_exceptional_no_action` — 2 main published, 20:45
    RECOVERY opportunity, no exceptional development → `NO_ACTION` /
-   `TARGET_MET`.
+   `TARGET_MAX_REACHED`.
 7. `recovery_durable_carousel_fills_gap` — 1 main published, 20:45
    RECOVERY opportunity, strong verified DURABLE carousel candidate
    → `PREPARE_MAIN` / `PREPARED`.
@@ -443,6 +541,35 @@ fixtures — no production runtime is added or changed.
 10. `no_fresh_no_durable_no_action` — no strong fresh candidate and
     no viable durable reserve → `NO_ACTION` /
     `SOURCE_UNAVAILABLE` despite the activity gap.
+
+11. `story_band_optional_capacity` (A) — NORMAL day,
+    `story_published=3`, `story_pending=0`, strong verified Story
+    candidate → `PREPARE_STORY` / `PREPARED` with
+    `audience_status=TARGET_BAND_REACHED` (within the 3–5 band, not
+    a gap; optional capacity exercised).
+12. `story_max_reached` (B) — NORMAL day, `story_published=5` →
+    `NO_ACTION` / `TARGET_MAX_REACHED` even with a strong
+    candidate.
+13. `strong_news_band_optional_capacity` (C) — STRONG_NEWS,
+    `story_published=4`, strong verified candidate →
+    `PREPARE_STORY` / `PREPARED` with
+    `audience_status=TARGET_BAND_REACHED` (within the 4–6 band).
+14. `exceptional_main_third` (D) — MAIN `published=2`,
+    EXCEPTIONAL day, `opportunity=EXCEPTIONAL_BREAKING`, justified
+    main candidate → `PREPARE_MAIN` / `PREPARED` for main #3.
+15. `ordinary_main_band_stop` (E) — MAIN `published=2`, ordinary
+    NORMAL candidate → `NO_ACTION` / `TARGET_BAND_REACHED` (or
+    `TARGET_MAX_REACHED` where max is 2).
+16. `material_breaking_after_min` (F) — Story minimum already met,
+    new MATERIAL_BREAKING candidate, Story count below max →
+    `PREPARE_STORY` / `PREPARED` (breaking bypasses the minimum,
+    never the maximum).
+17. `story_inside_spacing_held` — ordinary NORMAL Story,
+    `last_published_at` within `min_spacing_minutes` of `now` →
+    `NO_ACTION` / `RECENT_ACTIVITY`.
+18. `story_outside_spacing_eligible` — same shape with
+    `last_published_at` outside the spacing window → eligible
+    (`PREPARE_STORY` / `PREPARED`) when all other gates pass.
 
 ## 12. Exit rule
 
