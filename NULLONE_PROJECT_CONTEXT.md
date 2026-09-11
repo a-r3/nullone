@@ -1714,3 +1714,14 @@ runtime/deployed. The deterministic release CLI
 `feature/nullone-release-cli`) is repository engineering only until
 separately reviewed and later activated. Current natural Morning/Story
 stabilization proof remains untouched.
+
+F. PR #102 merged as `785ad35e7c25306f25a7d42d51ccc7b27458b662`:
+deterministic release CLI is on main. V1 scope = production workspace
+only (Gateway plugin and agent destinations are externally-controlled
+components the tool never deploys). The release CLI remains NOT
+ACTIVATED: no deploy-state exists in production yet, no bootstrap or
+update was run against production, and current main is NOT deployed.
+Current production stabilization proof remains active; issue #37 remains
+open. Issue #7 residual governance work
+(`docs/contracts/change-control.md`, review receipts, PR/issue
+templates) is repository-only.
