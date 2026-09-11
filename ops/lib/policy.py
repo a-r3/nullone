@@ -14,17 +14,23 @@ class PolicyError(Exception):
 def load_policy(policy_path: str | Path) -> dict:
     p = Path(policy_path)
     try:
-        data = json.loads(p.read_text())
+        raw = p.read_bytes()
     except FileNotFoundError as e:
         raise PolicyError(f"POLICY_NOT_FOUND: {p}") from e
-    except json.JSONDecodeError as e:
-        raise PolicyError(f"POLICY_INVALID_JSON: {e}") from e
+    return parse_policy_blob(raw, source=str(p))
+
+
+def parse_policy_blob(blob: bytes, source: str = "<blob>") -> dict:
+    try:
+        data = json.loads(blob.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise PolicyError(f"POLICY_INVALID_JSON ({source}): {e}") from e
     if data.get("schema") != POLICY_SCHEMA:
-        raise PolicyError(f"POLICY_SCHEMA_MISMATCH: {data.get('schema')!r}")
+        raise PolicyError(f"POLICY_SCHEMA_MISMATCH ({source}): {data.get('schema')!r}")
     if not data.get("policy_version"):
-        raise PolicyError("POLICY_VERSION_MISSING")
+        raise PolicyError(f"POLICY_VERSION_MISSING ({source})")
     if not isinstance(data.get("mappings"), list) or not data["mappings"]:
-        raise PolicyError("POLICY_MAPPINGS_MISSING")
+        raise PolicyError(f"POLICY_MAPPINGS_MISSING ({source})")
     return data
 
 
@@ -51,6 +57,30 @@ def map_repo_to_prod(repo_path: str, policy: dict) -> str | None:
                     return None
                 return dest.rstrip("/") + "/" + rest if dest else rest
     return None
+
+
+def mapping_for_prod(prod_rel: str, policy: dict) -> dict | None:
+    """Return the mapping entry authorizing prod_rel, or None if unmanaged."""
+    pp = _norm(prod_rel)
+    for m in policy["mappings"]:
+        dest = _norm(m["prod_prefix"])
+        if m.get("single_file"):
+            if pp == dest:
+                return m
+        else:
+            dp = dest.rstrip("/") + "/"
+            if pp == dest.rstrip("/") or pp.startswith(dp):
+                return m
+    return None
+
+
+def mapping_restart_required(mapping: dict | None) -> bool:
+    """Conservative default: a mapping without explicit restart metadata
+    requires a restart (True). Explicit False is only honored when the
+    mapping declares it."""
+    if mapping is None:
+        return True
+    return bool(mapping.get("restart_required", True))
 
 
 def is_forbidden_repo_path(repo_path: str, policy: dict) -> bool:

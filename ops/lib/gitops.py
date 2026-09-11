@@ -120,6 +120,38 @@ def list_files_at(repo_root: Path, sha: str) -> list[str]:
     return [line for line in out.splitlines() if line]
 
 
+def ls_tree_modes(repo_root: Path, sha: str) -> dict[str, int]:
+    """Map repo-relative path -> file mode (0o644 or 0o755) at commit sha.
+
+    Only regular files/blobs are returned; symlinks, submodules, and other
+    object types raise GitError so callers never silently deploy them.
+    """
+    out = _run_git(repo_root, "ls-tree", "-r", sha)
+    modes: dict[str, int] = {}
+    for line in out.splitlines():
+        # format: "<mode> <type> <hash>\t<path>"
+        try:
+            meta, path = line.split("\t", 1)
+            mode_s, type_s, _ = meta.split(" ")
+        except ValueError as e:
+            raise GitError(f"LS_TREE_PARSE_FAILED: {line!r}") from e
+        if type_s == "commit":
+            raise GitError(f"LS_TREE_SUBMODULE_REJECTED: {path!r}")
+        if type_s == "tree":
+            continue
+        if type_s != "blob":
+            raise GitError(f"LS_TREE_UNEXPECTED_TYPE: {line!r}")
+        if mode_s == "100644":
+            modes[path] = 0o644
+        elif mode_s == "100755":
+            modes[path] = 0o755
+        elif mode_s == "120000":
+            raise GitError(f"LS_TREE_SYMLINK_REJECTED: {path!r}")
+        else:
+            raise GitError(f"LS_TREE_UNEXPECTED_MODE: {line!r}")
+    return modes
+
+
 def blob_hash_hex(repo_root: Path, sha: str, repo_path: str) -> str | None:
     import hashlib
 
