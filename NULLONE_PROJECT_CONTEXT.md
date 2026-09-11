@@ -1746,3 +1746,15 @@ is repository-only reproducibility hardening; determinism claimed as
 STRUCTURAL_DETERMINISM, never cross-host BIT_IDENTICAL. Reviewer
 identity convention remains: Rauf Alizada (@a-r3). Current main is NOT
 deployed.
+
+I. PR #105 merged as `90cde7c334af7bc4cb0ad84a2a72828dfadf3ef3`:
+runtime reproducibility is on main; issue #8 is CLOSED. Determinism
+claimed as STRUCTURAL_DETERMINISM only. Issue #9 recovery decision work
+(`docs/adr/ADR-01-recovery-and-artifact-durability.md`,
+`docs/operations/recovery-contract.md`, `ops/recovery-policy.json`) is
+repository-only. Rauf accepted ordinary recovery targets (RPO=900s,
+RTO=14400s) as DESIGN TARGETS only — not deployed/proven recovery
+infrastructure; issue #10 will provide empirical restore proof. Issue
+#37 remains open; production stabilization state unchanged. Do not claim
+recovery guarantees are operational until implemented and proven by the
+issue #10 restore drill.
