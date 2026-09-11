@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""NullOne deterministic release CLI (repository engineering only; MERGE != DEPLOY).
+
+Usage:
+  ./ops/nullone version
+  ./ops/nullone status --production-root <path>
+  ./ops/nullone preflight --production-root <path> [--target <full-sha>]
+  ./ops/nullone update --production-root <path> [--target <full-sha>] [--yes]
+  ./ops/nullone bootstrap --production-root <path> --baseline <full-sha>
+  ./ops/nullone rollback --production-root <path> [--backup <id>]
+
+Deployment authority (update/preflight/bootstrap/rollback) always comes from
+ops/release-policy.json at the exact target Git commit — never from the
+local working tree. --policy is a developer-only explicit override.
+
+Tests must use temporary fixture production roots only. Never ~/.openclaw.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+OPS_ROOT = Path(__file__).resolve().parent
+REPO_ROOT_DEFAULT = OPS_ROOT.parent
+POLICY_DEFAULT = OPS_ROOT / "release-policy.json"
+
+sys.path.insert(0, str(REPO_ROOT_DEFAULT))
+
+from ops.lib import gitops  # noqa: E402
+from ops.lib.policy import PolicyError, load_policy  # noqa: E402
+from ops.lib.release import (  # noqa: E402
+    RELEASE_TOOL_VERSION,
+    build_plan,
+    get_status,
+    load_policy_at,
+    run_bootstrap,
+    run_preflight,
+    run_rollback,
+    run_update,
+)
+
+
+def _repo_root(args) -> Path:
+    if getattr(args, "repo_root", None):
+        return Path(args.repo_root).resolve()
+    # auto-detect git toplevel from this file
+    try:
+        return gitops.repo_toplevel(OPS_ROOT)
+    except Exception:
+        return REPO_ROOT_DEFAULT.resolve()
+
+
+def _explicit_policy(args) -> tuple[dict | None, str | None]:
+    """Developer-only explicit working-tree policy override.
+
+    Returns (None, None) unless --policy is passed, in which case the
+    working-tree file is used as explicitly requested authority.
+    """
+    if getattr(args, "policy", None):
+        try:
+            return load_policy(Path(args.policy)), "working-tree-override"
+        except PolicyError as e:
+            print(f"POLICY_ERROR: {e}", file=sys.stderr)
+            raise SystemExit(2)
+    return None, None
+
+
+def _commit_policy_for_preview(repo_root: Path, args) -> tuple[dict, str | None]:
+    """Policy for read-only preview commands: commit blob by default."""
+    override, digest = _explicit_policy(args)
+    if override is not None:
+        return override, digest
+    do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
+    try:
+        target = gitops.resolve_target(repo_root, getattr(args, "target", None), do_fetch=do_fetch)
+    except gitops.GitError as e:
+        print(f"TARGET_ERROR: {e}", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        policy, digest = load_policy_at(repo_root, target)
+    except Exception as e:
+        print(f"POLICY_ERROR: {e}", file=sys.stderr)
+        raise SystemExit(2)
+    return policy, digest
+
+
+def cmd_version(_args) -> int:
+    print(f"nullone-release {RELEASE_TOOL_VERSION}")
+    try:
+        sha = gitops._run_git(REPO_ROOT_DEFAULT.resolve(), "rev-parse", "--short=12", "HEAD")
+        print(f"repo HEAD: {sha}")
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_status(args) -> int:
+    repo_root = _repo_root(args)
+    policy, _ = _explicit_policy(args)
+    if policy is None:
+        # status is read-only; working-tree policy is acceptable here, but
+        # prefer commit policy when resolvable so output matches deployments.
+        try:
+            policy, _ = _commit_policy_for_preview(repo_root, args)
+        except SystemExit:
+            raise
+        except Exception:
+            try:
+                policy = load_policy(POLICY_DEFAULT)
+            except PolicyError as e:
+                print(f"POLICY_ERROR: {e}", file=sys.stderr)
+                return 2
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
+    avail = args.available_sha if getattr(args, "available_sha", None) else None
+    try:
+        st = get_status(repo_root, policy, prod_root, available_sha=avail)
+    except Exception as e:
+        print(f"STATUS_ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"STATUS={st.get('STATUS')}")
+    print(f"DEPLOYED_SHA={st.get('DEPLOYED_SHA')}")
+    print(f"AVAILABLE_SHA={st.get('AVAILABLE_SHA')}")
+    if st.get("DRIFTED_FILES"):
+        print("DRIFTED_FILES:")
+        for f in st["DRIFTED_FILES"]:
+            print(f"  {f}")
+    if st.get("BLOCKED_FILES"):
+        print("BLOCKED_FILES:")
+        for f in st["BLOCKED_FILES"]:
+            print(f"  {f}")
+    if st.get("REASON"):
+        print(f"REASON={st.get('REASON')}")
+    if st.get("BOOTSTRAP_REQUIRED"):
+        print("BOOTSTRAP_REQUIRED=YES")
+    if getattr(args, "json", False):
+        print(json.dumps(st, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_preflight(args) -> int:
+    repo_root = _repo_root(args)
+    override, override_digest = _explicit_policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
+    do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
+    try:
+        pf = run_preflight(repo_root, prod_root,
+                           target_arg=getattr(args, "target", None), do_fetch=do_fetch,
+                           policy_override=override, policy_override_sha256=override_digest)
+    except Exception as e:
+        print(f"PREFLIGHT_ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"TARGET_SHA={pf['TARGET_SHA']}")
+    print(f"POLICY_SHA256={pf['POLICY_SHA256']}")
+    print(f"CI_PROVEN={'YES' if pf['CI_PROVEN'] else 'NO'}")
+    print(f"CI_DETAIL={pf['CI_DETAIL']}")
+    print(f"DRIFT_STATUS={pf['DRIFT']['status']}")
+    if pf["DRIFT"]["drifted"]:
+        print("DRIFTED_FILES:")
+        for f in pf["DRIFT"]["drifted"]:
+            print(f"  {f}")
+    if pf["DRIFT"]["symlink_blocked"]:
+        print("BLOCKED_FILES:")
+        for f in pf["DRIFT"]["symlink_blocked"]:
+            print(f"  {f}")
+    if pf["BOOTSTRAP_REQUIRED"]:
+        print("BOOTSTRAP_REQUIRED=YES (ordinary update not ready; use explicit bootstrap)")
+    ext = pf.get("EXTERNAL_COMPONENT_CHANGES", [])
+    print(f"EXTERNAL_COMPONENT_CHANGES={len(ext)}")
+    for f in ext[:50]:
+        print(f"  {f}")
+    if pf.get("EXTERNAL_BLOCKED"):
+        print("CONTROLLED_COMPONENT_DEPLOY_REQUIRED (workspace-only update refused)")
+    print(f"STATUS={pf['STATUS']}")
+    print(f"RESTART_REQUIRED={pf['RESTART_REQUIRED']}")
+    s = pf["PLAN_SUMMARY"]
+    for k in ("FILES_ADD", "FILES_UPDATE", "FILES_REMOVE", "UNCHANGED", "FORBIDDEN"):
+        v = s.get(k)
+        print(f"{k}={v}")
+    if getattr(args, "json", False):
+        print(json.dumps(_jsonable(pf), indent=2, sort_keys=True))
+    return 0 if pf["READY_FOR_UPDATE"] else 2
+
+
+def cmd_update(args) -> int:
+    repo_root = _repo_root(args)
+    override, override_digest = _explicit_policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
+    do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
+    # Resolve + plan first so operator sees exact target SHA and files before confirming.
+    # Preview uses the same commit-policy authority as the mutation path.
+    try:
+        target_preview = gitops.resolve_target(
+            repo_root, getattr(args, "target", None), do_fetch=do_fetch)
+        if override is not None:
+            policy, digest = override, override_digest
+        else:
+            policy, digest = load_policy_at(repo_root, target_preview)
+    except (gitops.GitError, Exception) as e:
+        print(f"TARGET_ERROR: {e}", file=sys.stderr)
+        return 2
+    try:
+        plan = build_plan(repo_root, policy, target_preview, prod_root, digest)
+    except Exception as e:
+        print(f"PLAN_ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"TARGET_SHA={plan['TARGET_SHA']}")
+    print(f"POLICY_SHA256={plan['POLICY_SHA256']}")
+    for k in ("FILES_ADD", "FILES_UPDATE", "FILES_REMOVE", "UNCHANGED", "FORBIDDEN"):
+        items = plan[k]
+        print(f"{k}={len(items)}")
+        for f in items[:50]:
+            print(f"  {f}")
+    ext = plan.get("EXTERNAL_COMPONENT_CHANGES", [])
+    print(f"EXTERNAL_COMPONENT_CHANGES={len(ext)}")
+    for f in ext[:50]:
+        print(f"  {f}")
+    print(f"RESTART_REQUIRED={plan['RESTART_REQUIRED']}")
+    if plan.get("RESTART_FILES"):
+        print("RESTART_FILES:")
+        for f in plan["RESTART_FILES"][:20]:
+            print(f"  {f}")
+    print(f"VALIDATION_HOOKS={','.join(plan['VALIDATION_HOOKS'])}")
+    if plan["FORBIDDEN"]:
+        print("FORBIDDEN plan entries — refusing.", file=sys.stderr)
+        return 2
+    if not args.yes:
+        print("CONFIRMATION_REQUIRED: review plan above, then rerun with --yes.", file=sys.stderr)
+        return 3
+    try:
+        res = run_update(repo_root, prod_root,
+                         target_arg=getattr(args, "target", None),
+                         assume_yes=True,
+                         do_fetch=False if os.environ.get("NULONE_NO_FETCH") else do_fetch,
+                         policy_override=override, policy_override_sha256=override_digest)
+    except Exception as e:
+        print(f"UPDATE_FAILED: {e}", file=sys.stderr)
+        return 2
+    print(f"RESULT={res.get('RESULT')}")
+    print(f"TARGET_SHA={res.get('TARGET_SHA')}")
+    print(f"POLICY_SHA256={res.get('POLICY_SHA256')}")
+    if res.get("BACKUP_ID"):
+        print(f"BACKUP_ID={res.get('BACKUP_ID')}")
+    return 0
+
+
+def cmd_bootstrap(args) -> int:
+    repo_root = _repo_root(args)
+    override, override_digest = _explicit_policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
+    do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
+    try:
+        res = run_bootstrap(repo_root, prod_root, baseline_arg=getattr(args, "baseline", None),
+                            do_fetch=do_fetch,
+                            policy_override=override, policy_override_sha256=override_digest)
+    except Exception as e:
+        print(f"BOOTSTRAP_FAILED: {e}", file=sys.stderr)
+        return 2
+    print(f"RESULT={res.get('RESULT')}")
+    print(f"BASELINE_SHA={res.get('BASELINE_SHA')}")
+    print(f"POLICY_SHA256={res.get('POLICY_SHA256')}")
+    print(f"MANAGED_COUNT={res.get('MANAGED_COUNT')}")
+    print("NOTE: deploy-state metadata written only; zero production files rewritten.")
+    return 0
+
+
+def cmd_rollback(args) -> int:
+    repo_root = _repo_root(args)
+    override, override_digest = _explicit_policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    _enforce_prod_authority(args, prod_root)
+    try:
+        res = run_rollback(repo_root, prod_root, backup_arg=getattr(args, "backup", None),
+                           policy_override=override, policy_override_sha256=override_digest)
+    except Exception as e:
+        print(f"ROLLBACK_FAILED: {e}", file=sys.stderr)
+        return 2
+    print(f"RESULT={res.get('RESULT')}")
+    print(f"BACKUP_ID={res.get('BACKUP_ID')}")
+    print(f"RESTORED_SHA={res.get('RESTORED_SHA')}")
+    return 0
+
+
+def _guard_prod_root(prod_root: Path) -> None:
+    # Never allow the real production / home runtime as a target of this repo tooling
+    # in an automated/test context: refuse ~/.openclaw and $HOME itself.
+    home = Path.home().resolve()
+    oc = home / ".openclaw"
+    try:
+        pr = prod_root.resolve()
+    except OSError:
+        pr = prod_root
+    if pr == home or pr == oc or str(pr).startswith(str(oc) + "/"):
+        # Allow only with explicit escape hatch for future controlled human use.
+        if os.environ.get("NULONE_ALLOW_REAL_PROD", "") != "1":
+            print(f"REFUSED: production-root {pr} is live runtime; tests must use fixture roots.", file=sys.stderr)
+            raise SystemExit(2)
+
+
+# Developer conveniences that must never modify authority on the real
+# production path. Fixture/synthetic tests may use them freely.
+DEV_ENV_PREFIXES = ("NULONE_CI_", "NULONE_MOCK_", "NULONE_TEST_")
+DEV_ENV_EXACT = frozenset({"NULONE_CI_MOCK", "NULONE_NO_FETCH"})
+
+
+def _dev_override_hit(args) -> str | None:
+    """Return a reason if developer overrides are active, else None."""
+    if getattr(args, "policy", None):
+        return "--policy"
+    if getattr(args, "no_fetch", False):
+        return "--no-fetch"
+    for key in sorted(os.environ):
+        if key in DEV_ENV_EXACT or key.startswith(DEV_ENV_PREFIXES):
+            if os.environ.get(key, "") != "":
+                return key
+    return None
+
+
+def _enforce_prod_authority(args, prod_root: Path) -> None:
+    """Against the explicitly unlocked real production root, fail closed if
+    ANY developer authority override is present. The real path must always
+    fetch origin/main, load policy from the exact target commit, and perform
+    real NullOne CI proof."""
+    home = Path.home().resolve()
+    oc = home / ".openclaw"
+    try:
+        pr = prod_root.resolve()
+    except OSError:
+        return
+    real_prod = pr == home or pr == oc or str(pr).startswith(str(oc) + "/")
+    if not real_prod:
+        return
+    if os.environ.get("NULONE_ALLOW_REAL_PROD", "") != "1":
+        return  # _guard_prod_root already refused this case
+    hit = _dev_override_hit(args)
+    if hit is not None:
+        print(f"DEV_OVERRIDE_FORBIDDEN_IN_PRODUCTION: {hit} must not modify "
+              "authority for real production (fetch + commit policy + real CI required).",
+              file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _jsonable(o):
+    if isinstance(o, dict):
+        return {k: _jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable(v) for v in o]
+    if isinstance(o, Path):
+        return str(o)
+    return o
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="nullone")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("version")
+
+    p = sub.add_parser("status")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--available-sha", default=None)
+    p.add_argument("--no-fetch", action="store_true")
+    p.add_argument("--target", default=None)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("preflight")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--target", default=None)
+    p.add_argument("--no-fetch", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("update")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--target", default=None)
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--no-fetch", action="store_true")
+
+    p = sub.add_parser("bootstrap")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--baseline", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--no-fetch", action="store_true")
+
+    p = sub.add_parser("rollback")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--backup", default=None)
+
+    args = ap.parse_args(argv)
+    if args.cmd == "version":
+        return cmd_version(args)
+    if args.cmd == "status":
+        return cmd_status(args)
+    if args.cmd == "preflight":
+        return cmd_preflight(args)
+    if args.cmd == "update":
+        return cmd_update(args)
+    if args.cmd == "bootstrap":
+        return cmd_bootstrap(args)
+    if args.cmd == "rollback":
+        return cmd_rollback(args)
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

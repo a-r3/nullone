@@ -1,0 +1,174 @@
+{
+  "schema": "nullone.release-policy/v1",
+  "policy_version": "1.2.0",
+  "description": "Explicit repository-source to production-destination allowlist for the deterministic NullOne release CLI. Repository engineering only; MERGE != DEPLOY.",
+  "mappings": [
+    {
+      "repo_prefix": "workspace/social/ops/scripts/",
+      "prod_prefix": "social/ops/scripts/",
+      "description": "Deterministic workflow scripts (Morning, Analytics, Story, Breaking, publish, scheduler authority).",
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/ops/prompts/",
+      "prod_prefix": "social/ops/prompts/",
+      "description": "Reviewed agent prompt files.",
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/tools/",
+      "prod_prefix": "social/tools/",
+      "description": "Reviewed render tooling.",
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/AGENTS.md",
+      "prod_prefix": "AGENTS.md",
+      "description": "Workspace agent contract (single file mapping).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/IDENTITY.md",
+      "prod_prefix": "IDENTITY.md",
+      "description": "Workspace identity (single file mapping).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/SOUL.md",
+      "prod_prefix": "SOUL.md",
+      "description": "Workspace soul contract (single file mapping).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/BRAND.md",
+      "prod_prefix": "social/BRAND.md",
+      "description": "Brand contract (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/CONTENT_RULES.md",
+      "prod_prefix": "social/CONTENT_RULES.md",
+      "description": "Content rules (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/CONTENT_STRATEGY.md",
+      "prod_prefix": "social/CONTENT_STRATEGY.md",
+      "description": "Content strategy (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/OPERATING_SYSTEM.md",
+      "prod_prefix": "social/OPERATING_SYSTEM.md",
+      "description": "Operating system doc (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/SCORING.md",
+      "prod_prefix": "social/SCORING.md",
+      "description": "Scoring doc (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/SOURCES.md",
+      "prod_prefix": "social/SOURCES.md",
+      "description": "Sources doc (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/STATE_RULES.md",
+      "prod_prefix": "social/STATE_RULES.md",
+      "description": "State rules doc (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/ZERNIO.md",
+      "prod_prefix": "social/ZERNIO.md",
+      "description": "Zernio contract (single file).",
+      "single_file": true,
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/references/",
+      "prod_prefix": "social/references/",
+      "description": "Reviewed reference docs.",
+      "restart_required": false
+    },
+    {
+      "repo_prefix": "workspace/social/ops/PRODUCTION_BRIDGE.md",
+      "prod_prefix": "social/ops/PRODUCTION_BRIDGE.md",
+      "description": "Production bridge doc (single file).",
+      "single_file": true,
+      "restart_required": false
+    }
+  ],
+  "forbidden_repo_prefixes": [
+    "docs/",
+    "tests/",
+    ".github/",
+    ".git/",
+    "ops/",
+    "NULLONE_PROJECT_CONTEXT.md",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    ".gitignore"
+  ],
+  "forbidden_prod_prefixes": [
+    "social/state/",
+    "social/ops/manifests/",
+    "social/ops/run-outcomes/",
+    "social/ops/notifications/",
+    "social/ops/publish-callback-receipts/",
+    "social/ops/publish-controller.sentinel",
+    "social/ops/private/",
+    "social/ops/reliability-proof/",
+    "social/research/",
+    "social/drafts/",
+    "social/published/",
+    "social/analytics/",
+    "social/assets/rendered/",
+    "social/ops/breaking-handoffs/",
+    "social/ops/breaking-staging/",
+    "social/ops/candidate-queue/",
+    "deploy-state/",
+    ".openclaw/",
+    "private/",
+    "secrets/",
+    "credentials/",
+    "backups/"
+  ],
+  "notes": [
+    "Secret-bearing destinations (secret files, OAuth/session/auth state, Telegram owner data, presigned-URL artifacts, ledgers, receipts, caches) are excluded via the explicit forbidden_prod_prefixes above \u2014 never via filename-substring matching, because allowlisted code filenames legitimately contain substrings like 'auth' (authority), 'secret' (secret_provider boundary), or 'session' (supersession).",
+    "Deploy-state content is independently guarded against secret values by the release tool.",
+    "V1 scope is the proven production workspace root only (nullone update). external_controlled_components are repository-only classifications: if a reviewed release range touches them, the plan reports EXTERNAL_COMPONENT_CHANGES and ordinary update fails closed with CONTROLLED_COMPONENT_DEPLOY_REQUIRED instead of partially deploying. Future V2 may add reviewed multi-root support; guessed multi-root paths are forbidden.",
+    "Restart semantics: workspace mappings declare restart_required=false (read fresh on next invocation; undeclared defaults conservative-true). plugins/nullone-final-publish/** is an externally-controlled component with restart_required=true (Gateway activation is a controlled step; the tool never restarts anything). The plan reports RESTART_REQUIRED=YES when a changed workspace file needs it or when a release range touches a restart-required external component."
+  ],
+  "validation_hooks": [
+    "python-compile",
+    "json-parse",
+    "node-check"
+  ],
+  "external_controlled_components": [
+    {
+      "repo_prefix": "plugins/nullone-final-publish/",
+      "description": "Gateway plugin installation dir is a separate, unproven filesystem root (NOT the workspace root). Deployed only via a controlled external process; the V1 tool never copies these files.",
+      "restart_required": true
+    },
+    {
+      "repo_prefix": "agents/",
+      "description": "Live agent-definition destination is not proven to be under the same production workspace root. Deployed only via a controlled external process; the V1 tool never copies these files.",
+      "restart_required": true
+    }
+  ]
+}
