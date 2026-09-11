@@ -149,23 +149,115 @@ def sha256_file(path: Path) -> str:
 
 
 def load_snapshot_manifest(snapshot_dir: Path) -> dict:
-    manifest_path = Path(snapshot_dir) / "snapshot-manifest.json"
+    root = Path(snapshot_dir)
+    manifest_path = root / "snapshot-manifest.json"
+    # The manifest itself must be a regular file inside the snapshot root:
+    # never a symlink, never escaping it.
+    if manifest_path.is_symlink():
+        raise DrillFailed("SNAPSHOT_ENTRY_FORBIDDEN: snapshot-manifest.json is a symlink")
+    try:
+        resolved = manifest_path.resolve()
+        if resolved != (root.resolve() / "snapshot-manifest.json"):
+            raise DrillFailed("SNAPSHOT_ENTRY_FORBIDDEN: manifest resolves outside snapshot root")
+    except OSError as e:
+        raise DrillFailed(f"SNAPSHOT_MANIFEST_UNRESOLVABLE: {e}") from e
     if not manifest_path.is_file():
         raise DrillFailed("SNAPSHOT_MANIFEST_MISSING")
     try:
         manifest = json.loads(manifest_path.read_text())
     except (json.JSONDecodeError, OSError) as e:
         raise DrillFailed(f"SNAPSHOT_MANIFEST_INVALID: {e}") from e
+    if not isinstance(manifest, dict):
+        raise DrillFailed("SNAPSHOT_MANIFEST_INVALID: manifest is not an object")
     if manifest.get("schema") != SNAPSHOT_SCHEMA:
         raise DrillFailed(f"SNAPSHOT_SCHEMA_MISMATCH: {manifest.get('schema')!r}")
     if manifest.get("source_kind") != "SANITIZED_FIXTURE":
         raise DrillFailed("SNAPSHOT_SOURCE_UNTRUSTED: only SANITIZED_FIXTURE accepted")
-    if not isinstance(manifest.get("files"), list) or not manifest["files"]:
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
         raise DrillFailed("SNAPSHOT_FILES_MISSING")
+    _validate_manifest_entries(entries)
+    _validate_record_counts(manifest.get("record_counts", {}))
     return manifest
 
 
-def _copy_verified(src: Path, dest: Path, expected_sha: str) -> int:
+_HEX64_RE = None
+
+
+def _hex64(value: object) -> bool:
+    import re
+
+    global _HEX64_RE
+    if _HEX64_RE is None:
+        _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+    return isinstance(value, str) and bool(_HEX64_RE.match(value))
+
+
+def _safe_relpath(value: object) -> bool:
+    return (isinstance(value, str) and bool(value) and len(value) <= 512
+            and not value.startswith("/") and "\\" not in value
+            and ".." not in value.split("/"))
+
+
+def _validate_manifest_entries(entries: list) -> None:
+    """Validate every manifest file entry BEFORE staging so no KeyError,
+    TypeError, or ValueError can escape later. Raises DrillFailed."""
+    for i, entry in enumerate(entries):
+        where = f"files[{i}]"
+        if not isinstance(entry, dict):
+            raise DrillFailed(f"SNAPSHOT_ENTRY_INVALID: {where} is not an object")
+        path = entry.get("path")
+        if not _safe_relpath(path):
+            raise DrillFailed(
+                f"SNAPSHOT_ENTRY_INVALID: {where} has unsafe path {path!r}")
+        if not _hex64(entry.get("sha256")):
+            raise DrillFailed(
+                f"SNAPSHOT_ENTRY_INVALID: {where} has malformed sha256")
+        size = entry.get("bytes", None)
+        if size is not None and (not isinstance(size, int) or size < 0
+                                 or isinstance(size, bool)):
+            raise DrillFailed(
+                f"SNAPSHOT_ENTRY_INVALID: {where} has bad bytes field")
+
+
+def _validate_record_counts(record_counts: object) -> None:
+    if not isinstance(record_counts, dict):
+        raise DrillFailed("SNAPSHOT_RECORD_COUNTS_INVALID: not an object")
+    for key, value in record_counts.items():
+        if not _safe_relpath(key):
+            raise DrillFailed(
+                f"SNAPSHOT_RECORD_COUNTS_INVALID: unsafe path {key!r}")
+        if (not isinstance(value, int) or value < 0
+                or isinstance(value, bool)):
+            raise DrillFailed(
+                f"SNAPSHOT_RECORD_COUNTS_INVALID: bad count for {key!r}")
+
+
+def _copy_verified(snapshot_root: Path, rel: str, dest: Path, expected_sha: str) -> int:
+    """Copy one declared snapshot file after proving symlink containment.
+
+    Policy for fixture mode: NO SYMLINKS ANYWHERE IN DECLARED SNAPSHOT
+    INPUTS. The source file, every ancestor component, and the resolved
+    path must stay strictly inside the snapshot root. Nothing outside is
+    ever read.
+    """
+    src = snapshot_root / rel
+    node = snapshot_root
+    try:
+        if src.is_symlink():
+            raise DrillFailed(f"SNAPSHOT_ENTRY_FORBIDDEN: symlink file {rel!r}")
+        for part in Path(rel).parts[:-1]:
+            node = node / part
+            if node.is_symlink():
+                raise DrillFailed(
+                    f"SNAPSHOT_ENTRY_FORBIDDEN: symlink ancestor for {rel!r}")
+        resolved = src.resolve()
+        root_resolved = snapshot_root.resolve()
+        if resolved != root_resolved and root_resolved not in resolved.parents:
+            raise DrillFailed(
+                f"SNAPSHOT_ENTRY_FORBIDDEN: {rel!r} escapes snapshot root")
+    except OSError as e:
+        raise DrillFailed(f"SNAPSHOT_ENTRY_UNRESOLVABLE: {rel!r}: {e}") from e
     try:
         data = src.read_bytes()
     except OSError as e:
@@ -347,7 +439,9 @@ def run_drill(*,
     report: dict = {
         "schema": REPORT_SCHEMA,
         "scenario": scenario,
-        "snapshot_kind": "SANITIZED_FIXTURE",
+        # Truthful until proven: only a valid schema + source_kind attests
+        # SANITIZED_FIXTURE. Malformed/untrusted manifests keep UNKNOWN.
+        "snapshot_kind": "UNKNOWN",
         "restore_root": str(root),
         "publisher_state": PUBLISHER_STATE,
         "automatic_retry_allowed": False,
@@ -398,6 +492,8 @@ def run_drill(*,
         if "SCHEMA_MISMATCH" in str(e) or "SOURCE_UNTRUSTED" in str(e):
             return finish("REFUSED")
         return finish("FAILED")
+    # Manifest proved schema + source kind: label is now truthful.
+    report["snapshot_kind"] = manifest.get("source_kind", "UNKNOWN")
 
     # Stage: copy with per-file hash verification.
     staging = root / STAGING_DIRNAME
@@ -409,7 +505,7 @@ def run_drill(*,
             rel = entry["path"]
             if ".." in rel.split("/") or rel.startswith("/"):
                 raise DrillFailed(f"SNAPSHOT_PATH_TRAVERSAL: {rel!r}")
-            _copy_verified(snapshot / rel, staging / rel, entry["sha256"])
+            _copy_verified(snapshot, rel, staging / rel, entry["sha256"])
     except DrillFailed as e:
         report["checksum_result"] = f"FAILED: {e}"
         report["gaps"].append(str(e))

@@ -417,6 +417,121 @@ class RestoreDrillTests(unittest.TestCase):
         self.assertEqual(report["recovery_result"], "REFUSED")
         self.assertEqual(report["publisher_state"], "DISABLED")
         self.assertIn("checksum_result", report)
+        # Unproven input must not be labeled sanitized.
+        self.assertEqual(report["snapshot_kind"], "UNKNOWN")
+
+    def _manifest_with_entries(self, snap: Path, files, counts=None) -> None:
+        m = json.loads((snap / "snapshot-manifest.json").read_text())
+        m["files"] = files
+        if counts is not None:
+            m["record_counts"] = counts
+        (snap / "snapshot-manifest.json").write_text(json.dumps(m))
+
+    def test_manifest_entry_missing_path(self):
+        snap = self._snap()
+        self._manifest_with_entries(
+            snap, [{"sha256": "a" * 64, "bytes": 1}])
+        report = run_drill(snapshot_dir=snap, restore_root=self._root("m1"),
+                           scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+        self.assertEqual(report["publisher_state"], "DISABLED")
+        self.assertFalse((self._root("m1") / "RESTORE_READY").exists())
+
+    def test_manifest_entry_missing_sha256(self):
+        snap = self._snap()
+        self._manifest_with_entries(
+            snap, [{"path": "candidate-queue.md", "bytes": 1}])
+        report = run_drill(snapshot_dir=snap, restore_root=self._root("m2"),
+                           scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+
+    def test_manifest_entry_not_an_object(self):
+        snap = self._snap()
+        self._manifest_with_entries(snap, ["candidate-queue.md"])
+        report = run_drill(snapshot_dir=snap, restore_root=self._root("m3"),
+                           scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+
+    def test_manifest_entry_malformed_sha256(self):
+        snap = self._snap()
+        self._manifest_with_entries(
+            snap, [{"path": "candidate-queue.md", "sha256": "not-a-hash"}])
+        report = run_drill(snapshot_dir=snap, restore_root=self._root("m4"),
+                           scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+
+    def test_record_counts_wrong_type(self):
+        snap = self._snap()
+        self._manifest_with_entries(
+            snap, json.loads((snap / "snapshot-manifest.json").read_text())["files"],
+            counts=["not-an-object"])
+        report = run_drill(snapshot_dir=snap, restore_root=self._root("m5"),
+                           scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+        self.assertEqual(report["publisher_state"], "DISABLED")
+        self.assertEqual(report["fake_provider_publish_count"], 0)
+
+    def test_symlink_entry_blocked_before_external_read(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir(exist_ok=True)
+        secret = outside / "external.txt"
+        secret.write_text("EXTERNAL_MARKER_BYTES_NEVER_CONSUME\n")
+        snap = self._snap()
+
+        def plant_link(d: Path):
+            (d / "linked.txt").symlink_to(secret)
+
+        plant_link(snap)
+        # Declare the symlink with the outside file's hash: the harness
+        # must refuse before consuming those bytes.
+        import hashlib as _hl
+
+        self._manifest_with_entries(snap, [{
+            "path": "linked.txt",
+            "sha256": _hl.sha256(secret.read_bytes()).hexdigest(),
+            "bytes": len(secret.read_bytes()),
+        }])
+        root = self._root("rLINK")
+        report = run_drill(snapshot_dir=snap, restore_root=root, scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+        self.assertIn("SNAPSHOT_ENTRY_FORBIDDEN", " ".join(report["gaps"]))
+        self.assertEqual(report["publisher_state"], "DISABLED")
+        self.assertFalse((root / "RESTORE_READY").exists())
+        # External bytes must not appear anywhere under the restore root.
+        for p in root.rglob("*"):
+            if p.is_file() and not p.is_symlink():
+                self.assertNotIn("EXTERNAL_MARKER_BYTES_NEVER_CONSUME",
+                                 p.read_text(errors="replace"))
+
+    def test_manifest_symlink_blocked(self):
+        snap = self._snap()
+        outside = Path(self.tmp.name) / "outside2"
+        outside.mkdir(exist_ok=True)
+        fake_manifest = outside / "evil-manifest.json"
+        fake_manifest.write_text('{"schema": "evil"}')
+        (snap / "snapshot-manifest.json").unlink()
+        (snap / "snapshot-manifest.json").symlink_to(fake_manifest)
+        root = self._root("rMSL")
+        report = run_drill(snapshot_dir=snap, restore_root=root, scenario="X")
+        self.assertEqual(report["recovery_result"], "FAILED")
+        self.assertIn("SNAPSHOT_ENTRY_FORBIDDEN", " ".join(report["gaps"]))
+        self.assertFalse((root / "RESTORE_READY").exists())
+
+    def test_snapshot_kind_truthful(self):
+        snap = self._snap()
+        ok = run_drill(snapshot_dir=snap, restore_root=self._root("k-ok"),
+                       scenario="A")
+        self.assertEqual(ok["snapshot_kind"], "SANITIZED_FIXTURE")
+
+        def bad_schema(d: Path):
+            m = json.loads((d / "snapshot-manifest.json").read_text())
+            m["schema"] = "evil-schema"
+            (d / "snapshot-manifest.json").write_text(json.dumps(m))
+
+        snap_bad = self._snap(mutate=bad_schema, remanifest=False)
+        bad = run_drill(snapshot_dir=snap_bad, restore_root=self._root("k-bad"),
+                        scenario="X")
+        self.assertEqual(bad["snapshot_kind"], "UNKNOWN")
 
     def test_production_snapshot_source_blocked(self):
         from restore_drill import refuse_unsafe_snapshot_source
