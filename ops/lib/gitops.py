@@ -6,7 +6,90 @@ import subprocess
 from pathlib import Path
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-EXPECTED_REMOTE = "a-r3/nullone"
+EXPECTED_OWNER = "a-r3"
+EXPECTED_REPO = "nullone"
+EXPECTED_HOST = "github.com"
+
+# scp-like syntax: [user@]host:path  (no "://" present)
+_SCP_RE = re.compile(r"^(?:(?P<user>[^@/:]+)@)?(?P<host>[^/:]+):(?P<path>.+)$")
+
+
+def sanitize_remote_url(url: str) -> str:
+    """Strip embedded credentials (userinfo) so error output never leaks secrets."""
+    try:
+        return re.sub(r"://[^@/\s]+@", "://", url)
+    except re.error:
+        return "<unprintable-remote>"
+
+
+def parse_github_remote(url: str) -> tuple[str, str, str] | None:
+    """Normalize a git remote URL to (host, owner, repo).
+
+    Accepts only exact canonical GitHub forms for a-r3/nullone enforcement:
+    https://github.com/a-r3/nullone[.git], scp-style
+    [git@]github.com:a-r3/nullone[.git], and ssh://git@github.com/... forms.
+    Returns None for anything else (different host/owner/repo/path, ports,
+    extra segments, malformed input). Comparison is case-insensitive per
+    GitHub semantics; credentials are ignored for identity.
+    """
+    if not isinstance(url, str):
+        return None
+    s = url.strip()
+    if not s or len(s) > 512 or any(c in s for c in (" ", "\t", "\n", "\x00")):
+        return None
+    host: str | None = None
+    path: str | None = None
+    if "://" in s:
+        m = re.match(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<rest>.*)$", s)
+        if not m:
+            return None
+        if m.group("scheme").lower() not in ("https", "ssh"):
+            return None
+        rest = m.group("rest")
+        # strip userinfo (credentials — ignored for identity, never echoed)
+        if "@" in rest:
+            _userinfo, _, rest = rest.rpartition("@")
+        if "/" not in rest:
+            return None
+        host, _, path = rest.partition("/")
+        # reject ports and empty hosts
+        if not host or ":" in host:
+            return None
+    else:
+        m = _SCP_RE.match(s)
+        if not m:
+            return None
+        host = m.group("host")
+        path = m.group("path")
+        if not host or not path or path.startswith("/"):
+            return None
+    if host.lower() != EXPECTED_HOST:
+        return None
+    segs = [seg for seg in path.strip("/").split("/") if seg not in ("", ".")]
+    if len(segs) != 2:
+        return None
+    owner, repo = segs
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+    if not owner or not repo:
+        return None
+    return (host.lower(), owner.lower(), repo.lower())
+
+
+def remote_identity_ok(url: str) -> bool:
+    parsed = parse_github_remote(url)
+    return parsed == (EXPECTED_HOST, EXPECTED_OWNER, EXPECTED_REPO)
+
+
+def check_remote_identity(repo_root: Path) -> None:
+    try:
+        url = _run_git(repo_root, "remote", "get-url", "origin")
+    except GitError as e:
+        raise GitError(f"REMOTE_IDENTITY_UNKNOWN: {e}") from e
+    if not remote_identity_ok(url):
+        raise GitError(
+            f"REMOTE_IDENTITY_MISMATCH: {sanitize_remote_url(url)!r} "
+            f"is not exactly {EXPECTED_HOST}/{EXPECTED_OWNER}/{EXPECTED_REPO}")
 
 
 class GitError(Exception):
@@ -39,16 +122,6 @@ def repo_toplevel(start: Path) -> Path:
     if cp.returncode != 0:
         raise GitError("NOT_A_GIT_REPO")
     return Path(cp.stdout.strip())
-
-
-def check_remote_identity(repo_root: Path) -> None:
-    try:
-        url = _run_git(repo_root, "remote", "get-url", "origin")
-    except GitError as e:
-        raise GitError(f"REMOTE_IDENTITY_UNKNOWN: {e}") from e
-    low = url.lower()
-    if "a-r3/nullone" not in low:
-        raise GitError(f"REMOTE_IDENTITY_MISMATCH: {url!r} does not match {EXPECTED_REMOTE}")
 
 
 def fetch_origin_main(repo_root: Path) -> None:

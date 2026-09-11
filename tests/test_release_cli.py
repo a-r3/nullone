@@ -131,7 +131,7 @@ def materialize(repo: Path, sha: str, prod: Path) -> int:
 
 
 def snapshot_tree(prod: Path) -> dict[str, str]:
-    """Map relative path -> sha256 for everything outside deploy-state."""
+    """Map relative path -> sha256 for runtime files (outside deploy-state)."""
     out = {}
     for p in sorted(prod.rglob("*")):
         if not p.is_file() or p.is_symlink():
@@ -142,6 +142,35 @@ def snapshot_tree(prod: Path) -> dict[str, str]:
         h = hashlib.sha256()
         h.update(p.read_bytes())
         out[rel] = h.hexdigest()
+    return out
+
+
+def snapshot_full(prod: Path) -> dict[str, str]:
+    """Map relative path -> identity for the ENTIRE production tree,
+    including deploy-state. Symlinks are recorded as links (never
+    followed), so failure-path tests prove zero artifacts anywhere."""
+    import os as _os
+
+    out: dict[str, str] = {}
+    if not prod.exists():
+        return {"<missing>": "1"}
+    for root, dirs, files in _os.walk(prod, followlinks=False):
+        for d in sorted(dirs):
+            p = Path(root) / d
+            rel = str(p.relative_to(prod))
+            if p.is_symlink():
+                out[rel] = "symlink->" + _os.readlink(p)
+            else:
+                out[rel + "/"] = "dir"
+        for f in sorted(files):
+            p = Path(root) / f
+            rel = str(p.relative_to(prod))
+            if p.is_symlink():
+                out[rel] = "symlink->" + _os.readlink(p)
+            else:
+                h = hashlib.sha256()
+                h.update(p.read_bytes())
+                out[rel] = "sha256:" + h.hexdigest()
     return out
 
 
@@ -183,18 +212,21 @@ class ReleaseCLITests(unittest.TestCase):
         self.assertEqual(cp.returncode, 0)
         self.assertIn("nullone-release", cp.stdout)
 
-    # -- update without state is blocked --
+    # -- update without state is blocked, zero mutation anywhere --
     def test_update_without_state_blocked(self):
         repo = make_repo(dict(BASE_FILES))
         prod = self._prod()
         materialize(repo, gitops.origin_main_sha(repo), prod)
-        before = snapshot_tree(prod)
+        before = snapshot_full(prod)
         with self.assertRaises(Exception) as cm:
             run_update(repo, prod, assume_yes=True, do_fetch=False)
         self.assertIn("BOOTSTRAP_REQUIRED", str(cm.exception))
-        # zero production mutations
-        self.assertEqual(snapshot_tree(prod), before)
+        # zero mutations across the ENTIRE tree, including deploy-state
+        after = snapshot_full(prod)
+        self.assertEqual(after, before)
         self.assertIsNone(read_current(prod))
+        self.assertFalse((prod / "deploy-state").exists(),
+                         "UPDATE_WITHOUT_STATE_CREATED_PATHS must be 0")
         # preflight agrees: not ready for ordinary update
         from ops.lib.release import run_preflight
 
@@ -229,11 +261,12 @@ class ReleaseCLITests(unittest.TestCase):
         prod = self._prod()
         materialize(repo, sha, prod)
         (prod / "social" / "ops" / "scripts" / "a.py").write_text("tampered\n")
-        before = snapshot_tree(prod)
+        before = snapshot_full(prod)
         with self.assertRaises(Exception) as cm:
             run_bootstrap(repo, prod, baseline_arg=sha, do_fetch=False)
         self.assertIn("BOOTSTRAP_BLOCKED", str(cm.exception))
-        self.assertEqual(snapshot_tree(prod), before)
+        self.assertEqual(snapshot_full(prod), before,
+                         "BOOTSTRAP_MISMATCH_CREATED_PATHS must be 0")
         self.assertIsNone(read_current(prod))
 
     def test_bootstrap_missing_managed_file_blocked(self):
@@ -242,9 +275,12 @@ class ReleaseCLITests(unittest.TestCase):
         prod = self._prod()
         materialize(repo, sha, prod)
         (prod / "social" / "ops" / "scripts" / "a.py").unlink()
+        before = snapshot_full(prod)
         with self.assertRaises(Exception) as cm:
             run_bootstrap(repo, prod, baseline_arg=sha, do_fetch=False)
         self.assertIn("BOOTSTRAP_BLOCKED", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), before,
+                         "BOOTSTRAP_MISSING_CREATED_PATHS must be 0")
         self.assertIsNone(read_current(prod))
 
     def test_bootstrap_unknown_files_preserved(self):
@@ -267,9 +303,12 @@ class ReleaseCLITests(unittest.TestCase):
         outside = Path(self.tmp.name) / "outside"
         (outside / "social" / "ops" / "scripts").mkdir(parents=True, exist_ok=True)
         (prod / "social").symlink_to(outside / "social", target_is_directory=True)
+        before = snapshot_full(prod)
         with self.assertRaises(Exception) as cm:
             run_bootstrap(repo, prod, baseline_arg=sha, do_fetch=False)
         self.assertIn("BOOTSTRAP_BLOCKED", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), before,
+                         "BOOTSTRAP_SYMLINK_CREATED_PATHS must be 0")
         self.assertIsNone(read_current(prod))
 
     def test_bootstrap_bad_baseline_rejected(self):
@@ -363,6 +402,83 @@ class ReleaseCLITests(unittest.TestCase):
         os.environ["NULONE_CI_MOCK"] = "nullone-success"
         res = self._adopt(repo, prod)
         self.assertEqual(res["RESULT"], "BOOTSTRAPPED")
+
+    def test_gh_api_uses_explicit_get(self):
+        from unittest import mock
+
+        from ops.lib import ci_gate
+
+        sha = "a" * 40
+        cmd = ci_gate.build_runs_command(sha)
+        self.assertIn("--method", cmd)
+        self.assertEqual(cmd[cmd.index("--method") + 1], "GET")
+        # fields must come after the explicit method (shape regression)
+        self.assertLess(cmd.index("--method"), cmd.index("-f"))
+        self.assertIn(f"head_sha={sha}", cmd)
+        # prove the real fetch path issues exactly this shape
+        seen: dict = {}
+
+        class _FakeCP:
+            returncode = 0
+            stdout = '{"total_count": 0, "workflow_runs": []}'
+            stderr = ""
+
+        def _fake_run(cmd2, **kw):
+            seen["cmd"] = cmd2
+            return _FakeCP()
+
+        with mock.patch.object(ci_gate.subprocess, "run", side_effect=_fake_run):
+            runs = ci_gate._fetch_runs_via_gh(sha)
+        self.assertEqual(runs, [])
+        self.assertIn("--method", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--method") + 1], "GET")
+
+    def test_remote_identity_exact(self):
+        from ops.lib.gitops import remote_identity_ok, sanitize_remote_url
+
+        for good in [
+            "https://github.com/a-r3/nullone.git",
+            "https://github.com/a-r3/nullone",
+            "https://github.com/a-r3/nullone/",
+            "git@github.com:a-r3/nullone.git",
+            "git@github.com:a-r3/nullone",
+            "ssh://git@github.com/a-r3/nullone.git",
+            "ssh://git@github.com/a-r3/nullone",
+            "HTTPS://GITHUB.COM/A-R3/NULLONE.GIT",
+        ]:
+            self.assertTrue(remote_identity_ok(good), good)
+        for evil in [
+            "https://github.com/a-r3/nullone-evil",
+            "https://github.com/a-r3/nullone-evil.git",
+            "https://github.com/evil/a-r3/nullone",
+            "https://github.com/a-r3/nullone/extra",
+            "https://github.example.com/a-r3/nullone",
+            "https://github.com.evil.com/a-r3/nullone",
+            "https://notgithub.com/a-r3/nullone",
+            "git@github.com:a-r3/nullone-evil.git",
+            "git@evil.com:a-r3/nullone.git",
+            "",
+            "not a url",
+            "https://github.com/a-r3",
+            "a-r3/nullone",
+        ]:
+            self.assertFalse(remote_identity_ok(evil), evil)
+        # credential-bearing remote: identity ignores userinfo, errors never leak it
+        self.assertTrue(remote_identity_ok("https://u:sekret123@github.com/a-r3/nullone.git"))
+        clean = sanitize_remote_url("https://u:sekret123@github.com/evil/x.git")
+        self.assertNotIn("sekret123", clean)
+        self.assertNotIn("u:", clean)
+
+    def test_remote_identity_rejected_end_to_end_no_leak(self):
+        repo = make_repo(dict(BASE_FILES))
+        prod = self._prod()
+        git("remote", "set-url", "origin",
+            "https://tok:sekret-leak-check@github.com/evil/fork.git", cwd=repo)
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertIn("REMOTE_IDENTITY_MISMATCH", str(cm.exception))
+        self.assertNotIn("sekret-leak-check", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), {})
 
     # -- target-commit policy authority --
     def test_target_commit_policy_authority(self):

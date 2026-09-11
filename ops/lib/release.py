@@ -514,35 +514,50 @@ def run_update(
     policy_override: dict | None = None,
     policy_override_sha256: str | None = None,
 ) -> dict:
+    # Phase 0: read-only eligibility. No lock, no production mutation:
+    # resolving, CI, planning, and drift reads must never create state.
+    target_sha = gitops.resolve_target(repo_root, target_arg, do_fetch=do_fetch)
+    policy, policy_sha256, _ = resolve_policy(
+        repo_root, target_sha, policy_override, policy_override_sha256)
+    # CI gate BEFORE any mutation
+    try:
+        _proven, detail = ci_gate.check_ci_success(str(repo_root), target_sha)
+    except ci_gate.CIError as e:
+        raise ReleaseError(f"CI_GATE_BLOCKED: {e}") from e
+    check_no_forbidden(build_plan(repo_root, policy, target_sha, prod_root, policy_sha256))
+    cur0 = read_current(prod_root)
+    if cur0 is None:
+        # Never silently adopt an existing production tree as a first
+        # deployment. One-time adoption requires explicit `bootstrap`.
+        raise ReleaseError(
+            "BOOTSTRAP_REQUIRED: no deploy state; ordinary update refused "
+            "(use explicit `nullone bootstrap --baseline <full-sha>` for one-time adoption)")
+    require_clean_drift(prod_root, policy, "UPDATE")
+    if cur0.get("deployed_sha") == target_sha:
+        plan0 = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
+        return {"RESULT": "ALREADY_UP_TO_DATE", "TARGET_SHA": target_sha,
+                "PLAN": plan0, "CI": detail, "POLICY_SHA256": policy_sha256}
+    # show plan + require explicit confirmation (still read-only)
+    if not assume_yes:
+        if confirm_fn is None:
+            raise ReleaseError("CONFIRMATION_REQUIRED: rerun with --yes after reviewing plan")
+        if not confirm_fn(build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)):
+            raise ReleaseError("UPDATE_DECLINED")
+    # Phase 1: locked re-verification, then mutation.
     with deploy_lock(prod_root):
-        target_sha = gitops.resolve_target(repo_root, target_arg, do_fetch=do_fetch)
-        policy, policy_sha256, _ = resolve_policy(
-            repo_root, target_sha, policy_override, policy_override_sha256)
-        # CI gate BEFORE any mutation
-        try:
-            _proven, detail = ci_gate.check_ci_success(str(repo_root), target_sha)
-        except ci_gate.CIError as e:
-            raise ReleaseError(f"CI_GATE_BLOCKED: {e}") from e
-        plan = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
-        check_no_forbidden(plan)
         cur = read_current(prod_root)
         if cur is None:
-            # Never silently adopt an existing production tree as a first
-            # deployment. One-time adoption requires explicit `bootstrap`.
             raise ReleaseError(
                 "BOOTSTRAP_REQUIRED: no deploy state; ordinary update refused "
                 "(use explicit `nullone bootstrap --baseline <full-sha>` for one-time adoption)")
         require_clean_drift(prod_root, policy, "UPDATE")
         prev_sha = cur.get("deployed_sha")
         if prev_sha == target_sha:
+            plan = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
             return {"RESULT": "ALREADY_UP_TO_DATE", "TARGET_SHA": target_sha,
                     "PLAN": plan, "CI": detail, "POLICY_SHA256": policy_sha256}
-        # show plan + require explicit confirmation
-        if not assume_yes:
-            if confirm_fn is None:
-                raise ReleaseError("CONFIRMATION_REQUIRED: rerun with --yes after reviewing plan")
-            if not confirm_fn(plan):
-                raise ReleaseError("UPDATE_DECLINED")
+        plan = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
+        check_no_forbidden(plan)
         write_txn(prod_root, {"status": "IN_PROGRESS", "phase": "backup",
                               "target_sha": target_sha, "started_at": time.time()})
         try:
@@ -603,6 +618,34 @@ def resolve_baseline(repo_root: Path, baseline_arg: str | None, do_fetch: bool =
     return sha
 
 
+def _compare_bootstrap(prod_root: Path, policy: dict,
+                       managed_target: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Read-only bootstrap comparison. Returns (mismatched, symlink_blocked).
+
+    Creates nothing; only stats/reads production files after path-safety
+    verification. Unknown/unmanaged production files are ignored.
+    """
+    mismatched: list[str] = []
+    blocked: list[str] = []
+    for prod_rel in sorted(managed_target):
+        try:
+            abs_p = assert_prod_path_safe(prod_root, prod_rel, policy)
+        except PolicyError:
+            blocked.append(prod_rel)
+            continue
+        if abs_p.is_symlink() or not abs_p.is_file():
+            mismatched.append(f"{prod_rel} (missing-or-symlink)")
+            continue
+        try:
+            actual = sha256_file(abs_p)
+        except OSError:
+            mismatched.append(f"{prod_rel} (unreadable)")
+            continue
+        if actual != managed_target[prod_rel]:
+            mismatched.append(prod_rel)
+    return mismatched, blocked
+
+
 def run_bootstrap(
     repo_root: Path,
     prod_root: Path,
@@ -613,51 +656,46 @@ def run_bootstrap(
 ) -> dict:
     """One-time adoption of an already-existing production tree.
 
-    Writes deploy-state metadata ONLY when every managed file at the
-    baseline matches production byte-for-byte. Zero production file writes
-    in all cases; any mismatch blocks with BOOTSTRAP_BLOCKED.
+    Phase 0 is fully read-only: any mismatch fails with BOOTSTRAP_BLOCKED
+    and zero artifacts. Only after the exact match is proven under the
+    lock is deploy-state metadata committed. Zero production file writes
+    in all cases.
     """
+    # Phase 0: read-only eligibility (no lock, no production mutation).
+    if read_current(prod_root) is not None:
+        raise ReleaseError(
+            "BOOTSTRAP_REFUSED_ALREADY_ADOPTED: deploy state exists; use ordinary update")
+    baseline_sha = resolve_baseline(repo_root, baseline_arg, do_fetch=do_fetch)
+    policy, policy_sha256, _ = resolve_policy(
+        repo_root, baseline_sha, policy_override, policy_override_sha256)
+    try:
+        _proven, detail = ci_gate.check_ci_success(str(repo_root), baseline_sha)
+    except ci_gate.CIError as e:
+        raise ReleaseError(f"CI_GATE_BLOCKED: {e}") from e
+    plan = build_plan(repo_root, policy, baseline_sha, prod_root, policy_sha256)
+    check_no_forbidden(plan)
+    managed_target: dict[str, str] = plan["MANAGED_TARGET"]
+    mismatched, blocked = _compare_bootstrap(prod_root, policy, managed_target)
+    if blocked:
+        raise ReleaseError(f"BOOTSTRAP_BLOCKED_SYMLINK: {blocked[:20]}")
+    if mismatched:
+        raise ReleaseError(f"BOOTSTRAP_BLOCKED: {len(mismatched)} managed file(s) differ "
+                           f"from baseline {baseline_sha[:12]}: {mismatched[:20]}")
+    # Phase 1: locked re-verification, then metadata commit only.
     with deploy_lock(prod_root):
         if read_current(prod_root) is not None:
             raise ReleaseError(
                 "BOOTSTRAP_REFUSED_ALREADY_ADOPTED: deploy state exists; use ordinary update")
-        baseline_sha = resolve_baseline(repo_root, baseline_arg, do_fetch=do_fetch)
-        policy, policy_sha256, _ = resolve_policy(
-            repo_root, baseline_sha, policy_override, policy_override_sha256)
-        try:
-            _proven, detail = ci_gate.check_ci_success(str(repo_root), baseline_sha)
-        except ci_gate.CIError as e:
-            raise ReleaseError(f"CI_GATE_BLOCKED: {e}") from e
-        plan = build_plan(repo_root, policy, baseline_sha, prod_root, policy_sha256)
-        check_no_forbidden(plan)
-        managed_target: dict[str, str] = plan["MANAGED_TARGET"]
+        mismatched, blocked = _compare_bootstrap(prod_root, policy, managed_target)
+        if blocked:
+            raise ReleaseError(f"BOOTSTRAP_BLOCKED_SYMLINK: {blocked[:20]}")
+        if mismatched:
+            raise ReleaseError(f"BOOTSTRAP_BLOCKED: {len(mismatched)} managed file(s) differ "
+                               f"from baseline {baseline_sha[:12]}: {mismatched[:20]}")
         write_txn(prod_root, {"status": "IN_PROGRESS", "phase": "bootstrap",
                               "target_sha": baseline_sha, "started_at": time.time()})
         try:
-            mismatched: list[str] = []
-            blocked: list[str] = []
-            for prod_rel in sorted(managed_target):
-                try:
-                    abs_p = assert_prod_path_safe(prod_root, prod_rel, policy)
-                except PolicyError:
-                    blocked.append(prod_rel)
-                    continue
-                if abs_p.is_symlink() or not abs_p.is_file():
-                    mismatched.append(f"{prod_rel} (missing-or-symlink)")
-                    continue
-                try:
-                    actual = sha256_file(abs_p)
-                except OSError:
-                    mismatched.append(f"{prod_rel} (unreadable)")
-                    continue
-                if actual != managed_target[prod_rel]:
-                    mismatched.append(prod_rel)
-            if blocked:
-                raise ReleaseError(f"BOOTSTRAP_BLOCKED_SYMLINK: {blocked[:20]}")
-            if mismatched:
-                raise ReleaseError(f"BOOTSTRAP_BLOCKED: {len(mismatched)} managed file(s) differ "
-                                   f"from baseline {baseline_sha[:12]}: {mismatched[:20]}")
-            # Exact match: metadata only, no production file writes.
+            # Exact match proven: metadata only, no production file writes.
             write_current(prod_root, {
                 "deployed_sha": baseline_sha,
                 "deployed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -696,23 +734,39 @@ def list_backups(prod_root: Path) -> list[str]:
     return sorted([p.name for p in bd.iterdir() if p.is_dir()])
 
 
+def _select_backup(prod_root: Path, backup_arg: str | None) -> tuple[str, dict]:
+    """Read-only backup selection + verification. Creates nothing."""
+    backups = list_backups(prod_root)
+    if not backups:
+        raise ReleaseError("ROLLBACK_NO_BACKUPS")
+    if backup_arg is None:
+        if len(backups) > 1:
+            raise ReleaseError(f"ROLLBACK_AMBIGUOUS: specify --backup one of {backups}")
+        backup_id = backups[0]
+    else:
+        backup_id = backup_arg
+        if backup_id not in backups:
+            raise ReleaseError(f"ROLLBACK_BACKUP_NOT_FOUND: {backup_id}")
+    return backup_id, verify_backup(prod_root, backup_id)
+
+
 def run_rollback(repo_root: Path, prod_root: Path,
                  backup_arg: str | None = None,
                  policy_override: dict | None = None,
                  policy_override_sha256: str | None = None) -> dict:
+    # Phase 0: read-only eligibility (no lock, no production mutation).
+    cur0 = read_current(prod_root)
+    if cur0 is None:
+        raise ReleaseError("ROLLBACK_NO_DEPLOY_STATE: cannot bind rollback without current release")
+    _bid0, manifest0 = _select_backup(prod_root, backup_arg)
+    if manifest0.get("target_sha") != cur0.get("deployed_sha"):
+        raise ReleaseError(
+            f"ROLLBACK_NOT_CURRENT_RELEASE: backup {_bid0} targets "
+            f"{manifest0.get('target_sha')[:12]} "
+            f"but current release is {(cur0.get('deployed_sha')[:12] if cur0.get('deployed_sha') else 'None')}; zero mutations")
+    # Phase 1: locked re-verification, then mutation.
     with deploy_lock(prod_root):
-        backups = list_backups(prod_root)
-        if not backups:
-            raise ReleaseError("ROLLBACK_NO_BACKUPS")
-        if backup_arg is None:
-            if len(backups) > 1:
-                raise ReleaseError(f"ROLLBACK_AMBIGUOUS: specify --backup one of {backups}")
-            backup_id = backups[0]
-        else:
-            backup_id = backup_arg
-            if backup_id not in backups:
-                raise ReleaseError(f"ROLLBACK_BACKUP_NOT_FOUND: {backup_id}")
-        manifest = verify_backup(prod_root, backup_id)
+        backup_id, manifest = _select_backup(prod_root, backup_arg)
         cur = read_current(prod_root)
         if cur is None:
             raise ReleaseError("ROLLBACK_NO_DEPLOY_STATE: cannot bind rollback without current release")

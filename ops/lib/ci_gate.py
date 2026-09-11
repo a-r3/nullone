@@ -85,13 +85,20 @@ def check_ci_success(repo_root: str, sha: str) -> tuple[bool, str]:
     return evaluate_runs(runs, sha)
 
 
+def build_runs_command(sha: str) -> list[str]:
+    """Exact `gh api` command shape for the read-only Actions runs query."""
+    return [
+        "gh", "api", "--method", "GET", f"repos/{NULONE_REPO}/actions/runs",
+        "-f", f"head_sha={sha}", "-f", "per_page=100",
+    ]
+
+
 def _fetch_runs_via_gh(sha: str) -> list[dict]:
+    # NOTE: `gh api -f/--field` implies POST. The Actions runs endpoint is
+    # a GET endpoint, so --method GET must be explicit (regression-tested).
+    cmd = build_runs_command(sha)
     try:
-        cp = subprocess.run(
-            ["gh", "api", f"repos/{NULONE_REPO}/actions/runs",
-             "-f", f"head_sha={sha}", "-f", "per_page=100"],
-            capture_output=True, text=True, timeout=60,
-        )
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
         raise CIError("CI_STATUS_UNKNOWN: `gh` CLI not available")
     except subprocess.TimeoutExpired as e:

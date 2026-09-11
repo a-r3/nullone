@@ -96,6 +96,20 @@ Installed files receive their reviewed Git modes (0644/0755); install
 failure restores prior bytes and modes; backups record modes and
 rollback restores them.
 
+Fail-closed paths are truly zero-mutation: the deployment lock is an
+`flock()` on the production-root directory descriptor itself and creates
+no state; update/bootstrap/rollback each run a fully read-only
+eligibility phase first, and only after the exact-match preconditions
+are re-proven under the lock is any deploy-state metadata committed. A
+refused update or bootstrap leaves the production tree byte-identical,
+including no new `deploy-state/` artifacts.
+
+Repository identity is exact, not substring-based: only canonical
+`github.com/a-r3/nullone` remote forms (HTTPS, scp-style SSH,
+`ssh://`) are accepted; lookalike owners, repos, hosts, extra path
+segments, and ports fail closed, and embedded credentials are stripped
+from every error message.
+
 Deploy metadata lives production-locally outside editorial state
 (`deploy-state/current.json`, `history.jsonl`, `backups/`, lock and
 transaction files). It stores SHAs, timestamps, tool/policy versions
@@ -105,8 +119,10 @@ filename-substring matching. No file contents, no secrets.
 
 The CI gate proves the **`NullOne CI` workflow itself** (exact repo,
 exact head SHA, completed, success) via authenticated local `gh`
-read-only API calls. Unrelated successful checks never count as proof;
-missing/pending/failed/cancelled/ambiguous/unreachable all fail closed.
+read-only API calls (`gh api --method GET .../actions/runs`, since
+`gh api -f` would otherwise imply POST). Unrelated successful checks
+never count as proof; missing/pending/failed/cancelled/ambiguous/
+unreachable all fail closed.
 
 V1 performs **no Gateway restart**. Validation hooks are offline only
 (`py_compile`, JSON parse, `node --check` where available). A deployment

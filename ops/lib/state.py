@@ -275,19 +275,30 @@ def clear_txn(prod_root: Path) -> None:
 
 @contextmanager
 def deploy_lock(prod_root: Path):
-    """Exclusive non-blocking deploy lock. Raises StateError if held."""
-    ensure_state_dir(prod_root)
-    lp = lock_path(prod_root)
-    fh = lp.open("a+")
+    """Exclusive non-blocking deploy lock that creates NOTHING.
+
+    The lock is an flock() on an O_RDONLY descriptor of the production-root
+    directory itself (Linux), so merely checking eligibility or failing
+    closed can never create deploy-state/lock/transaction artifacts.
+    Raises StateError if the root is missing or the lock is held.
+    """
+    import os as _os
+
+    try:
+        fd = _os.open(prod_root, _os.O_RDONLY)
+    except FileNotFoundError as e:
+        raise StateError(f"PROD_ROOT_MISSING: {prod_root}") from e
+    except OSError as e:
+        raise StateError(f"LOCK_OPEN_FAILED: {type(e).__name__}") from e
     try:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
             raise StateError("DEPLOY_LOCK_HELD: another update/rollback is running") from e
-        yield fh
+        yield fd
     finally:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:
             pass
-        fh.close()
+        _os.close(fd)
