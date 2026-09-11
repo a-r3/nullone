@@ -1,7 +1,9 @@
 # ADR-01: Recovery and Artifact Durability
 
-Status: ACCEPTED (decision record; repository only — no recovery
-infrastructure is deployed by accepting this ADR).
+Status: PROPOSED — becomes accepted only when PR #106 is merged with an
+exact-head human review receipt. Separately, ordinary RPO/RTO target
+acceptance is PENDING — Rauf Alizada (@a-r3). Neither is claimed before
+review.
 
 Date: 2026-09-11.
 Scope: issue #9. Empirical proof belongs to issue #10 (restore drill),
@@ -46,11 +48,15 @@ Separate ALL recovery reasoning into two independent questions:
 
 3. Source-of-truth precedence on conflict: reviewed Git commit for
    repository bytes; proven provider PUBLISHED status may reconcile stale
-   local PUBLISHING (never causing a retry); final authorization and
-   attempt history require explicit durable evidence (never inferred from
-   topic text, queue status, Telegram messages, or draft existence);
-   terminal receipts are historical audit records and are never rewritten
-   because provider truth later advances; UNKNOWN/conflict fails closed.
+   local PUBLISHING (never causing a retry); remote DRAFT proves NOTHING
+   about historical attempts — restored attempts=0 plus remote DRAFT plus
+   missing critical history means DISABLED/CHECK_REQUIRED, never retry;
+   only positive proven PUBLISHED truth reconciles forward; final
+   authorization and attempt history require explicit durable evidence
+   (never inferred from topic text, queue status, Telegram messages, or
+   draft existence); terminal receipts are historical audit records and
+   are never rewritten because provider truth later advances;
+   UNKNOWN/conflict fails closed.
 
 4. No SQLite exists in production-critical state today
    (`CURRENT_SQLITE_CRITICAL_STATE=NONE`; `sqlite3` is statically
@@ -59,8 +65,12 @@ Separate ALL recovery reasoning into two independent questions:
    live-file copying.
 
 5. Signed/presigned URLs are metadata, never durable media copies.
-   Rendered bytes reproducible from immutable inputs need no independent
-   retention; original remote bytes need it, with hash verification.
+   Rendered bytes: a future STRUCTURAL re-render is a NEW DERIVED
+   ARTIFACT, never exact-byte recovery — exact final/published render
+   bytes are retained independently with SHA256 when preservation
+   matters. Original remote bytes need independent retention with hash
+   verification where rights allow; otherwise the artifact is marked
+   NON_RECOVERABLE_FROM_SOURCE.
 
 6. Secrets, OAuth state, sessions, and tokens are NEVER part of recovery
    artifacts. Each has a named source/recovery owner and, where applicable,
@@ -69,7 +79,10 @@ Separate ALL recovery reasoning into two independent questions:
 7. Future independent recovery copies must be encrypted at rest with
    separated key-recovery ownership, separated failure domain, retention
    classes, and hash verification. Key loss means backup unusable — stated
-   explicitly, never hand-waved. Provisioning that storage is OUT OF SCOPE
+   explicitly, never hand-waved. Recovery custodian: Rauf Alizada (@a-r3)
+   until formally delegated; key material stays off the primary host and
+   separate from the encrypted backup failure domain, and is never
+   recorded in Git. Provisioning that storage is OUT OF SCOPE
    for this ADR.
 
 ## Alternatives considered

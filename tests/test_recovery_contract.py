@@ -165,6 +165,92 @@ class RecoveryContractTests(unittest.TestCase):
                         "DATA AVAILABILITY", "PUBLICATION SAFETY"):
             self.assertIn(section, text)
 
+    def test_no_unresolved_owner_or_retention(self):
+        policy = json.loads(POLICY.read_text())
+        for cls in policy["state_classes"]:
+            owner = cls.get("recovery_owner", "")
+            self.assertTrue(owner and "TBD" not in owner,
+                            f"{cls['name']} owner unresolved")
+            retention = json.dumps(cls.get("retention_policy", ""))
+            self.assertTrue(retention and "TBD" not in retention
+                            and "undecided" not in retention.lower(),
+                            f"{cls['name']} retention unresolved")
+        contract = read(CONTRACT)
+        for banned in ("Owner: TBD", "owner TBD", "retention owner TBD",
+                       "operator-defined (undecided", "owner TBD (pending)"):
+            self.assertNotIn(banned, contract)
+
+    def test_key_recovery_custodian_defined_without_material(self):
+        policy = json.loads(POLICY.read_text())
+        custodian = policy.get("key_recovery_custodian", "")
+        self.assertIn("Rauf Alizada", custodian)
+        self.assertIn("no key material", custodian.lower())
+        contract = read(CONTRACT)
+        self.assertIn("Rauf Alizada (@a-r3)", contract)
+        blob = (POLICY.read_text() + read(CONTRACT) + read(ADR)).lower()
+        for marker in ("private key", "secret key=", "key material:"):
+            self.assertNotIn(marker, blob)
+
+    def test_structural_not_exact_byte(self):
+        contract = read(CONTRACT)
+        self.assertIn("STRUCTURAL re-render is NOT exact-byte recovery", contract)
+        self.assertIn("NEW DERIVED ARTIFACT", contract)
+
+    def test_published_media_exact_byte_retention(self):
+        policy = json.loads(POLICY.read_text())
+        media = next(c for c in policy["state_classes"]
+                     if c["name"] == "rendered_and_source_media")
+        self.assertTrue(media["exact_bytes_required"])
+        self.assertIn("project-lifetime", media["retention_policy"])
+        contract = read(CONTRACT)
+        self.assertIn("retain the actual output bytes independently", contract)
+        self.assertIn("NON_RECOVERABLE_FROM_SOURCE", contract)
+
+    def test_missing_notifier_history_no_auto_resend(self):
+        policy = json.loads(POLICY.read_text())
+        notifier = next(c for c in policy["state_classes"]
+                        if c["name"] == "notifier_state")
+        action = notifier["missing_history_action"]
+        self.assertIn("NOTIFIER_STATE=CHECK_REQUIRED", action)
+        self.assertIn("AUTOMATIC_RESEND=FORBIDDEN", action)
+        contract = read(CONTRACT)
+        self.assertIn("automatic result resend is FORBIDDEN", contract)
+
+    def test_remote_draft_missing_history_no_retry(self):
+        for path in (ADR, CONTRACT):
+            text = read(path)
+            self.assertIn("remote DRAFT proves", text)
+        contract = read(CONTRACT)
+        self.assertIn("tabletop", contract.lower())
+        self.assertIn("ATTEMPTS=0 + REMOTE DRAFT + CRITICAL HISTORY MISSING",
+                      contract)
+
+    def test_publish_ledger_classified_not_authority(self):
+        contract = read(CONTRACT)
+        self.assertIn("social/state/publish-ledger.jsonl", contract)
+        self.assertIn("NOT sufficient by itself to create authorization", contract)
+        self.assertIn("NOT sufficient by itself", contract)
+        self.assertIn("Neither queue nor ledger is publication", contract)
+
+    def test_current_vs_legacy_oauth_distinguished(self):
+        contract = read(CONTRACT)
+        self.assertIn("LEGACY_OR_EXTERNAL_CONTROLLED", contract)
+        self.assertIn("CURRENT_EXTERNAL_AUTHORITY", contract)
+
+    def test_critical_retention_indefinite(self):
+        policy = json.loads(POLICY.read_text())
+        for name in ("publication_attempt_history",
+                     "final_authorization_evidence"):
+            cls = next(c for c in policy["state_classes"] if c["name"] == name)
+            self.assertIn("indefinite", cls["retention_policy"])
+
+    def test_adr_governance_status_truthful(self):
+        text = read(ADR)
+        self.assertIn("PROPOSED", text)
+        self.assertIn("exact-head", text)
+        self.assertIn("PENDING", text)
+        self.assertNotIn("Status: ACCEPTED", text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
