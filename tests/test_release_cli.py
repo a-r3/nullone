@@ -457,14 +457,21 @@ class ReleaseCLITests(unittest.TestCase):
             "https://notgithub.com/a-r3/nullone",
             "git@github.com:a-r3/nullone-evil.git",
             "git@evil.com:a-r3/nullone.git",
+            "other@github.com:a-r3/nullone.git",
+            "github.com:a-r3/nullone.git",
+            "ssh://other@github.com/a-r3/nullone.git",
+            "ssh://git:secret@github.com/a-r3/nullone.git",
+            "ssh://github.com/a-r3/nullone.git",
+            "https://u:sekret123@github.com/a-r3/nullone.git",
+            "https://token123@github.com/a-r3/nullone.git",
+            "https://github.com:443/a-r3/nullone",
             "",
             "not a url",
             "https://github.com/a-r3",
             "a-r3/nullone",
         ]:
             self.assertFalse(remote_identity_ok(evil), evil)
-        # credential-bearing remote: identity ignores userinfo, errors never leak it
-        self.assertTrue(remote_identity_ok("https://u:sekret123@github.com/a-r3/nullone.git"))
+        # rejected credential-bearing remotes never leak values in errors
         clean = sanitize_remote_url("https://u:sekret123@github.com/evil/x.git")
         self.assertNotIn("sekret123", clean)
         self.assertNotIn("u:", clean)
@@ -781,11 +788,10 @@ class ReleaseCLITests(unittest.TestCase):
                     pass
             self.assertIn("DEPLOY_LOCK_HELD", str(cm.exception))
 
-    # -- restart metadata per mapping --
-    def test_restart_metadata_prompt_vs_plugin(self):
+    # -- restart metadata: workspace changes need no restart --
+    def test_restart_metadata_workspace_only(self):
         files = {
             "workspace/social/ops/prompts/morning-editorial.md": "# p1\n",
-            "plugins/nullone-final-publish/index.js": "module.exports = 1;\n",
             "workspace/social/ops/scripts/a.py": "print('a1')\n",
         }
         repo = make_repo(files)
@@ -797,19 +803,103 @@ class ReleaseCLITests(unittest.TestCase):
         res = run_update(repo, prod, assume_yes=True, do_fetch=False)
         self.assertEqual(res["RESULT"], "UPDATED")
         self.assertEqual(res["PLAN"]["RESTART_REQUIRED"], "NO")
-        # plugin change => restart required, plugin file listed
-        commit_all(repo, {"plugins/nullone-final-publish/index.js": "module.exports = 2;\n"},
-                   msg="plugin")
-        res = run_update(repo, prod, assume_yes=True, do_fetch=False)
-        self.assertEqual(res["RESULT"], "UPDATED")
-        self.assertEqual(res["PLAN"]["RESTART_REQUIRED"], "YES")
-        self.assertIn("plugins/nullone-final-publish/index.js", res["PLAN"]["RESTART_FILES"])
-        # no plugin change in plan => no false plugin restart requirement
+        self.assertEqual(res["PLAN"]["EXTERNAL_COMPONENT_CHANGES"], [])
+        # scripts change => still no restart, no external components
         commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('a2')\n"}, msg="scripts")
         policy, digest = load_policy_at(repo, gitops.origin_main_sha(repo))
         plan = build_plan(repo, policy, gitops.origin_main_sha(repo), prod, digest)
         self.assertEqual(plan["RESTART_REQUIRED"], "NO")
-        self.assertNotIn("plugins/nullone-final-publish/index.js", plan["RESTART_FILES"])
+        self.assertEqual(plan["EXTERNAL_COMPONENT_CHANGES"], [])
+
+    # -- V1 scope: workspace only; external components gate --
+    def _repo_with_plugin(self):
+        return make_repo({
+            "workspace/social/ops/scripts/a.py": "print('a1')\n",
+            "workspace/social/ops/prompts/morning-editorial.md": "# p1\n",
+            "plugins/nullone-final-publish/index.js": "module.exports = 1;\n",
+            "agents/approval/AGENTS.md": "# agent\n",
+        })
+
+    def test_external_files_never_mapped_under_prod_root(self):
+        self.assertIsNone(map_repo_to_prod(
+            "plugins/nullone-final-publish/index.js", self.policy))
+        self.assertIsNone(map_repo_to_prod(
+            "plugins/nullone-final-publish/route.js", self.policy))
+        self.assertIsNone(map_repo_to_prod("agents/approval/AGENTS.md", self.policy))
+        from ops.lib.policy import external_component_for_repo
+
+        self.assertIsNotNone(external_component_for_repo(
+            "plugins/nullone-final-publish/index.js", self.policy))
+        self.assertIsNotNone(external_component_for_repo(
+            "agents/approval/AGENTS.md", self.policy))
+        self.assertIsNone(external_component_for_repo(
+            "workspace/social/ops/scripts/a.py", self.policy))
+
+    def test_workspace_only_change_updates_normally(self):
+        repo = self._repo_with_plugin()
+        prod = self._prod()
+        sha1 = gitops.origin_main_sha(repo)
+        self._adopt(repo, prod, sha1)
+        self.assertFalse((prod / "plugins").exists())
+        commit_all(repo, {"workspace/social/ops/scripts/a.py": "print('a2')\n"}, msg="ws")
+        before = snapshot_full(prod)
+        res = run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertEqual(res["RESULT"], "UPDATED")
+        self.assertEqual(res["PLAN"]["EXTERNAL_COMPONENT_CHANGES"], [])
+        self.assertEqual((prod / "social" / "ops" / "scripts" / "a.py").read_text(), "print('a2')\n")
+        self.assertFalse((prod / "plugins").exists())
+        self.assertFalse((prod / "agents").exists())
+
+    def test_plugin_only_change_blocks_update_zero_mutation(self):
+        repo = self._repo_with_plugin()
+        prod = self._prod()
+        sha1 = gitops.origin_main_sha(repo)
+        self._adopt(repo, prod, sha1)
+        commit_all(repo, {"plugins/nullone-final-publish/index.js": "module.exports = 2;\n"},
+                   msg="plugin")
+        target = gitops.origin_main_sha(repo)
+        policy, digest = load_policy_at(repo, target)
+        plan = build_plan(repo, policy, target, prod, digest)
+        self.assertIn("plugins/nullone-final-publish/index.js",
+                      plan["EXTERNAL_COMPONENT_CHANGES"])
+        self.assertEqual(plan["RESTART_REQUIRED"], "YES")
+        before = snapshot_full(prod)
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertIn("CONTROLLED_COMPONENT_DEPLOY_REQUIRED", str(cm.exception))
+        self.assertEqual(snapshot_full(prod), before)
+        self.assertFalse((prod / "plugins").exists())
+        cur = read_current(prod)
+        self.assertEqual(cur["deployed_sha"], sha1)
+
+    def test_mixed_workspace_plugin_change_atomic_block(self):
+        repo = self._repo_with_plugin()
+        prod = self._prod()
+        sha1 = gitops.origin_main_sha(repo)
+        self._adopt(repo, prod, sha1)
+        commit_all(repo, {
+            "workspace/social/ops/scripts/a.py": "print('a2')\n",
+            "plugins/nullone-final-publish/index.js": "module.exports = 2;\n",
+        }, msg="mixed")
+        before = snapshot_full(prod)
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertIn("CONTROLLED_COMPONENT_DEPLOY_REQUIRED", str(cm.exception))
+        # no partial workspace deploy
+        self.assertEqual(snapshot_full(prod), before)
+        self.assertEqual((prod / "social" / "ops" / "scripts" / "a.py").read_text(), "print('a1')\n")
+        cur = read_current(prod)
+        self.assertEqual(cur["deployed_sha"], sha1)
+
+    def test_agents_change_blocks_update(self):
+        repo = self._repo_with_plugin()
+        prod = self._prod()
+        sha1 = gitops.origin_main_sha(repo)
+        self._adopt(repo, prod, sha1)
+        commit_all(repo, {"agents/approval/AGENTS.md": "# agent v2\n"}, msg="agents")
+        with self.assertRaises(Exception) as cm:
+            run_update(repo, prod, assume_yes=True, do_fetch=False)
+        self.assertIn("CONTROLLED_COMPONENT_DEPLOY_REQUIRED", str(cm.exception))
 
     # -- file modes from git --
     def test_file_mode_preservation(self):

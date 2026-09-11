@@ -25,12 +25,16 @@ def sanitize_remote_url(url: str) -> str:
 def parse_github_remote(url: str) -> tuple[str, str, str] | None:
     """Normalize a git remote URL to (host, owner, repo).
 
-    Accepts only exact canonical GitHub forms for a-r3/nullone enforcement:
-    https://github.com/a-r3/nullone[.git], scp-style
-    [git@]github.com:a-r3/nullone[.git], and ssh://git@github.com/... forms.
-    Returns None for anything else (different host/owner/repo/path, ports,
-    extra segments, malformed input). Comparison is case-insensitive per
-    GitHub semantics; credentials are ignored for identity.
+    Accepts ONLY exact canonical GitHub forms:
+      https://github.com/a-r3/nullone[.git][/]
+      git@github.com:a-r3/nullone[.git]            (scp-style, user exactly git)
+      ssh://git@github.com/a-r3/nullone[.git][/]   (user exactly git)
+    Fail closed on everything else: ANY HTTPS userinfo (username, password,
+    or token-in-URL) is rejected; SSH/scp users other than exactly `git`
+    (including password-bearing userinfo) are rejected; different
+    host/owner/repo, extra path segments, ports, and malformed input are
+    rejected. Host/owner/repo comparison is case-insensitive per GitHub
+    semantics. Returns None when rejected.
     """
     if not isinstance(url, str):
         return None
@@ -43,12 +47,22 @@ def parse_github_remote(url: str) -> tuple[str, str, str] | None:
         m = re.match(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<rest>.*)$", s)
         if not m:
             return None
-        if m.group("scheme").lower() not in ("https", "ssh"):
-            return None
+        scheme = m.group("scheme").lower()
         rest = m.group("rest")
-        # strip userinfo (credentials — ignored for identity, never echoed)
-        if "@" in rest:
-            _userinfo, _, rest = rest.rpartition("@")
+        if scheme == "https":
+            # ANY userinfo before the host is a credential-bearing remote: reject.
+            if "@" in rest:
+                return None
+        elif scheme == "ssh":
+            # Canonical form only: exactly `git@host/path`. Anything else
+            # (other users, passwords, missing user) is rejected.
+            if "@" not in rest:
+                return None
+            userinfo, _, rest = rest.rpartition("@")
+            if userinfo != "git":
+                return None
+        else:
+            return None
         if "/" not in rest:
             return None
         host, _, path = rest.partition("/")
@@ -58,6 +72,10 @@ def parse_github_remote(url: str) -> tuple[str, str, str] | None:
     else:
         m = _SCP_RE.match(s)
         if not m:
+            return None
+        user = m.group("user")
+        # scp-style user must be exactly `git` (bare host:path rejected).
+        if user != "git":
             return None
         host = m.group("host")
         path = m.group("path")
@@ -188,6 +206,14 @@ def blob_bytes(repo_root: Path, sha: str, repo_path: str) -> bytes | None:
 
 def list_files_at(repo_root: Path, sha: str) -> list[str]:
     out = _run_git(repo_root, "ls-tree", "-r", "--name-only", sha)
+    if not out:
+        return []
+    return [line for line in out.splitlines() if line]
+
+
+def diff_names(repo_root: Path, old_sha: str, new_sha: str) -> list[str]:
+    """Repo-relative paths changed between two commits (all paths)."""
+    out = _run_git(repo_root, "diff", "--name-only", old_sha, new_sha, "--")
     if not out:
         return []
     return [line for line in out.splitlines() if line]

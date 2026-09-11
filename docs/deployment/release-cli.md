@@ -49,8 +49,9 @@ temporary fixture production roots only — never `~/.openclaw`.
   check → backup → staged validation → atomic install with hash proof →
   deploy-state update → history append. Missing state fails closed with
   `BOOTSTRAP_REQUIRED` (no silent first adoption). Any drift, CI failure,
-  forbidden destination, traversal/symlink escape, backup gap, or hash
-  mismatch aborts before or during mutation (with restore).
+  forbidden destination, traversal/symlink escape, backup gap, hash
+  mismatch, or externally-controlled component change aborts before or
+  during mutation (with restore).
 - `bootstrap` — explicit ONE-TIME adoption of an already-existing
   production tree at an explicit `--baseline <full-sha>` (must exist, be
   on `origin/main`, and have proven `NullOne CI`). The policy comes from
@@ -79,18 +80,21 @@ arrive only through reviewed `main` history. A target commit predating
 the policy fails closed (`POLICY_NOT_FOUND_AT_TARGET`).
 
 The policy maps repository-source → production-destination plus immutable
-exclusions. `docs/`, `tests/`, `NULLONE_PROJECT_CONTEXT.md`, and GitHub
-workflow files are never deployed. Mutable production state
+exclusions, and classifies externally-controlled components
+(`plugins/nullone-final-publish/**`, `agents/**`) that V1 never deploys.
+`docs/`, `tests/`, `NULLONE_PROJECT_CONTEXT.md`, and GitHub workflow files
+are never deployed. Mutable production state
 (`social/state/**`, `social/ops/manifests/**`, run outcomes, ledgers,
 candidate queues, secrets, OAuth/session/auth, Telegram owner data,
 presigned URLs, caches, backups, `deploy-state/`) is never overwritten.
 
-Restart semantics are per-mapping: only
-`plugins/nullone-final-publish/**` declares restart-required (activation
-itself remains a controlled `#37` step; the tool never restarts
-anything). The plan reports `RESTART_REQUIRED=YES` only when a changed
-file belongs to a restart-required mapping; mappings without explicit
-metadata default conservative (restart required).
+Restart semantics are per-mapping: workspace mappings that are read fresh
+on next invocation declare no restart; mappings without explicit metadata
+default conservative (restart required). `plugins/nullone-final-publish/**`
+is an externally-controlled component with restart semantics owned by the
+Gateway activation process (the tool never restarts anything). The plan
+reports `RESTART_REQUIRED=YES` when a changed workspace file needs it or
+when a release range touches a restart-required external component.
 
 Installed files receive their reviewed Git modes (0644/0755); install
 failure restores prior bytes and modes; backups record modes and
@@ -128,3 +132,23 @@ V1 performs **no Gateway restart**. Validation hooks are offline only
 (`py_compile`, JSON parse, `node --check` where available). A deployment
 lock prevents concurrent update/rollback/bootstrap, and an interrupted
 transaction surfaces as `CHECK_REQUIRED`, never silent success.
+
+## V1 scope: production workspace only
+
+V1 `nullone update` safely updates the production workspace only — the
+single proven filesystem root behind `--production-root`.
+
+`plugins/nullone-final-publish/**` and `agents/**` are classified as
+externally-controlled components (repository-only classification in the
+policy): their live destinations (Gateway plugin dir, agent runtime) are
+separate, unproven filesystem roots, so the tool never copies those files
+anywhere and never guesses multi-root paths.
+
+If a reviewed release range touches an external component, the plan
+reports `EXTERNAL_COMPONENT_CHANGES` (count and paths) and ordinary
+update fails closed with `CONTROLLED_COMPONENT_DEPLOY_REQUIRED` before
+any mutation — never a partial workspace deploy. A target with only
+workspace-managed changes proceeds normally (`EXTERNAL_COMPONENT_CHANGES=0`).
+
+Future V2 may add reviewed multi-root deployment support after the actual
+OpenClaw plugin/agent filesystem roots are explicitly modeled.

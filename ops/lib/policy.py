@@ -31,6 +31,11 @@ def parse_policy_blob(blob: bytes, source: str = "<blob>") -> dict:
         raise PolicyError(f"POLICY_VERSION_MISSING ({source})")
     if not isinstance(data.get("mappings"), list) or not data["mappings"]:
         raise PolicyError(f"POLICY_MAPPINGS_MISSING ({source})")
+    ext = data.get("external_controlled_components", [])
+    if not isinstance(ext, list) or any(
+            not isinstance(c, dict) or not isinstance(c.get("repo_prefix"), str)
+            for c in ext):
+        raise PolicyError(f"POLICY_EXTERNAL_COMPONENTS_INVALID ({source})")
     return data
 
 
@@ -81,6 +86,24 @@ def mapping_restart_required(mapping: dict | None) -> bool:
     if mapping is None:
         return True
     return bool(mapping.get("restart_required", True))
+
+
+def external_component_for_repo(repo_path: str, policy: dict) -> dict | None:
+    """Return the external-controlled-component entry covering repo_path,
+    or None. External components are repository-only classifications for
+    V1: the tool never copies these files anywhere."""
+    rp = _norm(repo_path)
+    for comp in policy.get("external_controlled_components", []):
+        prefix = _norm(comp.get("repo_prefix", ""))
+        if not prefix:
+            continue
+        if prefix.endswith("/"):
+            if rp.startswith(prefix):
+                return comp
+        else:
+            if rp == prefix or rp.startswith(prefix + "/"):
+                return comp
+    return None
 
 
 def is_forbidden_repo_path(repo_path: str, policy: dict) -> bool:

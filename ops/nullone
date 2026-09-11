@@ -169,6 +169,12 @@ def cmd_preflight(args) -> int:
             print(f"  {f}")
     if pf["BOOTSTRAP_REQUIRED"]:
         print("BOOTSTRAP_REQUIRED=YES (ordinary update not ready; use explicit bootstrap)")
+    ext = pf.get("EXTERNAL_COMPONENT_CHANGES", [])
+    print(f"EXTERNAL_COMPONENT_CHANGES={len(ext)}")
+    for f in ext[:50]:
+        print(f"  {f}")
+    if pf.get("EXTERNAL_BLOCKED"):
+        print("CONTROLLED_COMPONENT_DEPLOY_REQUIRED (workspace-only update refused)")
     print(f"STATUS={pf['STATUS']}")
     print(f"RESTART_REQUIRED={pf['RESTART_REQUIRED']}")
     s = pf["PLAN_SUMMARY"]
@@ -210,6 +216,10 @@ def cmd_update(args) -> int:
         print(f"{k}={len(items)}")
         for f in items[:50]:
             print(f"  {f}")
+    ext = plan.get("EXTERNAL_COMPONENT_CHANGES", [])
+    print(f"EXTERNAL_COMPONENT_CHANGES={len(ext)}")
+    for f in ext[:50]:
+        print(f"  {f}")
     print(f"RESTART_REQUIRED={plan['RESTART_REQUIRED']}")
     if plan.get("RESTART_FILES"):
         print("RESTART_FILES:")

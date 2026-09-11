@@ -14,6 +14,7 @@ from . import ci_gate, gitops
 from .policy import (
     PolicyError,
     assert_prod_path_safe,
+    external_component_for_repo,
     is_forbidden_prod_path,
     is_forbidden_repo_path,
     map_repo_to_prod,
@@ -158,7 +159,28 @@ def build_plan(repo_root: Path, policy: dict, target_sha: str, prod_root: Path,
     # conservative (restart required) in mapping_restart_required().
     restart_files = [f for f in sorted(set(files_add) | set(files_update) | set(files_remove))
                      if mapping_restart_required(mapping_for_prod(f, policy))]
-    restart = "YES" if restart_files else "NO"
+    # External controlled components (V1 workspace-only scope): repo files
+    # under an external prefix that CHANGED along origin/main from the
+    # deployed release to the target. The tool never copies these files;
+    # a non-empty list blocks ordinary update (CONTROLLED_COMPONENT_DEPLOY).
+    external_changes: list[str] = []
+    external_restart_files: list[str] = []
+    deployed_for_diff = cur.get("deployed_sha") if cur else None
+    if deployed_for_diff and deployed_for_diff != target_sha:
+        try:
+            changed_names = gitops.diff_names(repo_root, deployed_for_diff, target_sha)
+        except gitops.GitError as e:
+            raise ReleaseError(str(e)) from e
+        for rp in sorted(changed_names):
+            if is_forbidden_repo_path(rp, policy):
+                continue
+            comp = external_component_for_repo(rp, policy)
+            if comp is None:
+                continue
+            external_changes.append(rp)
+            if comp.get("restart_required", True):
+                external_restart_files.append(rp)
+    restart = "YES" if (restart_files or external_restart_files) else "NO"
     plan = {
         "TARGET_SHA": target_sha,
         "POLICY_VERSION": policy.get("policy_version"),
@@ -169,6 +191,8 @@ def build_plan(repo_root: Path, policy: dict, target_sha: str, prod_root: Path,
         "FILES_REMOVE": sorted(files_remove),
         "UNCHANGED": sorted(unchanged),
         "FORBIDDEN": sorted(forbidden),
+        "EXTERNAL_COMPONENT_CHANGES": sorted(external_changes),
+        "EXTERNAL_RESTART_FILES": sorted(external_restart_files),
         "RESTART_REQUIRED": restart,
         "RESTART_FILES": sorted(restart_files),
         "VALIDATION_HOOKS": list(policy.get("validation_hooks", [])),
@@ -181,6 +205,17 @@ def build_plan(repo_root: Path, policy: dict, target_sha: str, prod_root: Path,
 def check_no_forbidden(plan: dict) -> None:
     if plan.get("FORBIDDEN"):
         raise ReleaseError(f"FORBIDDEN_PLAN: {plan['FORBIDDEN'][:10]}")
+
+
+def check_no_external_changes(plan: dict) -> None:
+    """V1 workspace-only scope: refuse to complete an update whose release
+    range touches externally-controlled components (e.g. Gateway plugin).
+    Zero mutation; the controlled deployment happens outside this tool."""
+    if plan.get("EXTERNAL_COMPONENT_CHANGES"):
+        raise ReleaseError(
+            "CONTROLLED_COMPONENT_DEPLOY_REQUIRED: release range touches "
+            f"externally-controlled components: {plan['EXTERNAL_COMPONENT_CHANGES'][:20]}; "
+            "nullone update deploys the production workspace only")
 
 
 # ---------- drift ----------
@@ -532,6 +567,8 @@ def run_update(
         raise ReleaseError(
             "BOOTSTRAP_REQUIRED: no deploy state; ordinary update refused "
             "(use explicit `nullone bootstrap --baseline <full-sha>` for one-time adoption)")
+    check_no_external_changes(
+        build_plan(repo_root, policy, target_sha, prod_root, policy_sha256))
     require_clean_drift(prod_root, policy, "UPDATE")
     if cur0.get("deployed_sha") == target_sha:
         plan0 = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
@@ -558,6 +595,7 @@ def run_update(
                     "PLAN": plan, "CI": detail, "POLICY_SHA256": policy_sha256}
         plan = build_plan(repo_root, policy, target_sha, prod_root, policy_sha256)
         check_no_forbidden(plan)
+        check_no_external_changes(plan)
         write_txn(prod_root, {"status": "IN_PROGRESS", "phase": "backup",
                               "target_sha": target_sha, "started_at": time.time()})
         try:
@@ -891,7 +929,8 @@ def run_preflight(repo_root: Path, prod_root: Path,
     status = get_status(repo_root, policy, prod_root, available_sha=target_sha)
     bootstrap_required = drift["status"] == "DEPLOY_STATE_MISSING"
     drift_clean = drift["status"] == "CLEAN"
-    ok = ci_ok and drift_clean and not plan.get("FORBIDDEN")
+    external_blocked = bool(plan.get("EXTERNAL_COMPONENT_CHANGES"))
+    ok = ci_ok and drift_clean and not plan.get("FORBIDDEN") and not external_blocked
     return {
         "TARGET_SHA": target_sha,
         "POLICY_SHA256": policy_sha256,
@@ -900,6 +939,8 @@ def run_preflight(repo_root: Path, prod_root: Path,
         "CI_DETAIL": ci_detail,
         "DRIFT": drift,
         "BOOTSTRAP_REQUIRED": bootstrap_required,
+        "EXTERNAL_COMPONENT_CHANGES": plan.get("EXTERNAL_COMPONENT_CHANGES", []),
+        "EXTERNAL_BLOCKED": external_blocked,
         "PLAN_SUMMARY": {k: (len(v) if isinstance(v, list) else v)
                          for k, v in plan.items()
                          if k not in ("MANAGED_TARGET", "MANAGED_MODES")},
