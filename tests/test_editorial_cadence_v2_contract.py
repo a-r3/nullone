@@ -122,15 +122,20 @@ def reference_evaluate(cin: dict) -> dict:
     if pending > 0:
         return ("NO_ACTION", "BLOCKED_PENDING_REVIEW", audience_status)
     if surface == "MAIN" and position == "band":
-        exceptional = (
-            opportunity == "EXCEPTIONAL_BREAKING"
-            and (
-                cin["day_profile"] == "EXCEPTIONAL"
-                or cin["signal"]["exceptional_development"]
+        if cin["day_profile"] == "QUIET":
+            # Optional in-band capacity toward max=2: a strong verified
+            # ordinary second MAIN MAY prepare; fall through to PREPARE.
+            pass
+        else:
+            exceptional = (
+                opportunity == "EXCEPTIONAL_BREAKING"
+                and (
+                    cin["day_profile"] == "EXCEPTIONAL"
+                    or cin["signal"]["exceptional_development"]
+                )
             )
-        )
-        if not exceptional:
-            return ("NO_ACTION", "TARGET_BAND_REACHED", audience_status)
+            if not exceptional:
+                return ("NO_ACTION", "TARGET_BAND_REACHED", audience_status)
     recommendation = "PREPARE_MAIN" if surface == "MAIN" else "PREPARE_STORY"
     return (recommendation, "PREPARED", audience_status)
 
@@ -239,8 +244,8 @@ def main() -> int:
         if got != (rec, outcome, audience):
             fail(f"{name}: reference replay {got} != authored {(rec, outcome, audience)}")
 
-    if len(cases) < 18:
-        fail(f"expected at least 18 worked examples, found {len(cases)}")
+    if len(cases) < 21:
+        fail(f"expected at least 21 worked examples, found {len(cases)}")
 
     # Review-gate coverage: every required semantic scenario must be
     # present by name.
@@ -253,6 +258,9 @@ def main() -> int:
         "material_breaking_after_min",
         "story_inside_spacing_held",
         "story_outside_spacing_eligible",
+        "quiet_second_main_reachable",
+        "quiet_main_max_enforced",
+        "exceptional_ordinary_band_stop",
     ):
         if required not in names:
             fail(f"missing required worked example: {required}")

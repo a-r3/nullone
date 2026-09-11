@@ -84,10 +84,18 @@ Semantics per surface:
   without a future explicit policy revision).
 
 For MAIN, ordinary NORMAL/STRONG_NEWS evaluation normally stops at
-max=2. The third MAIN is permitted only when the day profile or
-signal establishes EXCEPTIONAL, `opportunity ==
-EXCEPTIONAL_BREAKING`, `published MAIN < 3`, and all normal
-quality/safety gates pass.
+max=2 (min=max=2 there, so no in-band optional MAIN state exists).
+MAIN in-band behavior is refined by day profile (§10 step 10):
+
+- NORMAL / STRONG_NEWS: no MAIN band state exists (min=max=2).
+- QUIET: with MAIN `published=1 < max=2`, a strong verified
+  ordinary MAIN candidate MAY proceed to `PREPARE_MAIN` via optional
+  in-band capacity, subject to no pending backpressure, spacing,
+  `VERIFICATION: PASS`, quality, and dedup/topic limits.
+- EXCEPTIONAL: with MAIN `published=2 < max=3`, the third MAIN is
+  permitted ONLY for a justified `EXCEPTIONAL_BREAKING`
+  opportunity; an ordinary/non-exceptional candidate returns
+  `NO_ACTION` / `TARGET_BAND_REACHED`.
 
 For STORY, NORMAL may continue from 3 up to 5 when strong verified
 candidates exist; STRONG_NEWS / EXCEPTIONAL may continue up to 6;
@@ -482,15 +490,22 @@ reported context, never a blocking input):
 9. If `pending(surface) > 0`: `NO_ACTION` /
    `BLOCKED_PENDING_REVIEW` (audience status stays truthful per
    step 2).
-10. If surface is MAIN and position is band and `opportunity !=
-    EXCEPTIONAL_BREAKING` (or exceptional justification absent):
-    `NO_ACTION` / `TARGET_BAND_REACHED`. The ordinary second main
-    slot stops at the band; only a justified exceptional third main
-    proceeds.
+10. If surface is MAIN and position is band, refine by day
+    profile (NORMAL and STRONG_NEWS have min=max=2, so they never
+    reach this step in band position):
+    - QUIET (`published=1 < max=2`): optional in-band capacity —
+      proceed to step 11, so a strong verified ordinary MAIN
+      candidate MAY prepare subject to the gates already passed.
+    - EXCEPTIONAL (`published=2 < max=3`): the third MAIN proceeds
+      only for a justified `EXCEPTIONAL_BREAKING` opportunity
+      (day profile EXCEPTIONAL or `signal.exceptional_development`
+      true); any ordinary/non-exceptional candidate returns
+      `NO_ACTION` / `TARGET_BAND_REACHED`.
 11. Else `PREPARE_MAIN` (surface MAIN) or `PREPARE_STORY` (surface
     STORY) / `PREPARED` — covering the gap case, the optional
-    in-band Story capacity case, the breaking-bypasses-minimum case,
-    and the justified exceptional MAIN #3 case.
+    in-band Story capacity case, the QUIET second-main capacity
+    case, the breaking-bypasses-minimum case, and the justified
+    exceptional MAIN #3 case.
 
 Cross-surface loads never appear in steps 3–9. `PREPARE_*` remains
 permission to search for and prepare a candidate subject to scoring,
@@ -500,8 +515,8 @@ second final confirmation. `PREPARE_* != PUBLISH`, unconditionally.
 ## 11. Worked examples (deterministic)
 
 Machine-readable fixtures:
-`tests/fixtures/editorial_cadence_v2_examples.json` (18 cases,
-items 1–18 above). Validated offline by
+`tests/fixtures/editorial_cadence_v2_examples.json` (21 cases,
+items 1–21 above). Validated offline by
 `tests/test_editorial_cadence_v2_contract.py`, which checks fixture
 shape/hygiene and replays a test-local reference evaluator over the
 fixtures — no production runtime is added or changed.
@@ -570,6 +585,18 @@ fixtures — no production runtime is added or changed.
 18. `story_outside_spacing_eligible` — same shape with
     `last_published_at` outside the spacing window → eligible
     (`PREPARE_STORY` / `PREPARED`) when all other gates pass.
+19. `quiet_second_main_reachable` — QUIET day, `main_published=1`,
+    `main_pending=0`, strong verified ordinary MAIN candidate
+    outside spacing → `PREPARE_MAIN` / `PREPARED` with
+    `audience_status=TARGET_BAND_REACHED` (optional in-band
+    capacity toward max=2).
+20. `quiet_main_max_enforced` — QUIET day, `main_published=2`,
+    strong candidate → `NO_ACTION` / `TARGET_MAX_REACHED`.
+21. `exceptional_ordinary_band_stop` — EXCEPTIONAL day,
+    `main_published=2`, ordinary non-exceptional candidate →
+    `NO_ACTION` / `TARGET_BAND_REACHED` (the justified
+    `EXCEPTIONAL_BREAKING` third-main path stays covered by case
+    14, `exceptional_main_third`).
 
 ## 12. Exit rule
 
