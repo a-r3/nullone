@@ -1,5 +1,5 @@
 {
-  "description": "Machine-readable recovery guarantees/targets. Metadata only: no credentials, no secret paths with values, no mutable production state, no backup contents. Ordinary RPO/RTO are PROPOSED targets with operator acceptance pending; critical classes carry safety rules instead of loss SLAs.",
+  "description": "Machine-readable recovery guarantees/targets. Metadata only: no credentials, no secret paths with values, no mutable production state, no backup contents. Ordinary RPO/RTO 900/14400 are ACCEPTED DESIGN TARGETS (not operationally proven guarantees; recovery infrastructure is not deployed); critical classes carry safety rules instead of fabricated loss SLAs.",
   "key_recovery_custodian": "Rauf Alizada (@a-r3) until formally delegated; no key material or location secrets in git",
   "operator_acceptance": {
     "accepted_by": "Rauf Alizada (@a-r3)",

@@ -56,8 +56,11 @@ EXTERNAL_AUTHORITY. Future targets are never presented as guarantees.
 ### 4. run_outcomes_and_editorial_artifacts (ordinary)
 
 - Examples: `run-outcomes/`, handoffs, boards, analytics raw/reports.
-- Same RPO/RTO/retention posture as class 3 (proposed, pending):
-  90 days minimum retention, NullOne operator recovery owner.
+- Same RPO/RTO/retention posture as class 3: RPO_TARGET_SECONDS=900,
+  RTO_TARGET_SECONDS=14400, DESIGN_TARGET, OPERATOR_ACCEPTANCE=ACCEPTED,
+  ACCEPTED_BY=Rauf Alizada (@a-r3); 90 days minimum retention, NullOne
+  operator recovery owner. Current operational status remains
+  CURRENT_LIMITATION because no snapshot infrastructure is deployed.
 - Restore order: 3. Replay risk: none (read-only evidence).
 - Publisher activation: not required. Status: CURRENT_LIMITATION.
 

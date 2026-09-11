@@ -77,6 +77,18 @@ class RecoveryContractTests(unittest.TestCase):
         self.assertIn("OPERATOR_ACCEPTANCE=ACCEPTED", contract)
         self.assertIn("ACCEPTED_BY=Rauf Alizada (@a-r3)", contract)
 
+    def test_no_stale_acceptance_pending_phrases(self):
+        policy = json.loads(POLICY.read_text())
+        self.assertNotIn("pending", policy["description"].lower())
+        contract = read(CONTRACT)
+        self.assertNotIn("(proposed, pending)", contract)
+        for ordinary in ("candidate_queue",
+                         "run_outcomes_and_editorial_artifacts",
+                         "notifier_state"):
+            section = contract.split(ordinary, 1)[1].split("###", 1)[0]
+            self.assertNotIn("acceptance pending", section.lower(),
+                             f"{ordinary} still says acceptance pending")
+
     def test_accepted_target_still_design_target_not_proven(self):
         policy = json.loads(POLICY.read_text())
         by_name = {c["name"]: c for c in policy["state_classes"]}
