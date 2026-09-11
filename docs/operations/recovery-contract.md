@@ -25,8 +25,8 @@ EXTERNAL_AUTHORITY. Future targets are never presented as guarantees.
 - Examples: `deploy-state/current.json`, `history.jsonl`, backups.
 - Authoritative copy: production-local deploy-state.
 - Secondary: backup metadata + Git history (releases are re-derivable).
-- RPO/RTO: same as ordinary state (proposed 900s/14400s, DESIGN_TARGET,
-  OPERATOR_ACCEPTANCE pending).
+- RPO/RTO: same as ordinary state (RPO_TARGET_SECONDS=900, RTO_TARGET_SECONDS=14400, DESIGN_TARGET,
+  OPERATOR_ACCEPTANCE=ACCEPTED, ACCEPTED_BY=Rauf Alizada (@a-r3)).
 - Restore order: 2 (with safe config references). Recovery owner:
   NullOne operator / release tooling.
 - Retention: audit metadata indefinite; rollback payload backups keep the
@@ -44,8 +44,8 @@ EXTERNAL_AUTHORITY. Future targets are never presented as guarantees.
 - Examples: `social/state/candidate-queue.md`, `topic-ledger.jsonl`.
 - Authoritative copy: production files. Secondary: future encrypted copy
   (not provisioned).
-- RPO/RTO: proposed 900s/14400s — DESIGN_TARGET, OPERATOR_ACCEPTANCE
-  PENDING_RAUF_ALIZADA. Current: CURRENT_LIMITATION (no snapshot job).
+- RPO/RTO: RPO_TARGET_SECONDS=900, RTO_TARGET_SECONDS=14400 — DESIGN_TARGET, OPERATOR_ACCEPTANCE=ACCEPTED,
+  ACCEPTED_BY=Rauf Alizada (@a-r3). Current: CURRENT_LIMITATION (no snapshot job).
 - Retention: 90 days minimum. Recovery owner: NullOne operator.
 - Restore order: 3.
 - Replay risk: stale queue entries do NOT imply unpublished content; queue
@@ -105,7 +105,7 @@ EXTERNAL_AUTHORITY. Future targets are never presented as guarantees.
 
 - Examples: `notifications/<workflow>/` PENDING records, Telegram
   delivery state.
-- RPO/RTO: proposed ordinary targets (pending). Restore order: 8.
+- RPO/RTO: ordinary targets RPO_TARGET_SECONDS=900, RTO_TARGET_SECONDS=14400 (ACCEPTED design target). Restore order: 8.
   Retention: 90 days minimum. Recovery owner: deterministic notifier
   subsystem + NullOne operator.
 - Replay semantics, stated exactly:
@@ -123,7 +123,7 @@ EXTERNAL_AUTHORITY. Future targets are never presented as guarantees.
 ### 8. rendered_and_source_media
 
 - Metadata/reference (paths, URLs, hashes, dimensions): ordinary,
-  proposed RPO/RTO pending, 90 days minimum, NullOne operator.
+  accepted ordinary RPO/RTO targets pending infrastructure, 90 days minimum, NullOne operator.
 - STRUCTURAL re-render is NOT exact-byte recovery. Corrected rules:
   - A. Exact final/published render bytes: when preservation matters,
     retain the actual output bytes independently with SHA256 for

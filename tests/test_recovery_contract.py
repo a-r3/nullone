@@ -60,7 +60,7 @@ class RecoveryContractTests(unittest.TestCase):
                           ("PROVEN", "DESIGN_TARGET", "CURRENT_LIMITATION",
                            "EXTERNAL_AUTHORITY"))
 
-    def test_ordinary_rpo_rto_targets_and_pending_acceptance(self):
+    def test_ordinary_rpo_rto_targets_and_acceptance(self):
         policy = json.loads(POLICY.read_text())
         by_name = {c["name"]: c for c in policy["state_classes"]}
         for ordinary in ("candidate_queue",
@@ -68,10 +68,25 @@ class RecoveryContractTests(unittest.TestCase):
                          "notifier_state"):
             self.assertLessEqual(by_name[ordinary]["rpo_seconds"], 900)
             self.assertLessEqual(by_name[ordinary]["rto_seconds"], 14400)
-        self.assertEqual(policy["operator_acceptance"], "PENDING_RAUF_ALIZADA")
+        acceptance = policy["operator_acceptance"]
+        self.assertEqual(acceptance["status"], "ACCEPTED")
+        self.assertEqual(acceptance["accepted_by"], "Rauf Alizada (@a-r3)")
+        self.assertEqual(acceptance["ordinary_rpo_target_seconds"], 900)
+        self.assertEqual(acceptance["ordinary_rto_target_seconds"], 14400)
         contract = read(CONTRACT)
-        self.assertIn("OPERATOR_ACCEPTANCE", contract)
-        self.assertIn("PENDING_RAUF_ALIZADA", contract)
+        self.assertIn("OPERATOR_ACCEPTANCE=ACCEPTED", contract)
+        self.assertIn("ACCEPTED_BY=Rauf Alizada (@a-r3)", contract)
+
+    def test_accepted_target_still_design_target_not_proven(self):
+        policy = json.loads(POLICY.read_text())
+        by_name = {c["name"]: c for c in policy["state_classes"]}
+        self.assertEqual(by_name["candidate_queue"]["guarantee_status"],
+                         "DESIGN_TARGET")
+        text = read(ADR)
+        self.assertIn("accepted DESIGN TARGETS", text)
+        self.assertIn("no backup infrastructure exists yet", text)
+        contract = read(CONTRACT)
+        self.assertIn("CURRENT_LIMITATION (no snapshot job)", contract)
 
     def test_critical_state_not_replayable(self):
         policy = json.loads(POLICY.read_text())
@@ -246,10 +261,14 @@ class RecoveryContractTests(unittest.TestCase):
 
     def test_adr_governance_status_truthful(self):
         text = read(ADR)
-        self.assertIn("PROPOSED", text)
-        self.assertIn("exact-head", text)
-        self.assertIn("PENDING", text)
-        self.assertNotIn("Status: ACCEPTED", text)
+        self.assertIn("Status: ACCEPTED", text)
+        self.assertIn("Rauf Alizada (@a-r3)", text)
+        self.assertIn("subject to final merge of the reviewed head", text)
+        self.assertIn("no backup infrastructure exists yet", text)
+        self.assertIn("ordinary_rpo_target_seconds: 900", text)
+        self.assertIn("ordinary_rto_target_seconds: 14400", text)
+        # Accepted as design targets, never as deployed infrastructure.
+        self.assertIn("DESIGN TARGETS", text)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,12 @@
 {
   "description": "Machine-readable recovery guarantees/targets. Metadata only: no credentials, no secret paths with values, no mutable production state, no backup contents. Ordinary RPO/RTO are PROPOSED targets with operator acceptance pending; critical classes carry safety rules instead of loss SLAs.",
   "key_recovery_custodian": "Rauf Alizada (@a-r3) until formally delegated; no key material or location secrets in git",
-  "operator_acceptance": "PENDING_RAUF_ALIZADA",
+  "operator_acceptance": {
+    "accepted_by": "Rauf Alizada (@a-r3)",
+    "ordinary_rpo_target_seconds": 900,
+    "ordinary_rto_target_seconds": 14400,
+    "status": "ACCEPTED"
+  },
   "policy_version": "1.0.0",
   "schema": "nullone.recovery-policy/v1",
   "state_classes": [

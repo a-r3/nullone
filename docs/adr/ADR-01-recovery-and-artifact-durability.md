@@ -1,9 +1,13 @@
 # ADR-01: Recovery and Artifact Durability
 
-Status: PROPOSED — becomes accepted only when PR #106 is merged with an
-exact-head human review receipt. Separately, ordinary RPO/RTO target
-acceptance is PENDING — Rauf Alizada (@a-r3). Neither is claimed before
-review.
+Status: ACCEPTED — accepted by Rauf Alizada (@a-r3) through exact-head
+review of PR #106, subject to final merge of the reviewed head.
+
+Ordinary recovery target acceptance: ACCEPTED by Rauf Alizada (@a-r3) —
+ordinary_rpo_target_seconds: 900, ordinary_rto_target_seconds: 14400.
+These remain accepted DESIGN TARGETS: operational proof belongs to
+issue #10, no backup infrastructure exists yet, and
+publication-critical state has no fabricated loss SLA.
 
 Date: 2026-09-11.
 Scope: issue #9. Empirical proof belongs to issue #10 (restore drill),
@@ -31,10 +35,11 @@ Separate ALL recovery reasoning into two independent questions:
 **DATA AVAILABILITY != PUBLICATION SAFETY.**
 
 1. Ordinary operational state (queue, non-consequential outcomes,
-   analytics/editorial artifacts, derived state) gets a PROPOSED design
-   target of RPO <= 15 minutes / RTO <= 4 hours, with
-   OPERATOR_ACCEPTANCE=PENDING_RAUF_ALIZADA. These numbers are discussion
-   targets, not accepted truth.
+   analytics/editorial artifacts, derived state) gets an ACCEPTED design
+   target of RPO <= 15 minutes / RTO <= 4 hours
+   (OPERATOR_ACCEPTANCE=ACCEPTED, Rauf Alizada). Accepted as a target:
+   not accepted truth about deployed infrastructure, which does not
+   exist yet.
 
 2. Publication-critical state (final authorization, attempt counts,
    in-flight claims, authorization receipts, provider identifiers, known
@@ -104,9 +109,9 @@ Separate ALL recovery reasoning into two independent questions:
   missing-history-means-disabled.
 - #37 controlled deployment inherits the stale-backup rules and the
   publisher-disabled default for any fresh/uncertain environment.
-- The proposed ordinary RPO/RTO numbers remain PENDING until Rauf Alizada
-  explicitly accepts them; no schedule, snapshot job, or SLA may cite them
-  as approved before that.
+- The ordinary RPO/RTO targets (900s/14400s) are ACCEPTED design targets
+  (Rauf Alizada); no schedule, snapshot job, or SLA may cite them as
+  operationally proven before issue #10 demonstrates them.
 
 ## Migration / future work
 

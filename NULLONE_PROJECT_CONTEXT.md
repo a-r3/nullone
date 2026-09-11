@@ -1752,8 +1752,9 @@ runtime reproducibility is on main; issue #8 is CLOSED. Determinism
 claimed as STRUCTURAL_DETERMINISM only. Issue #9 recovery decision work
 (`docs/adr/ADR-01-recovery-and-artifact-durability.md`,
 `docs/operations/recovery-contract.md`, `ops/recovery-policy.json`) is
-repository-only; ordinary RPO/RTO targets remain
-OPERATOR_ACCEPTANCE=PENDING; no recovery infrastructure has been deployed
-yet. Issue #37 remains open; production stabilization state unchanged.
-Do not claim recovery guarantees are operational until implemented and
-proven by the issue #10 restore drill.
+repository-only. Rauf accepted ordinary recovery targets (RPO=900s,
+RTO=14400s) as DESIGN TARGETS only — not deployed/proven recovery
+infrastructure; issue #10 will provide empirical restore proof. Issue
+#37 remains open; production stabilization state unchanged. Do not claim
+recovery guarantees are operational until implemented and proven by the
+issue #10 restore drill.
