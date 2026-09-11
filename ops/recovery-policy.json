@@ -1,0 +1,130 @@
+{
+  "schema": "nullone.recovery-policy/v1",
+  "policy_version": "1.0.0",
+  "description": "Machine-readable recovery guarantees/targets. Metadata only: no credentials, no secret paths with values, no mutable production state, no backup contents. Ordinary RPO/RTO are PROPOSED targets with operator acceptance pending; critical classes carry safety rules instead of loss SLAs.",
+  "operator_acceptance": "PENDING_RAUF_ALIZADA",
+  "state_classes": [
+    {
+      "name": "repository_source",
+      "examples": ["git-tracked code", "prompts", "contracts", "policy", "fixtures"],
+      "authoritative_copy": "exact reviewed git commit",
+      "rpo_seconds": 0,
+      "rto_seconds": null,
+      "guarantee_status": "PROVEN",
+      "publisher_required": false,
+      "retention_class": "git-history",
+      "restore_priority": 1,
+      "replay_rule": "none"
+    },
+    {
+      "name": "release_deploy_metadata",
+      "examples": ["deploy-state/current.json", "history.jsonl", "backup metadata"],
+      "authoritative_copy": "production-local deploy-state",
+      "rpo_seconds": 900,
+      "rto_seconds": 14400,
+      "guarantee_status": "DESIGN_TARGET",
+      "publisher_required": false,
+      "retention_class": "deployment-audit",
+      "restore_priority": 2,
+      "replay_rule": "metadata-alone-authorizes-nothing"
+    },
+    {
+      "name": "candidate_queue",
+      "examples": ["candidate-queue.md", "topic-ledger.jsonl"],
+      "authoritative_copy": "production files",
+      "rpo_seconds": 900,
+      "rto_seconds": 14400,
+      "guarantee_status": "DESIGN_TARGET",
+      "publisher_required": false,
+      "retention_class": "ordinary-operational",
+      "restore_priority": 3,
+      "replay_rule": "stale-queue-implies-nothing"
+    },
+    {
+      "name": "run_outcomes_and_editorial_artifacts",
+      "examples": ["run-outcomes/", "handoffs", "boards", "analytics raw/reports"],
+      "authoritative_copy": "production files",
+      "rpo_seconds": 900,
+      "rto_seconds": 14400,
+      "guarantee_status": "DESIGN_TARGET",
+      "publisher_required": false,
+      "retention_class": "ordinary-operational",
+      "restore_priority": 3,
+      "replay_rule": "read-only-evidence"
+    },
+    {
+      "name": "publication_attempt_history",
+      "examples": ["manifest attempts", "controller claim flags", "known results"],
+      "authoritative_copy": "production manifests and receipts",
+      "rpo_seconds": null,
+      "rto_seconds": null,
+      "guarantee_status": "CURRENT_LIMITATION",
+      "publisher_required": true,
+      "retention_class": "terminal-records-indefinite",
+      "restore_priority": 4,
+      "replay_rule": "attempts-zero-proves-nothing",
+      "safety_rule": "missing-ambiguous-stale-incomplete => PUBLISHER_STATE=DISABLED, RECOVERY_STATE=CHECK_REQUIRED, AUTOMATIC_RETRY=FORBIDDEN"
+    },
+    {
+      "name": "final_authorization_evidence",
+      "examples": ["publish-callback-receipts", "provider review/live identifiers"],
+      "authoritative_copy": "production receipts and manifests",
+      "rpo_seconds": null,
+      "rto_seconds": null,
+      "guarantee_status": "CURRENT_LIMITATION",
+      "publisher_required": true,
+      "retention_class": "terminal-records-indefinite",
+      "restore_priority": 4,
+      "replay_rule": "authorization-requires-explicit-durable-evidence",
+      "safety_rule": "missing-ambiguous-stale-incomplete => PUBLISHER_STATE=DISABLED, RECOVERY_STATE=CHECK_REQUIRED, AUTOMATIC_RETRY=FORBIDDEN"
+    },
+    {
+      "name": "notifier_state",
+      "examples": ["notifications/ reservations", "Telegram delivery state"],
+      "authoritative_copy": "production files",
+      "rpo_seconds": 900,
+      "rto_seconds": 14400,
+      "guarantee_status": "DESIGN_TARGET",
+      "publisher_required": false,
+      "retention_class": "ordinary-operational",
+      "restore_priority": 8,
+      "replay_rule": "existing-record-blocks-resend"
+    },
+    {
+      "name": "rendered_and_source_media",
+      "examples": ["rendered bytes", "source references", "hashes"],
+      "authoritative_copy": "immutable inputs (re-render) or retained originals",
+      "rpo_seconds": 900,
+      "rto_seconds": 14400,
+      "guarantee_status": "DESIGN_TARGET",
+      "publisher_required": false,
+      "retention_class": "media-bytes-and-references",
+      "restore_priority": 3,
+      "replay_rule": "url-is-not-a-copy"
+    },
+    {
+      "name": "openclaw_automation_config",
+      "examples": ["live jobs", "schedules", "plugin enablement", "tool grants"],
+      "authoritative_copy": "live openclaw production config",
+      "rpo_seconds": null,
+      "rto_seconds": null,
+      "guarantee_status": "EXTERNAL_AUTHORITY",
+      "publisher_required": true,
+      "retention_class": "external",
+      "restore_priority": 2,
+      "replay_rule": "cutover-owns-activation"
+    },
+    {
+      "name": "credentials_oauth_sessions",
+      "examples": ["secret-store entries", "oauth state", "local sessions", "telegram sessions", "api tokens"],
+      "authoritative_copy": "provider and operator provisioning (re-authentication)",
+      "rpo_seconds": null,
+      "rto_seconds": null,
+      "guarantee_status": "EXTERNAL_AUTHORITY",
+      "publisher_required": true,
+      "retention_class": "never-in-git",
+      "restore_priority": 2,
+      "replay_rule": "recreate-do-not-restore-values"
+    }
+  ]
+}
