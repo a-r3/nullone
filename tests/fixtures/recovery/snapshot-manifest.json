@@ -1,0 +1,77 @@
+{
+  "created_at": "2026-01-01T00:00:00Z",
+  "critical_history_complete": true,
+  "files": [
+    {
+      "bytes": 78,
+      "path": "analytics/report-fix001.md",
+      "sha256": "68135dadc39b3827c34d2568370849a36a6a4c640ade1fafbfe9407452f44e49"
+    },
+    {
+      "bytes": 239,
+      "path": "candidate-queue.md",
+      "sha256": "c02443940b7494edfecf7eca9a8cb56b427de9820075e7b6f1d34bc9c1e17943"
+    },
+    {
+      "bytes": 126,
+      "path": "handoff/editorial-fix001.json",
+      "sha256": "325bb5e2e55fcb41268d01a21ca3bea6f0cfdf70dba193ff81514739ec143644"
+    },
+    {
+      "bytes": 128,
+      "path": "manifests/POST_fix001.json",
+      "sha256": "b9a52eeb4982f06f87b3a23d551a58eba2f28827eb948c42ad5e8c536a2af882"
+    },
+    {
+      "bytes": 64,
+      "path": "media/artifact-fix001.bin",
+      "sha256": "17ff3615c8f2285b470ee569e15b37503eae49e36882b63ccc1aceb055d7f082"
+    },
+    {
+      "bytes": 210,
+      "path": "media/media-meta.json",
+      "sha256": "c8de53193ced6ced2fdec6762a7cb1a8131f1c17a06c5a7372a98b456e9d1c77"
+    },
+    {
+      "bytes": 78,
+      "path": "notifier/daily-analytics/fix001.json",
+      "sha256": "79bf159e18ab775d15cf7d975ae8856c1a60357a156d32a1d2579b62dc05b641"
+    },
+    {
+      "bytes": 98,
+      "path": "publish-ledger.jsonl",
+      "sha256": "05e9c085b5c05608502f69c6ee33071065027e7667c4e4ece1c02996d497b757"
+    },
+    {
+      "bytes": 137,
+      "path": "receipts/POST_fix001/receipt-uuid-fix001.json",
+      "sha256": "0a14401fa6043d8b7cafaa3fb52efd21a2413ab645ebb9a7354873bfb7e7fc9c"
+    },
+    {
+      "bytes": 121,
+      "path": "run-outcomes/morning-fix001.json",
+      "sha256": "b5ea4aef3df6644d82cc0e086d7f30c0ef83a8437d4b3c0aeb34bedac396a960"
+    },
+    {
+      "bytes": 126,
+      "path": "topic-ledger.jsonl",
+      "sha256": "8ddac6857d5516b879f3d848aead7f7605de4d03aba3f39f903dd509b5c9a3dd"
+    }
+  ],
+  "record_counts": {
+    "publish-ledger.jsonl": 1,
+    "topic-ledger.jsonl": 2
+  },
+  "schema": "nullone.restore-snapshot/v1",
+  "source_kind": "SANITIZED_FIXTURE",
+  "state_classes": [
+    "candidate_queue",
+    "publish_ledger",
+    "publication_attempt_history",
+    "final_authorization_evidence",
+    "notifier_state",
+    "run_outcomes_and_editorial_artifacts",
+    "analytics_artifacts",
+    "rendered_and_source_media"
+  ]
+}

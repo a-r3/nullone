@@ -66,6 +66,7 @@ COMMANDS = [
     [sys.executable, "tests/test_runtime_inventory.py"],
     [sys.executable, "tests/test_offline_render_reproducibility.py"],
     [sys.executable, "tests/test_recovery_contract.py"],
+    [sys.executable, "tests/test_restore_drill.py"],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_breaking_identity.py",
