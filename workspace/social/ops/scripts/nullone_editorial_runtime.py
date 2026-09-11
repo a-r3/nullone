@@ -22,6 +22,7 @@ from nullone_run_outcome import (
     make_run_id,
     result_path,
 )
+from nullone_schedule_registry import get_schedule, get_schedules
 
 WORKFLOW_ID = "morning-editorial"
 
@@ -31,27 +32,81 @@ MAX_ATTEMPTS = 2
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (60,)
 
 # Per-attempt wall-clock ceiling enforced by the provider invocation
-# (see nullone-morning-editorial-run.py's subprocess timeout). Kept here,
-# next to the retry/backoff policy it must be sized against, rather than
-# duplicated as a second unrelated constant in the runner script.
+# (see nullone_claude_editorial_provider.py's subprocess timeout). Kept
+# here, next to the retry/backoff policy it must be sized against,
+# rather than duplicated as a second unrelated constant in the runner
+# script.
 #
-# A verified real Morning Editorial run on 2026-09-04 completed in
-# ~118s. 210s leaves 92s of headroom above that healthy baseline while
-# still fitting the occurrence failure budget below.
-PROVIDER_CALL_TIMEOUT_SECONDS = 210
+# Proven live evidence (2026-09-11 natural occurrence, run
+# run_28849dc4436e74d25ae99dbf): the prior 210s value -- sized only
+# against a single historical ~118s run -- killed BOTH real attempts
+# while they were still doing genuine agent/tool work (WebSearch/
+# WebFetch/Bash calls actively succeeding; no artifact write ever
+# reached). The 210s ceiling wraps the ENTIRE Claude agent process
+# (research, verification/scoring, board construction, structured
+# handoff creation, state I/O), not merely a network connect/read --
+# it was never a realistic budget for that workload. 600s is the
+# reviewed replacement, sized for the current heavier production
+# contract rather than the old single-sample baseline.
+PROVIDER_CALL_TIMEOUT_SECONDS = 600
 
-# Confirmed 2026-09-05 evidence (issue #28) showed failed Morning
-# Editorial occurrences spaced as little as ~10 minutes (600s) apart.
-# The bounded retry policy's worst-case wall-clock cost for one
-# occurrence must stay safely under that window, or a persistent
-# reachability failure could still be running when the next scheduled
-# occurrence starts. 480s (8 minutes) is chosen with a 120s margin
-# below the observed ~10-minute spacing.
-OCCURRENCE_FAILURE_BUDGET_SECONDS = 480
 
-# The declared budget itself must stay under the confirmed minimum
-# occurrence spacing, independent of any particular policy.
-_MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS = 600
+def _seconds_since_midnight(value: object) -> int:
+    return value.hour * 3600 + value.minute * 60 + value.second
+
+
+def morning_to_first_story_gap_seconds() -> int:
+    """Seconds between Morning's own slot and Story's earliest daily slot.
+
+    Reads both slots from `nullone_schedule_registry` -- the single
+    reviewed source of NullOne-owned schedule truth -- instead of
+    duplicating either cron string here. Both schedules currently share
+    one IANA timezone with no DST, so a same-day time-of-day
+    subtraction is exact; a future schedule change that put them in
+    different timezones must fail closed rather than silently produce
+    a wrong gap.
+    """
+
+    morning = get_schedule("morning-editorial")
+    first_story = get_schedules("story")[0]  # ascending by local time
+
+    if morning.timezone_name != first_story.timezone_name:
+        raise UnsafeRetryPolicyError(
+            "morning-editorial and story schedules must share one "
+            "timezone to compute a safe occurrence failure budget; "
+            f"got {morning.timezone_name!r} vs {first_story.timezone_name!r}"
+        )
+
+    morning_seconds = _seconds_since_midnight(morning.local_time_of_day())
+    story_seconds = _seconds_since_midnight(first_story.local_time_of_day())
+    gap = story_seconds - morning_seconds
+
+    if gap <= 0:
+        raise UnsafeRetryPolicyError(
+            "story's earliest daily slot must be strictly after "
+            f"morning-editorial's slot; computed non-positive gap {gap}s"
+        )
+
+    return gap
+
+
+# Reviewed replacement for the retired historical
+# `_MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS = 600` occurrence-spacing
+# assumption (that value modeled one 2026-09-05 observation, not the
+# actual reviewed production schedule, and never accounted for the fact
+# Morning has exactly one daily slot -- there is no "next Morning
+# occurrence" to collide with; the real downstream consumer is Story's
+# earliest daily check). The failure budget below is instead bounded
+# against the live schedule-registry-derived Morning-to-first-Story gap
+# (`morning_to_first_story_gap_seconds()`, currently 7200s for
+# 08:30 -> 10:30 Asia/Baku), enforced by `validate_occurrence_policy`.
+#
+# Worst-case retry cost with MAX_ATTEMPTS=2,
+# PROVIDER_CALL_TIMEOUT_SECONDS=600, RETRY_BACKOFF_SECONDS=(60,) is
+# 1260s. 1800s (30 minutes) is chosen with comfortable headroom above
+# that worst case while remaining well below the 7200s Morning-to-
+# first-Story gap.
+OCCURRENCE_FAILURE_BUDGET_SECONDS = 1800
 
 
 def worst_case_occurrence_seconds(
@@ -77,7 +132,8 @@ class UnsafeRetryPolicyError(RuntimeError):
     """Raised when a retry/timeout/backoff policy violates the occurrence
     failure budget invariant (issue #28): the worst-case retry duration
     must fit inside a declared budget, and that budget must itself stay
-    under the confirmed minimum occurrence spacing.
+    strictly below the schedule-registry-derived Morning-to-first-Story
+    gap (`morning_to_first_story_gap_seconds()`).
     """
 
 
@@ -87,20 +143,26 @@ def validate_occurrence_policy(
     provider_call_timeout_seconds: int,
     backoff_seconds: tuple[int, ...],
     budget_seconds: int,
+    gap_seconds: int | None = None,
 ) -> None:
     """Raise UnsafeRetryPolicyError if this policy is not safe to run.
 
     This is an operational safety invariant, so it is enforced with an
     explicit, catchable exception rather than a bare `assert` (asserts
-    can be stripped with `python -O`).
+    can be stripped with `python -O`). `gap_seconds` defaults to the
+    live `morning_to_first_story_gap_seconds()` reading; tests may pass
+    an explicit value to exercise the boundary without depending on the
+    schedule registry's current numbers.
     """
 
-    if budget_seconds >= _MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS:
+    if gap_seconds is None:
+        gap_seconds = morning_to_first_story_gap_seconds()
+
+    if budget_seconds >= gap_seconds:
         raise UnsafeRetryPolicyError(
             f"Occurrence failure budget ({budget_seconds}s) must stay "
-            "under the confirmed "
-            f"{_MIN_OBSERVED_OCCURRENCE_SPACING_SECONDS}s minimum "
-            "observed occurrence spacing"
+            f"strictly under the {gap_seconds}s Morning-to-first-Story "
+            "schedule gap"
         )
 
     worst_case = worst_case_occurrence_seconds(
@@ -138,13 +200,40 @@ class ProviderUnreachableError(BridgeError):
     """Raised when the model provider/runtime could not be reached."""
 
 
+class ProviderExecutionTimeoutError(BridgeError):
+    """Raised when the whole editorial provider process exceeded its
+    outer wall-clock deadline (`PROVIDER_CALL_TIMEOUT_SECONDS`).
+
+    Deliberately NOT a subclass of `ProviderUnreachableError`. Proven
+    live evidence (2026-09-11) shows a whole-process timeout can fire
+    while the child is still doing genuine, successful agent/tool work
+    -- it is not proof the provider was unreachable, and conflating the
+    two previously caused an automatic, expensive second attempt on
+    every such timeout. This outcome is non-retryable: see
+    `classify_provider_failure`.
+    """
+
+
 def classify_provider_failure(exc: BaseException) -> tuple[str, str]:
     """Classify a provider failure into a stable reason_code/reason_text.
 
-    Only PROVIDER_UNREACHABLE is treated as safe to retry: it matches the
-    confirmed transient DNS/API reachability pattern. Any other failure
-    is reported as a distinct, non-retried domain failure.
+    `ProviderExecutionTimeoutError` is checked first and is always
+    non-retryable (`PROVIDER_EXECUTION_TIMEOUT`): an outer wall-clock
+    timeout on the whole agent process is ambiguous about *why* it
+    fired (proven live evidence shows the child can still be actively
+    making progress), so automatically restarting the whole agent could
+    duplicate expensive research or repeat side effects.
+
+    Only PROVIDER_UNREACHABLE is treated as safe to retry: it matches
+    the confirmed transient DNS/API reachability pattern. Any other
+    failure is reported as a distinct, non-retried domain failure.
     """
+
+    if isinstance(exc, ProviderExecutionTimeoutError):
+        return (
+            "PROVIDER_EXECUTION_TIMEOUT",
+            "Editorial provider exceeded its execution deadline.",
+        )
 
     if isinstance(exc, ProviderUnreachableError) or REACHABILITY_PATTERN.search(
         str(exc)
