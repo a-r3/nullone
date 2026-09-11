@@ -1,0 +1,155 @@
+{
+  "schema": "nullone.release-policy/v1",
+  "policy_version": "1.0.0",
+  "description": "Explicit repository-source to production-destination allowlist for the deterministic NullOne release CLI. Repository engineering only; MERGE != DEPLOY.",
+  "mappings": [
+    {
+      "repo_prefix": "workspace/social/ops/scripts/",
+      "prod_prefix": "social/ops/scripts/",
+      "description": "Deterministic workflow scripts (Morning, Analytics, Story, Breaking, publish, scheduler authority)."
+    },
+    {
+      "repo_prefix": "workspace/social/ops/prompts/",
+      "prod_prefix": "social/ops/prompts/",
+      "description": "Reviewed agent prompt files."
+    },
+    {
+      "repo_prefix": "workspace/social/tools/",
+      "prod_prefix": "social/tools/",
+      "description": "Reviewed render tooling."
+    },
+    {
+      "repo_prefix": "plugins/nullone-final-publish/",
+      "prod_prefix": "plugins/nullone-final-publish/",
+      "description": "Reviewed OpenClaw final-publish plugin source."
+    },
+    {
+      "repo_prefix": "agents/",
+      "prod_prefix": "agents/",
+      "description": "Reviewed agent definitions."
+    },
+    {
+      "repo_prefix": "workspace/AGENTS.md",
+      "prod_prefix": "AGENTS.md",
+      "description": "Workspace agent contract (single file mapping).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/IDENTITY.md",
+      "prod_prefix": "IDENTITY.md",
+      "description": "Workspace identity (single file mapping).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/SOUL.md",
+      "prod_prefix": "SOUL.md",
+      "description": "Workspace soul contract (single file mapping).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/BRAND.md",
+      "prod_prefix": "social/BRAND.md",
+      "description": "Brand contract (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/CONTENT_RULES.md",
+      "prod_prefix": "social/CONTENT_RULES.md",
+      "description": "Content rules (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/CONTENT_STRATEGY.md",
+      "prod_prefix": "social/CONTENT_STRATEGY.md",
+      "description": "Content strategy (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/OPERATING_SYSTEM.md",
+      "prod_prefix": "social/OPERATING_SYSTEM.md",
+      "description": "Operating system doc (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/SCORING.md",
+      "prod_prefix": "social/SCORING.md",
+      "description": "Scoring doc (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/SOURCES.md",
+      "prod_prefix": "social/SOURCES.md",
+      "description": "Sources doc (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/STATE_RULES.md",
+      "prod_prefix": "social/STATE_RULES.md",
+      "description": "State rules doc (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/ZERNIO.md",
+      "prod_prefix": "social/ZERNIO.md",
+      "description": "Zernio contract (single file).",
+      "single_file": true
+    },
+    {
+      "repo_prefix": "workspace/social/references/",
+      "prod_prefix": "social/references/",
+      "description": "Reviewed reference docs."
+    },
+    {
+      "repo_prefix": "workspace/social/ops/PRODUCTION_BRIDGE.md",
+      "prod_prefix": "social/ops/PRODUCTION_BRIDGE.md",
+      "description": "Production bridge doc (single file).",
+      "single_file": true
+    }
+  ],
+  "forbidden_repo_prefixes": [
+    "docs/",
+    "tests/",
+    ".github/",
+    ".git/",
+    "ops/",
+    "NULLONE_PROJECT_CONTEXT.md",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    ".gitignore"
+  ],
+  "forbidden_prod_prefixes": [
+    "social/state/",
+    "social/ops/manifests/",
+    "social/ops/run-outcomes/",
+    "social/ops/notifications/",
+    "social/ops/publish-callback-receipts/",
+    "social/ops/publish-controller.sentinel",
+    "social/ops/private/",
+    "social/ops/reliability-proof/",
+    "social/research/",
+    "social/drafts/",
+    "social/published/",
+    "social/analytics/",
+    "social/assets/rendered/",
+    "social/ops/breaking-handoffs/",
+    "social/ops/breaking-staging/",
+    "social/ops/candidate-queue/",
+    "deploy-state/",
+    ".openclaw/",
+    "private/",
+    "secrets/",
+    "credentials/",
+    "backups/"
+  ],
+  "notes": [
+    "Secret-bearing destinations (secret files, OAuth/session/auth state, Telegram owner data, presigned-URL artifacts, ledgers, receipts, caches) are excluded via the explicit forbidden_prod_prefixes above — never via filename-substring matching, because allowlisted code filenames legitimately contain substrings like 'auth' (authority), 'secret' (secret_provider boundary), or 'session' (supersession).",
+    "Deploy-state content is independently guarded against secret values by the release tool."
+  ],
+  "restart_required": false,
+  "validation_hooks": [
+    "python-compile",
+    "json-parse",
+    "node-check"
+  ]
+}

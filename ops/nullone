@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""NullOne deterministic release CLI (repository engineering only; MERGE != DEPLOY).
+
+Usage:
+  ./ops/nullone version
+  ./ops/nullone status --production-root <path>
+  ./ops/nullone update --production-root <path> [--target <full-sha>] [--yes]
+  ./ops/nullone rollback --production-root <path> [--backup <id>]
+  ./ops/nullone preflight --production-root <path> [--target <full-sha>]
+
+Tests must use temporary fixture production roots only. Never ~/.openclaw.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+OPS_ROOT = Path(__file__).resolve().parent
+REPO_ROOT_DEFAULT = OPS_ROOT.parent
+POLICY_DEFAULT = OPS_ROOT / "release-policy.json"
+
+sys.path.insert(0, str(REPO_ROOT_DEFAULT))
+
+from ops.lib import gitops  # noqa: E402
+from ops.lib.policy import PolicyError, load_policy  # noqa: E402
+from ops.lib.release import (  # noqa: E402
+    RELEASE_TOOL_VERSION,
+    build_plan,
+    get_status,
+    run_preflight,
+    run_rollback,
+    run_update,
+)
+from ops.lib.state import read_current  # noqa: E402
+
+
+def _repo_root(args) -> Path:
+    if getattr(args, "repo_root", None):
+        return Path(args.repo_root).resolve()
+    # auto-detect git toplevel from this file
+    try:
+        return gitops.repo_toplevel(OPS_ROOT)
+    except Exception:
+        return REPO_ROOT_DEFAULT.resolve()
+
+
+def _policy(args) -> tuple[dict, Path]:
+    p = Path(getattr(args, "policy", None) or POLICY_DEFAULT)
+    try:
+        return load_policy(p), p
+    except PolicyError as e:
+        print(f"POLICY_ERROR: {e}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def cmd_version(_args) -> int:
+    print(f"nullone-release {RELEASE_TOOL_VERSION}")
+    try:
+        sha = gitops._run_git(REPO_ROOT_DEFAULT.resolve(), "rev-parse", "--short=12", "HEAD")
+        print(f"repo HEAD: {sha}")
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_status(args) -> int:
+    repo_root = _repo_root(args)
+    policy, _ = _policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    avail = args.available_sha if getattr(args, "available_sha", None) else None
+    try:
+        st = get_status(repo_root, policy, prod_root, available_sha=avail)
+    except Exception as e:
+        print(f"STATUS_ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"STATUS={st.get('STATUS')}")
+    print(f"DEPLOYED_SHA={st.get('DEPLOYED_SHA')}")
+    print(f"AVAILABLE_SHA={st.get('AVAILABLE_SHA')}")
+    if st.get("DRIFTED_FILES"):
+        print("DRIFTED_FILES:")
+        for f in st["DRIFTED_FILES"]:
+            print(f"  {f}")
+    if st.get("REASON"):
+        print(f"REASON={st.get('REASON')}")
+    if getattr(args, "json", False):
+        print(json.dumps(st, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_preflight(args) -> int:
+    repo_root = _repo_root(args)
+    policy, _ = _policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
+    try:
+        pf = run_preflight(repo_root, policy, prod_root,
+                           target_arg=getattr(args, "target", None), do_fetch=do_fetch)
+    except Exception as e:
+        print(f"PREFLIGHT_ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"TARGET_SHA={pf['TARGET_SHA']}")
+    print(f"CI_PROVEN={'YES' if pf['CI_PROVEN'] else 'NO'}")
+    print(f"CI_DETAIL={pf['CI_DETAIL']}")
+    print(f"DRIFT_STATUS={pf['DRIFT']['status']}")
+    if pf["DRIFT"]["drifted"]:
+        print("DRIFTED_FILES:")
+        for f in pf["DRIFT"]["drifted"]:
+            print(f"  {f}")
+    print(f"STATUS={pf['STATUS']}")
+    print(f"RESTART_REQUIRED={pf['RESTART_REQUIRED']}")
+    s = pf["PLAN_SUMMARY"]
+    for k in ("FILES_ADD", "FILES_UPDATE", "FILES_REMOVE", "UNCHANGED", "FORBIDDEN"):
+        v = s.get(k)
+        print(f"{k}={v}")
+    if getattr(args, "json", False):
+        print(json.dumps(_jsonable(pf), indent=2, sort_keys=True))
+    ok = pf["CI_PROVEN"] and pf["DRIFT"]["status"] == "CLEAN" and not s.get("FORBIDDEN")
+    return 0 if ok else 2
+
+
+def cmd_update(args) -> int:
+    repo_root = _repo_root(args)
+    policy, policy_path = _policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    do_fetch = not getattr(args, "no_fetch", False) and os.environ.get("NULONE_NO_FETCH", "") == ""
+    # Resolve + plan first so operator sees exact target SHA and files before confirming
+    try:
+        target_preview = gitops.resolve_target(
+            repo_root, getattr(args, "target", None), do_fetch=do_fetch)
+    except gitops.GitError as e:
+        print(f"TARGET_ERROR: {e}", file=sys.stderr)
+        return 2
+    try:
+        plan = build_plan(repo_root, policy, target_preview, prod_root)
+    except Exception as e:
+        print(f"PLAN_ERROR: {e}", file=sys.stderr)
+        return 2
+    print(f"TARGET_SHA={plan['TARGET_SHA']}")
+    for k in ("FILES_ADD", "FILES_UPDATE", "FILES_REMOVE", "UNCHANGED", "FORBIDDEN"):
+        items = plan[k]
+        print(f"{k}={len(items)}")
+        for f in items[:50]:
+            print(f"  {f}")
+    print(f"RESTART_REQUIRED={plan['RESTART_REQUIRED']}")
+    print(f"VALIDATION_HOOKS={','.join(plan['VALIDATION_HOOKS'])}")
+    if plan["FORBIDDEN"]:
+        print("FORBIDDEN plan entries — refusing.", file=sys.stderr)
+        return 2
+    if not args.yes:
+        print("CONFIRMATION_REQUIRED: review plan above, then rerun with --yes.", file=sys.stderr)
+        return 3
+    try:
+        res = run_update(repo_root, policy, policy_path, prod_root,
+                         target_arg=getattr(args, "target", None),
+                         assume_yes=True, do_fetch=False if os.environ.get("NULONE_NO_FETCH") else do_fetch)
+    except Exception as e:
+        print(f"UPDATE_FAILED: {e}", file=sys.stderr)
+        return 2
+    print(f"RESULT={res.get('RESULT')}")
+    print(f"TARGET_SHA={res.get('TARGET_SHA')}")
+    if res.get("BACKUP_ID"):
+        print(f"BACKUP_ID={res.get('BACKUP_ID')}")
+    return 0
+
+
+def cmd_rollback(args) -> int:
+    repo_root = _repo_root(args)
+    policy, _ = _policy(args)
+    prod_root = Path(args.production_root).resolve()
+    _guard_prod_root(prod_root)
+    try:
+        res = run_rollback(repo_root, policy, prod_root, backup_arg=getattr(args, "backup", None))
+    except Exception as e:
+        print(f"ROLLBACK_FAILED: {e}", file=sys.stderr)
+        return 2
+    print(f"RESULT={res.get('RESULT')}")
+    print(f"BACKUP_ID={res.get('BACKUP_ID')}")
+    print(f"RESTORED_SHA={res.get('RESTORED_SHA')}")
+    return 0
+
+
+def _guard_prod_root(prod_root: Path) -> None:
+    # Never allow the real production / home runtime as a target of this repo tooling
+    # in an automated/test context: refuse ~/.openclaw and $HOME itself.
+    home = Path.home().resolve()
+    oc = home / ".openclaw"
+    try:
+        pr = prod_root.resolve()
+    except OSError:
+        pr = prod_root
+    if pr == home or pr == oc or str(pr).startswith(str(oc) + "/"):
+        # Allow only with explicit escape hatch for future controlled human use.
+        if os.environ.get("NULONE_ALLOW_REAL_PROD", "") != "1":
+            print(f"REFUSED: production-root {pr} is live runtime; tests must use fixture roots.", file=sys.stderr)
+            raise SystemExit(2)
+
+
+def _jsonable(o):
+    if isinstance(o, dict):
+        return {k: _jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable(v) for v in o]
+    if isinstance(o, Path):
+        return str(o)
+    return o
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="nullone")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("version")
+
+    p = sub.add_parser("status")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--available-sha", default=None)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("preflight")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--target", default=None)
+    p.add_argument("--no-fetch", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("update")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--target", default=None)
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--no-fetch", action="store_true")
+
+    p = sub.add_parser("rollback")
+    p.add_argument("--production-root", required=True)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--policy", default=None)
+    p.add_argument("--backup", default=None)
+
+    args = ap.parse_args(argv)
+    if args.cmd == "version":
+        return cmd_version(args)
+    if args.cmd == "status":
+        return cmd_status(args)
+    if args.cmd == "preflight":
+        return cmd_preflight(args)
+    if args.cmd == "update":
+        return cmd_update(args)
+    if args.cmd == "rollback":
+        return cmd_rollback(args)
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

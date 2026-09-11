@@ -1706,3 +1706,11 @@ branch `feature/editorial-cadence-v2-contract`) is repository design
 only until separately implemented/reviewed/deployed. It changes no
 production runtime, automation, schedule, draft, publication, or
 notification behavior.
+
+E. PR #101 merged as `f81eb2f81bcf825d5e6201881f8fcb43db09dcf4`:
+Editorial Cadence V2 is merged repository policy only, not
+runtime/deployed. The deterministic release CLI
+(`ops/nullone`, `ops/release-policy.json`, branch
+`feature/nullone-release-cli`) is repository engineering only until
+separately reviewed and later activated. Current natural Morning/Story
+stabilization proof remains untouched.
