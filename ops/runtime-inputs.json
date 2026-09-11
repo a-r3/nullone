@@ -1,5 +1,9 @@
 {
   "inputs": {
+    ".github/workflows/ci.yml": {
+      "bytes": 2752,
+      "sha256": "fb2493ee4463c8e0feec2b6e336fd0dd64b0dfc844dedbb64ded9290025bbf89"
+    },
     "requirements-dev.txt": {
       "bytes": 277,
       "sha256": "613c86109e027618bd1ce47cc07029c27797a43def91189ce5706ffc0df1ba93"
@@ -9,12 +13,12 @@
       "sha256": "d51105c9932a091dc16d1603526dbfcf78409df24b8e455a35887897d02adbde"
     },
     "scripts/capture-runtime-versions.py": {
-      "bytes": 1444,
-      "sha256": "3bc0ce8474a5362c11e9e97456a435b8d5f0735e2bb0565cb9e51e9b94fc7100"
+      "bytes": 3353,
+      "sha256": "c2b88ed2bc34075db39ea3641982ec22e1ccb77cce4a47fdb86b73340df1a57a"
     },
     "scripts/validate-offline.sh": {
-      "bytes": 1003,
-      "sha256": "51b96ffec369484443b8e7357fd5b8d96c9bd318977a91c638cf596abf0ed6aa"
+      "bytes": 2498,
+      "sha256": "9c0c4bb3ef899509dec2ae0e276427ecde6f1bc62b59b0bfc87c18ba519f9281"
     },
     "tests/fixtures/offline-render-carousel.json": {
       "bytes": 468,

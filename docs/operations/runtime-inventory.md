@@ -56,6 +56,14 @@ are exposed here. If either path is absent, renderers fail loudly
 proven offline by the glyph check (tofu-vs-`.notdef` bitmap comparison),
 not assumed.
 
+Drift identity: `scripts/capture-runtime-versions.py` records a safe
+`fonts` section per required font — path, existence, SHA256, and (when
+deterministically available via `dpkg-query`) the owning OS package and
+its version (currently `fonts-dejavu-core 2.37-8`). SHA256 is the minimum
+stable drift identity; contents are never captured or committed. Recovery
+owner remains the OS package manager. Fonts stay HOST_PROVIDED — recorded
+drift identity does not promote them to PINNED.
+
 ## E. Filesystem / path assumptions
 
 - Repository-relative reads: scripts resolve inputs relative to the repo
