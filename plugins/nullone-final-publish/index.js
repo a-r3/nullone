@@ -37,8 +37,15 @@
  * - return {handled:false} falls through to agent routing; any other
  *   handled result consumes the callback; with no submitText no agent turn
  *   is spawned.
- * - register(api, ctx) is SYNCHRONOUS by host contract ("plugin register
- *   must be synchronous"): async store resolution happens lazily inside
+ * - register(api) is the REAL host contract -- exactly one argument.
+ *   Installed 2026.8.2 declares `register?: (api: OpenClawPluginApi) =>
+ *   void` and the Gateway's native-plugin loader calls it as
+ *   `register(guarded.api)` (dist/loader-*.js, runPluginRegisterSync) --
+ *   there is no second `ctx` argument on the real host path. A second
+ *   parameter below exists ONLY as a test/dev override hook (spawnFn,
+ *   controllerPath); production correctness never reads workspace from it.
+ * - register(...) is SYNCHRONOUS by host contract ("plugin register must
+ *   be synchronous"): async store resolution happens lazily inside
  *   DaemonLink.ensure() before the daemon spawns, never in register().
  * - api.pluginConfig = validated `plugins.entries.<id>.config` (raw
  *   SecretInput: resolved string or SecretRef object).
@@ -722,8 +729,15 @@ const entry = definePluginEntry({
   description:
     "Claims texbrif:publish Telegram callbacks and routes them to the deterministic NullOne publication controller.",
   register(api, ctx) {
-    const workspace =
-      (ctx && ctx.workspace) || process.env.NULLONE_WORKSPACE || "";
+    // ctx is a TEST/DEV-ONLY override hook (spawnFn, controllerPath). The
+    // real Gateway calls register(api) with exactly one argument -- ctx is
+    // always undefined on the real host path, so production correctness
+    // must never depend on it. In particular, workspace resolution below
+    // NEVER reads ctx.workspace or NULLONE_WORKSPACE: the real host never
+    // supplies either (confirmed: installed register contract is one
+    // argument, and the live Gateway process has no NULLONE_WORKSPACE env),
+    // which previously produced workspace="" -> resolveControllerPath("")
+    // throwing -> link=null on every production boot (Sep 11 incident).
     const pythonBin = (ctx && ctx.pythonBin) || "python3";
     // Test/dev override only (see resolveControllerPath); production derives
     // the absolute path deterministically from the served workspace.
@@ -742,6 +756,16 @@ const entry = definePluginEntry({
     let link = null;
     let linkError = null;
     try {
+      // Supported installed 2026.8.2 API for the served production
+      // workspace: api.runtime.agent.resolveAgentWorkspaceDir(cfg, agentId).
+      // Kept inside this same fail-closed boundary so an unavailable/invalid
+      // runtime resolver still registers the interactive handler with
+      // link=null instead of throwing out of register() and crashing
+      // Gateway startup.
+      const workspace = api.runtime.agent.resolveAgentWorkspaceDir(
+        api.config,
+        "main"
+      );
       const controllerPath = resolveControllerPath(workspace, override);
       const spawnFn = (ctx && ctx.spawnFn) || undefined;
       link = new DaemonLink(pythonBin, controllerPath, workspace, spawnFn, {

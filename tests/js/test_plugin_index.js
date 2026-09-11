@@ -18,22 +18,40 @@ const POST = "0123456789abcdef01234567";
 let plugin;
 let registrations;
 
+const DEFAULT_TEST_WORKSPACE = "/tmp/nullone-test-workspace";
+
 function makeApi(opts) {
   registrations = [];
-  return {
+  const config = (opts && opts.config) || { secrets: {} };
+  // Faithful to the installed 2026.8.2 host contract: the ONLY supported
+  // way for a plugin to learn the served workspace is
+  // api.runtime.agent.resolveAgentWorkspaceDir(api.config, agentId) -- there
+  // is no ctx.workspace and no NULLONE_WORKSPACE on the real host path.
+  const resolveAgentWorkspaceDir =
+    opts && opts.resolveAgentWorkspaceDir
+      ? opts.resolveAgentWorkspaceDir
+      : (_cfg, _agentId) =>
+          opts && Object.prototype.hasOwnProperty.call(opts, "workspace")
+            ? opts.workspace
+            : DEFAULT_TEST_WORKSPACE;
+  const api = {
     registerInteractiveHandler: (reg) => {
       registrations.push(reg);
     },
-    pluginConfig:
-      (opts && opts.pluginConfig) || {},
+    pluginConfig: (opts && opts.pluginConfig) || {},
+    config,
+    runtime: {
+      agent: { resolveAgentWorkspaceDir },
+    },
   };
+  return api;
 }
 
 function makeCtx(overrides) {
-  return {
-    workspace: "/tmp/nullone-test-workspace",
-    ...(overrides || {}),
-  };
+  // Test/dev-only override hook (spawnFn, controllerPath, pythonBin). The
+  // real Gateway never supplies this second register() argument at all, and
+  // it must never carry workspace (see makeApi's resolveAgentWorkspaceDir).
+  return { ...(overrides || {}) };
 }
 
 function makeHandlerCtx(overrides) {
@@ -118,7 +136,7 @@ before(() => {
 
 function registeredHandler(link) {
   const api = makeApi();
-  plugin.register(api, makeCtx());
+  plugin.register(api);
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
@@ -140,7 +158,7 @@ test("OpenClaw loader sees top-level plugin entry (regression)", () => {
   assert.ok("configSchema" in plugin);
 
   const api = makeApi();
-  plugin.register(api, makeCtx());
+  plugin.register(api);
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
@@ -148,7 +166,7 @@ test("OpenClaw loader sees top-level plugin entry (regression)", () => {
 
 test("registration claims telegram/texbrif exactly once", () => {
   const api = makeApi();
-  plugin.register(api, makeCtx());
+  plugin.register(api);
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
@@ -399,11 +417,11 @@ test("C: default registration spawns the exact production-relative path", async 
     seen.opts = opts;
     return fake;
   };
-  const api = makeApi({ pluginConfig: { publishToken: STARTUP_TOKEN } });
-  plugin.register(
-    api,
-    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
-  );
+  const api = makeApi({
+    pluginConfig: { publishToken: STARTUP_TOKEN },
+    workspace: "/tmp/nullone-workspace",
+  });
+  plugin.register(api, makeCtx({ spawnFn }));
   assert.equal(registrations.length, 1);
   const handler = registrations[0].handler;
   const ctx = makeHandlerCtx();
@@ -443,8 +461,33 @@ test("D: missing workspace fails closed with zero spawn", async () => {
     spawned = true;
     throw new Error("must not spawn");
   };
-  const api = makeApi();
-  plugin.register(api, makeCtx({ workspace: "", spawnFn }));
+  const api = makeApi({ workspace: "" });
+  plugin.register(api, makeCtx({ spawnFn }));
+  assert.equal(registrations.length, 1);
+  const ctx = makeHandlerCtx();
+  const result = await registrations[0].handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(spawned, false);
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /hazır deyil/);
+});
+
+test("D2: resolveAgentWorkspaceDir throwing fails closed with zero spawn", async () => {
+  // Negative coverage for the supported workspace API itself: if the
+  // installed runtime resolver throws (unavailable agent, config error,
+  // etc.) registration must still succeed with link=null, never crash
+  // Gateway startup, and never spawn.
+  let spawned = false;
+  const spawnFn = () => {
+    spawned = true;
+    throw new Error("must not spawn");
+  };
+  const api = makeApi({
+    resolveAgentWorkspaceDir: () => {
+      throw new Error("agent workspace resolver unavailable");
+    },
+  });
+  plugin.register(api, makeCtx({ spawnFn }));
   assert.equal(registrations.length, 1);
   const ctx = makeHandlerCtx();
   const result = await registrations[0].handler(ctx);
@@ -458,11 +501,11 @@ test("E: spawn failure consumes safely and never routes to LLM", async () => {
   const spawnFn = () => {
     throw new Error("spawn exploded");
   };
-  const api = makeApi({ pluginConfig: { publishToken: "test-token" } });
-  plugin.register(
-    api,
-    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
-  );
+  const api = makeApi({
+    pluginConfig: { publishToken: "test-token" },
+    workspace: "/tmp/nullone-workspace",
+  });
+  plugin.register(api, makeCtx({ spawnFn }));
   const ctx = makeHandlerCtx();
   const result = await registrations[0].handler(ctx);
   assert.deepEqual(result, { handled: true });
@@ -475,11 +518,11 @@ test("pre-dispatch spawn failure says request was not sent (exact)", async () =>
   const spawnFn = () => {
     throw new Error("spawn exploded");
   };
-  const api = makeApi({ pluginConfig: { publishToken: "test-token" } });
-  plugin.register(
-    api,
-    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn })
-  );
+  const api = makeApi({
+    pluginConfig: { publishToken: "test-token" },
+    workspace: "/tmp/nullone-workspace",
+  });
+  plugin.register(api, makeCtx({ spawnFn }));
   const ctx = makeHandlerCtx();
   const result = await registrations[0].handler(ctx);
   assert.deepEqual(result, { handled: true });
@@ -585,11 +628,13 @@ test("manifest declares Gateway-startup activation (regression)", () => {
 
 test("missing publishToken fails closed with zero spawn", async () => {
   let spawned = false;
-  const api = makeApi({ pluginConfig: {} });
+  const api = makeApi({
+    pluginConfig: {},
+    workspace: "/tmp/nullone-workspace",
+  });
   plugin.register(
     api,
     makeCtx({
-      workspace: "/tmp/nullone-workspace",
       spawnFn: () => {
         spawned = true;
         throw new Error("must not spawn");
@@ -607,11 +652,13 @@ test("missing publishToken fails closed with zero spawn", async () => {
 
 test("blank publishToken fails closed with zero spawn", async () => {
   let spawned = false;
-  const api = makeApi({ pluginConfig: { publishToken: "   " } });
+  const api = makeApi({
+    pluginConfig: { publishToken: "   " },
+    workspace: "/tmp/nullone-workspace",
+  });
   plugin.register(
     api,
     makeCtx({
-      workspace: "/tmp/nullone-workspace",
       spawnFn: () => {
         spawned = true;
         throw new Error("must not spawn");
@@ -635,11 +682,11 @@ test("non-store SecretRef fails closed with zero spawn", async () => {
         id: "ZERNIO_PUBLISH_API_TOKEN",
       },
     },
+    workspace: "/tmp/nullone-workspace",
   });
   plugin.register(
     api,
     makeCtx({
-      workspace: "/tmp/nullone-workspace",
       spawnFn: () => {
         spawned = true;
         throw new Error("must not spawn");
@@ -719,13 +766,9 @@ test("store SecretRef resolves through the SDK and reaches the pipe", async () =
       },
     },
     config: { secrets: {} },
+    workspace: "/tmp/nullone-workspace",
   });
-  // makeApi only models pluginConfig; attach host config for resolution.
-  api.config = { secrets: {} };
-  plugin.register(
-    api,
-    makeCtx({ workspace: "/tmp/nullone-workspace", spawnFn: () => fake })
-  );
+  plugin.register(api, makeCtx({ spawnFn: () => fake }));
   const ctx = makeHandlerCtx();
   const result = await registrations[0].handler(ctx);
   assert.deepEqual(result, { handled: true });
@@ -765,4 +808,42 @@ test("required SecretRef resolver undefined result fails closed", async () => {
     () => plugin.resolvePublishToken(ref, { secrets: {} }),
     /publish credential unavailable/
   );
+});
+
+test("OpenClaw one-argument register resolves workspace from runtime agent API", () => {
+  // Installed 2026.8.2 contract: register?: (api: OpenClawPluginApi) => void,
+  // invoked by the Gateway loader as register(guarded.api) -- exactly one
+  // argument, no ctx (dist/loader-*.js runPluginRegisterSync). Calling
+  // plugin.register(api) here with NO second argument at all proves the
+  // production path never needs ctx.workspace / NULLONE_WORKSPACE.
+  // FAILS against pre-fix main: resolveAgentWorkspaceDir is never called
+  // there (workspace instead came from ctx/env, both absent -> link=null).
+  const calls = [];
+  const testConfig = { secrets: {}, marker: "resolve-workspace-test-config" };
+  const api = makeApi({
+    config: testConfig,
+    resolveAgentWorkspaceDir: (config, agentId) => {
+      calls.push({ config, agentId });
+      return "/tmp/nullone-test-workspace";
+    },
+  });
+
+  plugin.register(api);
+
+  assert.equal(calls.length, 1, "resolveAgentWorkspaceDir must be called exactly once");
+  assert.equal(calls[0].agentId, "main");
+  assert.equal(calls[0].config, testConfig);
+
+  const controllerPath = plugin.resolveControllerPath(
+    "/tmp/nullone-test-workspace"
+  );
+  assert.ok(
+    controllerPath.startsWith("/tmp/nullone-test-workspace/"),
+    controllerPath
+  );
+  assert.ok(!controllerPath.includes("workspace/workspace"), controllerPath);
+
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].channel, "telegram");
+  assert.equal(registrations[0].namespace, "texbrif");
 });
