@@ -1684,3 +1684,25 @@ Still unchanged:
 - web-first internal Control before broad SaaS
 - no premature Kubernetes/microservices/multi-region
 - VPS migration remains deferred and is not a prerequisite for current engineering
+
+## Editorial Cadence V2 — repository design only (2026-09-11)
+
+A. PR #100 merged: `10ca76f50962a1f125bd2f1222e02aab2ec8fae8`.
+
+B. PR #100 controlled production deploy SUCCESS on 2026-09-11:
+- exact two runtime files deployed
+- hash match PASS
+- provider timeout 600
+- execution-timeout classification separated
+- no automation changes
+- no force runs
+- rollback: `/home/oem/.openclaw/rollback-backups/pr100-20260911T141748Z`
+
+C. Natural Morning/Story proof remains pending for the next normal
+occurrences.
+
+D. Editorial Cadence V2 (`docs/contracts/editorial-cadence-v2.md`,
+branch `feature/editorial-cadence-v2-contract`) is repository design
+only until separately implemented/reviewed/deployed. It changes no
+production runtime, automation, schedule, draft, publication, or
+notification behavior.

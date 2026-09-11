@@ -423,3 +423,18 @@ an RSS feed
 a press-release mirror
 a generic AI tips page
 a quota-driven content farm
+
+---
+
+## 13. Editorial Cadence V2 — reviewed contract only (not active)
+
+`docs/contracts/editorial-cadence-v2.md` holds the reviewed V2
+editorial-cadence contract (independent MAIN/STORY surface
+evaluation, truthful audience-vs-pending distinction, same-day
+candidate view, durable reserve ladder, Story roles, intraday Radar
+rule, observability).
+
+Status: CONTRACT ONLY. It changes no runtime, automation, schedule,
+or publication behavior. Sections 7 and 10 above remain the active
+cadence guidance until V2 is separately implemented, reviewed, and
+deployed.
