@@ -1725,3 +1725,13 @@ Current production stabilization proof remains active; issue #37 remains
 open. Issue #7 residual governance work
 (`docs/contracts/change-control.md`, review receipts, PR/issue
 templates) is repository-only.
+
+G. PR #103 merged as `b4ad547fea6ee8f7469cc5fe11b99e52243c68c9`:
+auditable change-control evidence is on main; issue #7 is CLOSED.
+Reviewer identity convention for future manual receipts: Rauf Alizada
+(@a-r3). Issue #37 remains open; production stabilization proof
+unchanged. Issue #6 repository hardening only
+(`docs/contracts/runtime-permissions.md`, retired Main control-message
+protocol, capability matrix, legacy-skill ownership decision), no
+production deployment; legacy production automations remain live until a
+#37 controlled cutover replaces them.
