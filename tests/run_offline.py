@@ -40,6 +40,7 @@ COMMANDS = [
     [sys.executable, "tests/test_behavioral_regressions.py"],
     [sys.executable, "tests/test_approval_publication_instruction_safety.py"],
     [sys.executable, "tests/test_morning_editorial.py"],
+    [sys.executable, "tests/test_editorial_provider_factory.py"],
     [sys.executable, "tests/test_daily_analytics.py"],
     [sys.executable, "tests/test_failure_notify.py"],
     [sys.executable, "tests/test_openclaw_scheduler_adapter.py"],
@@ -116,6 +117,16 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-morning-editorial-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_opencode_editorial_provider.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_editorial_provider_factory.py",
         "self-test",
     ],
     [

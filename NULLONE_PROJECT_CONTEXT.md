@@ -1,6 +1,6 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-09 Asia/Baku
+Last updated: 2026-09-12 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
 ## Identity
@@ -1511,6 +1511,16 @@ Both natural Story occurrences (10:30 and 13:30 Asia/Baku) independently failed 
 Fix (branch `fix/morning-handoff-verification-contract`): rewrote the structured-handoff section of `morning-editorial.md` to list every candidate field as an exact literal JSON key (including `` `verification` ``), explicitly forbid emitting `verification_status`, and add a worked JSON example that passes the real validator. The strict validator itself is intentionally **unchanged** — it behaved correctly by failing closed on malformed provider output, and no alias/tolerance for `verification_status` was added. This is a repo-level fix only, matching this doc's MERGED ≠ DEPLOYED distinction: deployment of the corrected prompt to the live Morning automation remains pending and requires a controlled deployment step after merge, followed by natural production proof on a subsequent Morning occurrence — do not consider this closed until that proof exists.
 
 Separately confirmed, **not** addressed by this fix: `StructuredHandoffStoryProvider` reads only the single validated same-day Morning handoff snapshot; Breaking Radar/intraday candidates have no code path into Story, so an event discovered mid-day (e.g. an 11:00 Radar scan) cannot reach a 13:30 Story slot regardless of Morning's outcome (`STORY_MORNING_DEPENDENCY=HARD`, `INTRADAY_REFRESH=NO`, `FALLBACK_SOURCE=NONE`). This is a distinct, pre-existing design gap, not caused by and not fixed alongside the schema mismatch above — it requires separate reviewed design work. #37 remains OPEN.
+
+### Editorial provider transport decision — 2026-09-12 (OpenCode primary, Claude fallback)
+
+NEW operational fact: Claude Code is currently inaccessible to Rauf. Therefore the editorial provider architecture migrates from a Claude-Code-specific transport to a provider-neutral architecture, side-by-side, with no live provider switch in the migration PR itself:
+
+- OpenCode is now the intended primary editorial transport (`nullone_opencode_editorial_provider.py`: `opencode run --agent nullone-editorial --model <provider/model> --format json`, fresh isolated session per run, no `--auto`, checked-in narrow agent boundary, externally enforced 600s timeout, failure classification identical to the Claude adapter).
+- Claude Code is retained, not removed, as the fallback/rollback transport (`nullone_claude_editorial_provider.py` unchanged; existing Claude adapter tests unchanged).
+- Selection is explicit and deterministic (`NULLONE_EDITORIAL_PROVIDER=opencode|claude` via `nullone_editorial_provider_factory.py`); unknown values fail closed; no silent fallback inside a run. Repository default stays `claude` (safe compatibility) — switching the live transport is a separate, explicit deployment decision.
+- PR #108's handoff-contract code fix is deployed, but its next natural proof may occur only after provider transport changes, because Claude access became an operational blocker. Future natural proof must distinguish: (a) handoff-contract success (validator accepts the `verification` field) from (b) OpenCode transport success (the new adapter completes a real Morning cycle within budget).
+- OpenCode production activation is NOT claimed until it actually happens. Issue #37 remains OPEN.
 
 ### Confirmed scheduler/domain-status defect
 Daily Analytics on Sep 5 and Sep 6 (the two in-window scheduled occurrences) reported scheduler/runtime:
