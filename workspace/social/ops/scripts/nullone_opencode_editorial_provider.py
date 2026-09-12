@@ -18,10 +18,11 @@ Invocation contract, verified against the installed OpenCode 1.18.30
 - Explicit model in `provider/model` syntax (`-m`/`--model`).
 - Machine-readable output requested via `--format json`.
 - Narrow capability boundary: no `--auto` is ever passed. Only the
-  checked-in `nullone-editorial` agent's explicit allow rules
-  (`workspace/.opencode/agents/nullone-editorial.md`: file read/write
-  plus web research; shell, task delegation, skills, and
-  outside-worktree access denied) run unattended.
+  checked-in `nullone-editorial` agent's explicit rules
+  (`workspace/.opencode/agents/nullone-editorial.md`) run unattended:
+  writes default-denied and allowed only on the four Morning
+  artifact/state paths, secret-bearing reads denied, shell, task
+  delegation, skills, and outside-worktree access denied.
 - Timeout is enforced externally by NullOne via the subprocess
   deadline (`PROVIDER_CALL_TIMEOUT_SECONDS`), identical to the Claude
   adapter, even though OpenCode has its own internal behavior.
@@ -58,6 +59,13 @@ policy itself is unchanged):
 - provider/model: `NULLONE_OPENCODE_MODEL` when set, else
   `DEFAULT_OPENCODE_MODEL` below (deployment may override without
   touching workflow code).
+
+Current reviewed OpenCode editorial model is Muse Spark 1.3
+(`opencode/muse-spark-1.3-contributor-free`): an explicit
+operational/product decision (Sonnet is currently unavailable, and
+that is not a blocker), not an accidental fallback. Future
+per-role provider/model routing belongs to issue #111 and must not
+require rewriting workflow/domain logic.
 """
 from __future__ import annotations
 

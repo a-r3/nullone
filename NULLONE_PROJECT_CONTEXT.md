@@ -1522,6 +1522,14 @@ NEW operational fact: Claude Code is currently inaccessible to Rauf. Therefore t
 - PR #108's handoff-contract code fix is deployed, but its next natural proof may occur only after provider transport changes, because Claude access became an operational blocker. Future natural proof must distinguish: (a) handoff-contract success (validator accepts the `verification` field) from (b) OpenCode transport success (the new adapter completes a real Morning cycle within budget).
 - OpenCode production activation is NOT claimed until it actually happens. Issue #37 remains OPEN.
 
+### OpenCode editorial model policy — 2026-09-12/13 (Muse Spark 1.3, issue #111 owns future routing)
+
+Explicit operational/product decision from Rauf: the current reviewed OpenCode editorial model is **Muse Spark 1.3** (`opencode/muse-spark-1.3-contributor-free`, `DEFAULT_OPENCODE_MODEL` in `nullone_opencode_editorial_provider.py`). This is deliberate, not an accidental fallback. Sonnet is currently unavailable and that is NOT a blocker. `NULLONE_OPENCODE_MODEL` remains as an explicit override mechanism only — it is not required to make the current migration work.
+
+The checked-in `nullone-editorial` agent boundary was hardened on PR #110 before human approval: writes default-denied, allowed only on the four Morning artifact/state paths proven required by the current prompt (`social/research/daily/*-editorial-board.md`, `social/research/daily/*-editorial-candidates.json`, `social/state/candidate-queue.md`, `social/state/topic-ledger.jsonl`); secret-bearing reads (`.env`-family, keys) denied; shell/task/skills/outside-worktree denied; no `--auto`. The `**/` pattern prefix is load-bearing (the edit tool matches absolute paths; bare relative patterns silently block even required writes) and the scoping was proven live against OpenCode 1.18.30 in disposable sandboxes: allowlisted write succeeds, off-scope write blocked, secret read blocked.
+
+Continuity: PR #110 creates only the immediate minimal provider-neutral seam (OpenCode + Muse Spark as the current primary target, Claude retained as installed fallback). Future logical-role → provider → model routing (Morning, Draft Factory, Radar, analytics, image generation, etc. possibly on different providers/models simultaneously) belongs to issue #111 ("Generalize AI provider adapters and role-based multi-provider routing"). #111 must not block urgent OpenCode activation and is NOT implemented in PR #110.
+
 ### Confirmed scheduler/domain-status defect
 Daily Analytics on Sep 5 and Sep 6 (the two in-window scheduled occurrences) reported scheduler/runtime:
 - `status=ok`

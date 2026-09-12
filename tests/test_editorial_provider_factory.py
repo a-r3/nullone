@@ -27,7 +27,9 @@ N. no secrets embedded in the provider modules
 """
 from __future__ import annotations
 
+import fnmatch
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -492,13 +494,13 @@ class CapabilityBoundaryTests(unittest.TestCase):
             "task: deny",
             "skill: deny",
             "external_directory: deny",
-            "edit: allow",
-            "read: allow",
+            '"*": deny',
             "webfetch: allow",
             "websearch: allow",
         ):
             self.assertIn(required, head)
         self.assertNotIn("bash: allow", head)
+        self.assertNotIn("edit: allow", head)
         self.assertNotIn('"*": "allow"', head)
         self.assertNotIn("--auto", head)
 
@@ -506,6 +508,183 @@ class CapabilityBoundaryTests(unittest.TestCase):
         lowered = AGENT_FILE.read_text(encoding="utf-8").lower()
         for required in ("zernio", "telegram", "gateway", "verification: pass"):
             self.assertIn(required, lowered)
+
+
+def _parse_agent_permission_block() -> dict:
+    """Parse the agent frontmatter `permission:` block preserving rule order."""
+
+    text = AGENT_FILE.read_text(encoding="utf-8")
+    head = text.split("---", 2)[1]
+    rules: dict = {}
+    current: str | None = None
+    in_permission = False
+    for raw in head.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 0:
+            in_permission = stripped == "permission:"
+            current = None
+            continue
+        if not in_permission:
+            continue
+        if indent == 2:
+            if stripped.endswith(":"):
+                current = stripped[:-1]
+                rules[current] = []
+            else:
+                key, value = stripped.split(":", 1)
+                rules[key.strip()] = value.strip()
+        elif indent == 4 and current is not None:
+            pattern, action = stripped.rsplit(":", 1)
+            rules[current].append(
+                (pattern.strip().strip('"'), action.strip())
+            )
+    return rules
+
+
+def _resolve_permission(rules, path: str) -> str | None:
+    """Replicate the documented matcher: last matching rule wins, and
+    `*` matches zero or more of any character (including `/`)."""
+
+    if isinstance(rules, str):
+        return rules
+    result = None
+    for pattern, action in rules:
+        if fnmatch.fnmatch(path, pattern):
+            result = action
+    return result
+
+
+class AgentWriteScopeTests(unittest.TestCase):
+    """The checked-in agent must allow exactly the Morning write surface
+    proven required by the current prompt -- nothing else."""
+
+    # Absolute tool-call paths, as the permission layer matches them
+    # (proven live: bare relative patterns never match).
+    WS = "/home/oem/.openclaw/workspace"
+
+    REQUIRED_WRITE_PATHS = (
+        f"{WS}/social/research/daily/2026-09-13-editorial-board.md",
+        f"{WS}/social/research/daily/2026-09-13-editorial-candidates.json",
+        f"{WS}/social/state/candidate-queue.md",
+        f"{WS}/social/state/topic-ledger.jsonl",
+    )
+
+    DENIED_WRITE_PATHS = (
+        f"{WS}/social/ops/scripts/nullone_bridge_common.py",
+        f"{WS}/social/ops/prompts/morning-editorial.md",
+        f"{WS}/AGENTS.md",
+        f"{WS}/social/ops/run-outcomes/morning-editorial/run_x.json",
+        f"{WS}/social/state/publish-ledger.jsonl",
+        f"{WS}/social/ops/notifications/morning-editorial/x.json",
+        f"{WS}/.opencode/agents/nullone-editorial.md",
+        f"{WS}/.git/HEAD",
+        f"{WS}/social/research/daily/2026-09-13-notes.md",
+        f"{WS}/social/published/anything.md",
+    )
+
+    def test_muse_spark_is_the_current_default_model(self):
+        self.assertEqual(
+            opencode_adapter.DEFAULT_OPENCODE_MODEL,
+            "opencode/muse-spark-1.3-contributor-free",
+        )
+
+    def test_edit_allowlist_is_exactly_the_required_morning_surface(self):
+        rules = _parse_agent_permission_block()
+        edit_rules = rules["edit"]
+        self.assertEqual(edit_rules[0], ("*", "deny"))
+        allowed = {pattern for pattern, action in edit_rules if action == "allow"}
+        self.assertEqual(
+            allowed,
+            {
+                "**/social/research/daily/*-editorial-board.md",
+                "**/social/research/daily/*-editorial-candidates.json",
+                "**/social/state/candidate-queue.md",
+                "**/social/state/topic-ledger.jsonl",
+            },
+        )
+
+    def test_required_morning_paths_resolve_to_allow(self):
+        rules = _parse_agent_permission_block()
+        for path in self.REQUIRED_WRITE_PATHS:
+            self.assertEqual(
+                _resolve_permission(rules["edit"], path),
+                "allow",
+                msg=f"{path} must be writable",
+            )
+
+    def test_unrelated_paths_resolve_to_deny(self):
+        rules = _parse_agent_permission_block()
+        for path in self.DENIED_WRITE_PATHS:
+            self.assertEqual(
+                _resolve_permission(rules["edit"], path),
+                "deny",
+                msg=f"{path} must never be writable",
+            )
+
+
+class AgentSecretReadDenialTests(unittest.TestCase):
+    WS = AgentWriteScopeTests.WS
+
+    DENIED_READ_PATHS = (
+        f"{WS}/.env",
+        f"{WS}/.env.local",
+        f"{WS}/.env.production",
+        f"{WS}/social/.env",
+        f"{WS}/social/ops/.env.api-keys",
+        f"{WS}/deploy.key",
+        f"{WS}/social/ops/id.pem",
+    )
+
+    ALLOWED_READ_PATHS = (
+        f"{WS}/social/ACCOUNT.md",
+        f"{WS}/social/state/candidate-queue.md",
+        f"{WS}/social/ops/prompts/morning-editorial.md",
+        f"{WS}/AGENTS.md",
+        f"{WS}/docs/contracts/runtime-permissions.md",
+    )
+
+    def test_secret_bearing_reads_resolve_to_deny(self):
+        rules = _parse_agent_permission_block()
+        for path in self.DENIED_READ_PATHS:
+            self.assertEqual(
+                _resolve_permission(rules["read"], path),
+                "deny",
+                msg=f"{path} must never be readable",
+            )
+
+    def test_reviewed_editorial_reads_stay_allowed(self):
+        rules = _parse_agent_permission_block()
+        for path in self.ALLOWED_READ_PATHS:
+            self.assertEqual(
+                _resolve_permission(rules["read"], path),
+                "allow",
+                msg=f"{path} must stay readable",
+            )
+
+    def test_capability_denials_preserved(self):
+        rules = _parse_agent_permission_block()
+        for key in (
+            "bash",
+            "task",
+            "skill",
+            "lsp",
+            "question",
+            "todowrite",
+            "external_directory",
+        ):
+            self.assertEqual(rules.get(key), "deny", msg=f"{key} must stay denied")
+        for key in ("glob", "grep", "list", "webfetch", "websearch"):
+            self.assertEqual(rules.get(key), "allow", msg=f"{key} must stay allowed")
+
+    def test_canonical_context_records_muse_spark_and_issue111(self):
+        text = (ROOT / "NULLONE_PROJECT_CONTEXT.md").read_text(encoding="utf-8")
+        self.assertIn("Muse Spark", text)
+        self.assertIn("muse-spark-1.3-contributor-free", text)
+        self.assertIn("#111", text)
+        self.assertIn("Sonnet", text)
 
 
 if __name__ == "__main__":

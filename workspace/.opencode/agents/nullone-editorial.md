@@ -6,10 +6,29 @@ permission:
   task: deny
   skill: deny
   lsp: deny
-  todowrite: deny
   question: deny
-  edit: allow
-  read: allow
+  todowrite: deny
+  # `**/` prefix is load-bearing: the edit tool matches absolute paths,
+  # so bare worktree-relative patterns never match and would block even
+  # the required artifact writes (proven live against 1.18.30).
+  # Outside-worktree writes stay denied via `external_directory: deny`.
+  edit:
+    "*": deny
+    "**/social/research/daily/*-editorial-board.md": allow
+    "**/social/research/daily/*-editorial-candidates.json": allow
+    "**/social/state/candidate-queue.md": allow
+    "**/social/state/topic-ledger.jsonl": allow
+  read:
+    "*": allow
+    ".env": deny
+    ".env.*": deny
+    "**/.env": deny
+    "**/.env.*": deny
+    "*.env": deny
+    "*.env.*": deny
+    "**/*.key": deny
+    "**/*.pem": deny
+    "*.env.example": allow
   glob: allow
   grep: allow
   list: allow
@@ -26,10 +45,16 @@ each invocation is a single isolated cycle.
 ALLOW:
 
 - Read workspace files needed for research and state (queue, ledgers,
-  strategy, references, prior boards).
-- Write only the required cycle artifacts: the editorial board
-  Markdown, the structured candidate handoff JSON, and the narrow
-  queue/ledger appends the current workflow requires.
+  strategy, references, prior boards). Secret-bearing files
+  (`.env`-family, keys) are denied by configuration, not by trust —
+  never attempt to open them.
+- Write ONLY these four Morning artifact/state paths:
+  - `social/research/daily/YYYY-MM-DD-editorial-board.md`
+  - `social/research/daily/YYYY-MM-DD-editorial-candidates.json`
+  - `social/state/candidate-queue.md` (append genuine candidates only)
+  - `social/state/topic-ledger.jsonl` (append only when it materially
+    improves duplicate prevention)
+  All other writes are denied by configuration.
 - Web search and fetch for research and claim verification.
 
 DENY — refuse and stop the cycle instead:
