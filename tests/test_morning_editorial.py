@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,21 @@ from nullone_editorial_runtime import (  # noqa: E402
     worst_case_occurrence_seconds,
 )
 import nullone_claude_editorial_provider as claude_editorial_provider  # noqa: E402
+import nullone_editorial_provider_factory as editorial_provider_factory  # noqa: E402
+
+
+def _default_wrapper_invoke_provider():
+    """The Morning CLI wrapper's default provider, resolved as it runs.
+
+    The wrapper no longer hard-imports the Claude transport; it asks
+    the provider factory. These tests pin `claude` explicitly so the
+    live-verified failure shapes below keep proving the fallback
+    transport's contract exactly.
+    """
+
+    with patch.dict(os.environ, {editorial_provider_factory.EDITORIAL_PROVIDER_ENV_VAR: "claude"}):
+        _, invoke = editorial_provider_factory.get_editorial_provider()
+    return invoke
 
 
 def _load_script(name: str, filename: str):
@@ -479,7 +495,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
-            runner._default_invoke_provider()
+            _default_wrapper_invoke_provider()()
 
         self.assertEqual(
             captured["kwargs"]["timeout"],
@@ -498,7 +514,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
 
         with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
             with self.assertRaises(claude_editorial_provider.ProviderExecutionTimeoutError):
-                runner._default_invoke_provider()
+                _default_wrapper_invoke_provider()()
 
     def test_cli_wrapper_actual_reachability_failure_still_unreachable(self):
         # Regression guard: a real reachability failure (non-zero exit,
@@ -511,7 +527,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
 
         with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
             with self.assertRaises(ProviderUnreachableError):
-                runner._default_invoke_provider()
+                _default_wrapper_invoke_provider()()
 
     def test_concurrent_same_occurrence_serializes_to_one_provider_call(self):
         # Two threads calling run_morning_editorial() with distinct

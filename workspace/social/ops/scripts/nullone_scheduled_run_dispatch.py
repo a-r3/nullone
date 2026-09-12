@@ -6,7 +6,9 @@ CLI (`nullone-scheduled-run.py`) and the wake-up-only CLI
 (`nullone-scheduled-wakeup.py`) invoke the exact same production wiring for:
 
     validated Morning SchedulerInvocation -> MorningWorkflow with the
-    production Claude CLI provider and OpenClaw/Telegram notifier
+    production editorial provider (OpenCode primary / Claude fallback,
+    selected by `NULLONE_EDITORIAL_PROVIDER`) and OpenClaw/Telegram
+    notifier
 
     validated Analytics SchedulerInvocation -> AnalyticsWorkflow with the
     production AnalyticsProvider factory and OpenClaw/Telegram notifier
@@ -18,7 +20,7 @@ CLI (`nullone-scheduled-run.py`) and the wake-up-only CLI
 
 Neither caller duplicates this wiring; this module knows the same and only
 the same infrastructure adapters the CLIs always had:
-`default_invoke_provider`, `build_production_analytics_provider`,
+the editorial provider factory, `build_production_analytics_provider`,
 `HaikuStoryWriter`/`numeric_scope_verifier`/`NulloneDraftBridgeConnector`/
 `TelegramReviewDeliveryAdapter`, and `OpenClawTelegramTransport`, all
 injected -- never imported by the application workflow modules themselves.
@@ -29,7 +31,10 @@ from typing import Any
 
 from nullone_analytics_provider_factory import build_production_analytics_provider
 from nullone_analytics_workflow import AnalyticsWorkflowResult, run_analytics_workflow
-from nullone_claude_editorial_provider import default_invoke_provider
+from nullone_editorial_provider_factory import (
+    UnknownEditorialProviderError,
+    get_editorial_provider,
+)
 from nullone_failure_notify import OpenClawTelegramTransport, notify_if_required
 from nullone_morning_workflow import MorningWorkflowResult, run_morning_workflow
 from nullone_story_pipeline import (
@@ -63,13 +68,40 @@ def production_notifier(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_morning_trigger(trigger: dict[str, Any]) -> MorningWorkflowResult:
-    """Validated Morning `nullone.scheduler-invocation.v1` -> production `MorningWorkflow`."""
+    """Validated Morning `nullone.scheduler-invocation.v1` -> production `MorningWorkflow`.
 
-    return run_morning_workflow(
+    The editorial transport is resolved from the provider factory, so a
+    misconfigured `NULLONE_EDITORIAL_PROVIDER` fails closed here as a
+    `FAILED` orchestration result before any workflow side effect. The
+    resolved provider name is stamped into the result context so run
+    metadata always shows which transport ran, without secrets.
+    """
+
+    try:
+        provider_name, invoke_provider = get_editorial_provider()
+    except UnknownEditorialProviderError:
+        occurrence_id = trigger.get("occurrence_id") if isinstance(trigger, dict) else None
+        return MorningWorkflowResult(
+            application_execution="FAILED",
+            domain_outcome=None,
+            run_id=None,
+            occurrence_id=occurrence_id,
+            result_file=None,
+            notification_status=None,
+            reconciliation_required=False,
+            reason_code="EDITORIAL_PROVIDER_MISCONFIGURED",
+            reason_text="Editorial provider selection is misconfigured.",
+            board_date=None,
+            context={"editorial_provider": "unknown"},
+        )
+
+    result = run_morning_workflow(
         trigger,
-        invoke_provider=default_invoke_provider,
+        invoke_provider=invoke_provider,
         notifier=production_notifier,
     )
+    result.context["editorial_provider"] = provider_name
+    return result
 
 
 def run_analytics_trigger(trigger: dict[str, Any]) -> AnalyticsWorkflowResult:

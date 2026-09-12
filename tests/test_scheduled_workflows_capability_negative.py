@@ -65,6 +65,9 @@ APPLICATION_MODULES = (
 # never-leak guarantees below).
 INFRASTRUCTURE_ADAPTER_MODULES = (
     "nullone_claude_editorial_provider.py",
+    "nullone_opencode_editorial_provider.py",
+    "nullone_editorial_provider_factory.py",
+    "nullone-morning-editorial-run.py",
     "nullone_analytics_provider_factory.py",
     "nullone_secret_provider.py",
     "nullone_openclaw_scheduler_adapter.py",
