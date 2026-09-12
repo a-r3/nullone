@@ -45,19 +45,64 @@ later):
 social/research/daily/YYYY-MM-DD-editorial-candidates.json
 
 Write it with schema `nullone.editorial-candidate-handoff.v1`
-(contract_version `1.0.0`): editorial_date, board_path, and the ordered
-candidate list with each candidate's stable candidate_id, rank (Morning's
-own accepted ordering, unique positive integers), topic, topic_cluster,
-content_type, angle, verification status, evidence_refs (non-empty),
-source_attribution, source_urls, editorial_status, and explicit
-story_eligible boolean. Set story_eligible=true only when ALL hold:
-VERIFICATION: PASS, editorial_status=READY, and the candidate is genuinely
-suitable for Story. Never mark NEW, RESEARCHING, DEFERRED, or REJECTED
-candidates Story-eligible. On a quiet news day write a valid handoff
-with an explicitly empty candidate list -- never fill quota with weak
-items. Never overwrite an already-completed handoff artifact for the same
-date with different content; if both artifacts already exist and are
+(contract_version `1.0.0`): top-level `editorial_date`, `board_path`, and
+`candidates` (the ordered candidate list).
+
+Each candidate object MUST use exactly these literal JSON keys -- no other
+spelling, no synonyms:
+
+- `candidate_id`
+- `rank` (Morning's own accepted ordering, unique positive integers)
+- `topic`
+- `topic_cluster`
+- `content_type`
+- `angle`
+- `verification`
+- `evidence_refs` (non-empty list)
+- `source_attribution`
+- `source_urls`
+- `editorial_status`
+- `story_eligible`
+
+The verification field is named `verification` -- literally that key, a
+single word, no suffix. Its value must be exactly one of: `UNVERIFIED`,
+`PARTIAL`, `PASS`, `BLOCKED`.
+
+NEVER emit a field called `verification_status` in this JSON file. That
+key does not exist in the contract and will make the whole handoff
+artifact fail validation, marking the entire Morning cycle FAILED even
+when the editorial content itself is good. (The human-readable board
+Markdown below may still use the label `VERIFICATION_STATUS:` -- that is
+a distinct, separate format from this structured JSON and is unaffected.)
+
+Set story_eligible=true only when ALL hold:
+verification == PASS, editorial_status == READY, and the candidate is
+genuinely suitable for Story. Never mark NEW, RESEARCHING, DEFERRED, or
+REJECTED candidates Story-eligible. On a quiet news day write a valid
+handoff with an explicitly empty candidate list -- never fill quota with
+weak items. Never overwrite an already-completed handoff artifact for the
+same date with different content; if both artifacts already exist and are
 complete, the cycle is already done.
+
+Minimal example of one valid candidate object (illustrative values only,
+not a template to copy literally):
+
+```json
+{
+  "candidate_id": "...",
+  "rank": 1,
+  "topic": "...",
+  "topic_cluster": "...",
+  "content_type": "NEWS",
+  "angle": "...",
+  "verification": "PASS",
+  "evidence_refs": ["..."],
+  "source_attribution": "...",
+  "source_urls": ["..."],
+  "editorial_status": "READY",
+  "story_eligible": true
+}
+```
 
 If the cycle cannot be completed in this run, return BLOCKED with the
 specific reason instead of delegating or claiming background progress.
