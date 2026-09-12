@@ -1530,6 +1530,12 @@ The checked-in `nullone-editorial` agent boundary was hardened on PR #110 before
 
 Continuity: PR #110 creates only the immediate minimal provider-neutral seam (OpenCode + Muse Spark as the current primary target, Claude retained as installed fallback). Future logical-role → provider → model routing (Morning, Draft Factory, Radar, analytics, image generation, etc. possibly on different providers/models simultaneously) belongs to issue #111 ("Generalize AI provider adapters and role-based multi-provider routing"). #111 must not block urgent OpenCode activation and is NOT implemented in PR #110.
 
+### Story writer provider migration — issue #112 (repo-level, NOT DEPLOYED)
+
+Urgent operational policy (issue #112): all active model-backed NullOne workflows move to OpenCode while Claude Code and current Anthropic Claude/Sonnet/Haiku access are unavailable. Morning already migrated under PR #110. The Story writer (`HaikuStoryWriter` → `nullone_claude.run_structured` → `claude -p --model haiku`) is the next and currently only remaining active Claude Code CLI dependency; its migration removes the last active `claude`-binary execution path while preserving Claude as installed fallback infrastructure.
+
+Repo-level implementation (NOT DEPLOYED, no live Story switch in the PR): `nullone_opencode_story_provider.py` (`OpenCodeStoryWriter`: same shared `_writer_prompt`, JSON-only transport framing, Muse Spark, `--format json` parsing, 300s external timeout matching the previous structured default, empty-string stripping, transport errors → `BridgeError` → `WRITER_FAILED`, unparseable output → `BridgeError` like the Claude non-JSON path, wrong-shape dicts returned for the pipeline's own `WRITER_OUTPUT_INVALID` validation); `nullone_story_provider_factory.py` (`NULLONE_STORY_PROVIDER=opencode|claude`, default `claude`, unknown fails closed, no silent fallback); checked-in `nullone-story-writer` agent denying every tool (mirrors the Claude writer's empty `allowed_tools`; proven live in a disposable sandbox: exact JSON returned, filesystem write refused); dispatch resolves the writer from the factory and stamps `story_provider` in result context. Domain behavior (provenance gate, eligibility, cadence, quiet-day no-op, spec schema, verifier, no delivery capability) is unchanged — transport only. #111 remains the future role-based architecture. #37 remains OPEN.
+
 ### Confirmed scheduler/domain-status defect
 Daily Analytics on Sep 5 and Sep 6 (the two in-window scheduled occurrences) reported scheduler/runtime:
 - `status=ok`

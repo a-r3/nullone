@@ -14,14 +14,17 @@ CLI (`nullone-scheduled-run.py`) and the wake-up-only CLI
     production AnalyticsProvider factory and OpenClaw/Telegram notifier
 
     validated Story SchedulerInvocation -> Story scheduled boundary with
-    the production Haiku writer, deterministic final verifier,
-    MCP-backed DraftConnector (live path still UNPROVEN, owned by #81),
-    and OpenClaw/Telegram ReviewDelivery + notifier (#79)
+    the production Story writer (OpenCode primary / Claude fallback,
+    selected by `NULLONE_STORY_PROVIDER`), deterministic final
+    verifier, MCP-backed DraftConnector (live path still UNPROVEN,
+    owned by #81), and OpenClaw/Telegram ReviewDelivery + notifier
+    (#79)
 
 Neither caller duplicates this wiring; this module knows the same and only
 the same infrastructure adapters the CLIs always had:
-the editorial provider factory, `build_production_analytics_provider`,
-`HaikuStoryWriter`/`numeric_scope_verifier`/`NulloneDraftBridgeConnector`/
+the editorial provider factory, the Story writer factory,
+`build_production_analytics_provider`,
+`numeric_scope_verifier`/`NulloneDraftBridgeConnector`/
 `TelegramReviewDeliveryAdapter`, and `OpenClawTelegramTransport`, all
 injected -- never imported by the application workflow modules themselves.
 """
@@ -38,9 +41,12 @@ from nullone_editorial_provider_factory import (
 from nullone_failure_notify import OpenClawTelegramTransport, notify_if_required
 from nullone_morning_workflow import MorningWorkflowResult, run_morning_workflow
 from nullone_story_pipeline import (
-    HaikuStoryWriter,
     NulloneDraftBridgeConnector,
     numeric_scope_verifier,
+)
+from nullone_story_provider_factory import (
+    UnknownStoryProviderError,
+    get_story_writer,
 )
 from nullone_story_scheduled_workflow import (
     StoryScheduledResult,
@@ -125,19 +131,41 @@ def run_analytics_trigger(trigger: dict[str, Any]) -> AnalyticsWorkflowResult:
 def run_story_trigger(trigger: dict[str, Any]) -> StoryScheduledResult:
     """Validated Story `nullone.scheduler-invocation.v1` -> production Story boundary.
 
-    Wires the reviewed production dependencies: Haiku writer, deterministic
-    numeric-scope final verifier, the existing MCP-backed DraftConnector
-    (whose scheduled-session live path remains UNPROVEN and stays owned by
-    #81 -- this wiring neither proves nor replaces it), and the shared
-    Telegram ReviewDelivery adapter. Story ends at review preview; no
-    publication capability is wired anywhere on this path.
+    Wires the reviewed production dependencies: Story writer resolved
+    from the provider factory, deterministic numeric-scope final
+    verifier, the existing MCP-backed DraftConnector (whose
+    scheduled-session live path remains UNPROVEN and stays owned by
+    #81 -- this wiring neither proves nor replaces it), and the
+    shared Telegram ReviewDelivery adapter. Story ends at review
+    preview; the writer owns no delivery capability anywhere on this
+    path. A misconfigured `NULLONE_STORY_PROVIDER` fails closed here
+    as a `FAILED` orchestration result; the resolved writer name is
+    stamped into the result context.
     """
 
-    return run_story_scheduled(
+    try:
+        story_provider_name, writer = get_story_writer()
+    except UnknownStoryProviderError:
+        occurrence_id = trigger.get("occurrence_id") if isinstance(trigger, dict) else None
+        return StoryScheduledResult(
+            application_execution="FAILED",
+            domain_outcome=None,
+            run_id=None,
+            occurrence_id=occurrence_id,
+            result_file=None,
+            notification_status=None,
+            reason_code="STORY_PROVIDER_MISCONFIGURED",
+            reason_text="Story writer selection is misconfigured.",
+            context={"story_provider": "unknown"},
+        )
+
+    result = run_story_scheduled(
         trigger,
-        writer=HaikuStoryWriter(),
+        writer=writer,
         verifier=numeric_scope_verifier,
         draft_connector=NulloneDraftBridgeConnector(),
         review_delivery=TelegramReviewDeliveryAdapter(),
         notifier=production_notifier,
     )
+    result.context["story_provider"] = story_provider_name
+    return result
