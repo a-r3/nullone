@@ -1,0 +1,347 @@
+{
+  "schema": "nullone.packaging-contract.v1",
+  "contract": "docs/contracts/editorial-packaging-contract-v1.md",
+  "examples": [
+    {
+      "id": 1,
+      "description": "Breaking news item with strong real imagery, confirmed (not still developing) -- single dominant fact fits the durable single-post breaking-brief template, not a carousel.",
+      "request": {
+        "candidate": {
+          "content_type": "BREAKING",
+          "content_shape": "SINGLE_FACT",
+          "timeliness": "BREAKING",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "HIGH",
+          "distinct_beat_count": 1,
+          "depicts_real_world_subject": true,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": true,
+          "has_usable_screenshot": false,
+          "image_on_topic": true,
+          "image_quality_ok": true,
+          "data_visualization_possible": false
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "SINGLE_POST",
+        "FORMAT_REASON": "SINGLE_FACT_FITS_SINGLE_POST",
+        "VISUAL_STYLE": "REAL_PHOTO",
+        "ASSET_STRENGTH": "STRONG_OFFICIAL",
+        "REAL_PHOTO_AVAILABLE": "YES",
+        "REAL_PHOTO_REQUIRED": "YES",
+        "TEXT_DENSITY": "LOW",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 2,
+      "description": "Multi-step explainer with 5 genuinely distinct, source-grounded beats -- justifies a carousel.",
+      "request": {
+        "candidate": {
+          "content_type": "EXPLAINER",
+          "content_shape": "MULTI_STEP_EXPLAINER",
+          "timeliness": "THIS_WEEK",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "HIGH",
+          "distinct_beat_count": 5,
+          "depicts_real_world_subject": false,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": true,
+          "image_on_topic": true,
+          "image_quality_ok": true,
+          "data_visualization_possible": true
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "CAROUSEL",
+        "FORMAT_REASON": "MULTI_BEAT_EXPLAINER_JUSTIFIES_CAROUSEL",
+        "VISUAL_STYLE": "SOURCE_SCREENSHOT",
+        "ASSET_STRENGTH": "MODERATE",
+        "REAL_PHOTO_AVAILABLE": "NO",
+        "REAL_PHOTO_REQUIRED": "NO",
+        "TEXT_DENSITY": "HIGH",
+        "slide_count_recommendation": 7
+      }
+    },
+    {
+      "id": 3,
+      "description": "Weakly sourced topic (single anonymous/unconfirmed report) -- must SKIP regardless of any other signal.",
+      "request": {
+        "candidate": {
+          "content_type": "NEWS",
+          "content_shape": "SINGLE_FACT",
+          "timeliness": "TODAY",
+          "verification_status": "PASS",
+          "source_grounding": "WEAK_UNCONFIRMED",
+          "audience_value": "HIGH",
+          "distinct_beat_count": 1,
+          "depicts_real_world_subject": true,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": true,
+          "has_usable_screenshot": true,
+          "image_on_topic": true,
+          "image_quality_ok": true,
+          "data_visualization_possible": true
+        }
+      },
+      "expected": {
+        "POST_DECISION": "SKIP",
+        "FORMAT_DECISION": "SKIP",
+        "FORMAT_REASON": "WEAK_SOURCE_GROUNDING",
+        "VISUAL_STYLE": "NONE",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 4,
+      "description": "Two-model urgent price comparison -- too few items and too time-sensitive for a carousel; Story's comparison layout fits without padding.",
+      "request": {
+        "candidate": {
+          "content_type": "COMPARISON",
+          "content_shape": "COMPARISON",
+          "timeliness": "BREAKING",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "HIGH",
+          "distinct_beat_count": 2,
+          "depicts_real_world_subject": true,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": true,
+          "image_on_topic": true,
+          "image_quality_ok": true,
+          "data_visualization_possible": true
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "STORY",
+        "FORMAT_REASON": "TWO_ITEM_COMPARISON_FITS_STORY",
+        "VISUAL_STYLE": "SOURCE_SCREENSHOT",
+        "ASSET_STRENGTH": "MODERATE",
+        "REAL_PHOTO_AVAILABLE": "NO",
+        "REAL_PHOTO_REQUIRED": "YES",
+        "TEXT_DENSITY": "MEDIUM",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 5,
+      "description": "Product announcement with an official on-topic product photo -- must use the real photo, never generated illustration, even though one could technically be produced.",
+      "request": {
+        "candidate": {
+          "content_type": "NEWS",
+          "content_shape": "ANNOUNCEMENT",
+          "timeliness": "TODAY",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "MEDIUM",
+          "distinct_beat_count": 1,
+          "depicts_real_world_subject": true,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": true,
+          "has_usable_screenshot": false,
+          "image_on_topic": true,
+          "image_quality_ok": true,
+          "data_visualization_possible": false
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "SINGLE_POST",
+        "FORMAT_REASON": "SINGLE_PAYLOAD_ANNOUNCEMENT",
+        "VISUAL_STYLE": "REAL_PHOTO",
+        "ASSET_STRENGTH": "STRONG_OFFICIAL",
+        "REAL_PHOTO_AVAILABLE": "YES",
+        "REAL_PHOTO_REQUIRED": "YES",
+        "TEXT_DENSITY": "LOW",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 6,
+      "description": "Same announcement as #5, but no official photo, no screenshot, and no faithful data visualization is possible -- must SKIP rather than fall back to generic synthetic illustration.",
+      "request": {
+        "candidate": {
+          "content_type": "NEWS",
+          "content_shape": "ANNOUNCEMENT",
+          "timeliness": "TODAY",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "MEDIUM",
+          "distinct_beat_count": 1,
+          "depicts_real_world_subject": true,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": false,
+          "image_on_topic": false,
+          "image_quality_ok": false,
+          "data_visualization_possible": false
+        }
+      },
+      "expected": {
+        "POST_DECISION": "SKIP",
+        "FORMAT_DECISION": "SKIP",
+        "FORMAT_REASON": "REAL_PHOTO_REQUIRED_NO_FALLBACK",
+        "VISUAL_STYLE": "GENERATED_ILLUSTRATION_FORBIDDEN",
+        "ASSET_STRENGTH": "NONE",
+        "REAL_PHOTO_AVAILABLE": "NO",
+        "REAL_PHOTO_REQUIRED": "YES",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 7,
+      "description": "Explainer with only 2 genuinely distinct beats -- the system must NOT default to carousel merely because the content_type is EXPLAINER; a single post carries it without padding.",
+      "request": {
+        "candidate": {
+          "content_type": "EXPLAINER",
+          "content_shape": "MULTI_STEP_EXPLAINER",
+          "timeliness": "THIS_WEEK",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "MEDIUM",
+          "distinct_beat_count": 2,
+          "depicts_real_world_subject": false,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": false,
+          "image_on_topic": false,
+          "image_quality_ok": false,
+          "data_visualization_possible": true
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "SINGLE_POST",
+        "FORMAT_REASON": "INSUFFICIENT_DISTINCT_BEATS",
+        "VISUAL_STYLE": "DATA_VISUALIZATION",
+        "ASSET_STRENGTH": "NONE",
+        "REAL_PHOTO_AVAILABLE": "NO",
+        "REAL_PHOTO_REQUIRED": "NO",
+        "TEXT_DENSITY": "MEDIUM",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 8,
+      "description": "5-item weekly roundup -- enough distinct items to justify a carousel digest.",
+      "request": {
+        "candidate": {
+          "content_type": "NEWS",
+          "content_shape": "ROUNDUP",
+          "timeliness": "TODAY",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "MEDIUM",
+          "distinct_beat_count": 5,
+          "depicts_real_world_subject": false,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": false,
+          "image_on_topic": false,
+          "image_quality_ok": false,
+          "data_visualization_possible": true
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "CAROUSEL",
+        "FORMAT_REASON": "ROUNDUP_JUSTIFIES_CAROUSEL",
+        "VISUAL_STYLE": "DATA_VISUALIZATION",
+        "ASSET_STRENGTH": "NONE",
+        "REAL_PHOTO_AVAILABLE": "NO",
+        "REAL_PHOTO_REQUIRED": "NO",
+        "TEXT_DENSITY": "HIGH",
+        "slide_count_recommendation": 7
+      }
+    },
+    {
+      "id": 9,
+      "description": "Low estimated audience value, durable/evergreen filler -- SKIP even though verification passes and sourcing is strong.",
+      "request": {
+        "candidate": {
+          "content_type": "EVERGREEN",
+          "content_shape": "OPINION_ANALYSIS",
+          "timeliness": "DURABLE",
+          "verification_status": "PASS",
+          "source_grounding": "STRONG_PRIMARY",
+          "audience_value": "LOW",
+          "distinct_beat_count": 4,
+          "depicts_real_world_subject": false,
+          "still_developing": false
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": false,
+          "image_on_topic": false,
+          "image_quality_ok": false,
+          "data_visualization_possible": false
+        }
+      },
+      "expected": {
+        "POST_DECISION": "SKIP",
+        "FORMAT_DECISION": "SKIP",
+        "FORMAT_REASON": "LOW_AUDIENCE_VALUE",
+        "VISUAL_STYLE": "NONE",
+        "slide_count_recommendation": null
+      }
+    },
+    {
+      "id": 10,
+      "description": "Still-developing breaking event with no confirmed official photo yet, but an on-topic screenshot exists -- Story's ephemeral format fits better than committing an unconfirmed shape to the permanent grid.",
+      "request": {
+        "candidate": {
+          "content_type": "BREAKING",
+          "content_shape": "BREAKING_DEVELOPING",
+          "timeliness": "BREAKING",
+          "verification_status": "PASS",
+          "source_grounding": "SECONDARY_CORROBORATED",
+          "audience_value": "HIGH",
+          "distinct_beat_count": 1,
+          "depicts_real_world_subject": true,
+          "still_developing": true
+        },
+        "assets": {
+          "has_official_or_source_image": false,
+          "has_usable_screenshot": true,
+          "image_on_topic": true,
+          "image_quality_ok": true,
+          "data_visualization_possible": false
+        }
+      },
+      "expected": {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "STORY",
+        "FORMAT_REASON": "DEVELOPING_STORY_PREFERS_EPHEMERAL_FORMAT",
+        "VISUAL_STYLE": "SOURCE_SCREENSHOT",
+        "ASSET_STRENGTH": "MODERATE",
+        "REAL_PHOTO_AVAILABLE": "NO",
+        "REAL_PHOTO_REQUIRED": "YES",
+        "TEXT_DENSITY": "LOW",
+        "slide_count_recommendation": null
+      }
+    }
+  ]
+}

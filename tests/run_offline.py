@@ -16,6 +16,8 @@ COMMANDS = [
     [sys.executable, "tests/test_scheduler_invocation_contract_fixture.py"],
     [sys.executable, "tests/test_cadence_controller.py"],
     [sys.executable, "tests/test_cadence_state_adapter.py"],
+    [sys.executable, "tests/test_packaging_contract_fixture.py"],
+    [sys.executable, "tests/test_packaging_policy.py"],
     [sys.executable, "tests/test_story_pipeline.py"],
     [sys.executable, "tests/test_story_supersession.py"],
     [sys.executable, "tests/test_review_delivery.py"],
