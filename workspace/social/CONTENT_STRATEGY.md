@@ -438,3 +438,30 @@ Status: CONTRACT ONLY. It changes no runtime, automation, schedule,
 or publication behavior. Sections 7 and 10 above remain the active
 cadence guidance until V2 is separately implemented, reviewed, and
 deployed.
+
+---
+
+## 14. Editorial Packaging Contract V1 — format decision reference
+
+`docs/contracts/editorial-packaging-contract-v1.md` holds the reviewed
+deterministic packaging contract: whether a candidate should post at all,
+which format (`SINGLE_POST` / `CAROUSEL` / `STORY` / `SKIP`) it should
+use, and when a real photo or other source-grounded visual evidence is
+required instead of generic synthetic illustration. Its operative rules
+are embedded directly in `ops/prompts/draft-factory.md`'s "Format
+selection" section (production prompts cannot read files outside this
+runtime workspace, so the contract's rules are duplicated there rather
+than referenced remotely — keep both in sync if either changes).
+
+`CONTENT_SHAPE` (the contract's structural taxonomy: `SINGLE_FACT`,
+`ANNOUNCEMENT`, `MULTI_STEP_EXPLAINER`, `COMPARISON`, `ROUNDUP`,
+`BREAKING_DEVELOPING`, `OPINION_ANALYSIS`) is a separate axis from
+`content_type` above and may optionally be recorded alongside the §3
+candidate metadata fields; it is not a replacement for `content_type`.
+
+A reference pure evaluator implementing the contract exactly exists at
+`ops/scripts/nullone_packaging_policy.py`, with fixtures/tests under
+`tests/`. It is not wired into any live production workflow.
+
+Status: CONTRACT + REFERENCE EVALUATOR ONLY. It changes no runtime,
+automation, or production draft-selection behavior on its own.

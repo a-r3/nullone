@@ -407,31 +407,110 @@ Avoid duplicates by consulting:
 - publish ledger
 - existing Zernio drafts
 
-## Format selection
+## Format selection — Editorial Packaging Contract
 
-FEED
+Repository reference (engineering-only; not present in this runtime
+workspace, do not attempt to read it): the exact deterministic rule
+source is `docs/contracts/editorial-packaging-contract-v1.md`. The rules
+below are that contract's operative content, self-contained here.
+
+CAROUSEL IS NEVER THE DEFAULT. It requires an explicit, countable,
+multi-beat justification. Work through these steps in order for every
+candidate before picking a format.
+
+### Step 1 — assess CONTENT_SHAPE and count distinct beats
+
+Classify the candidate as exactly one CONTENT_SHAPE:
+`SINGLE_FACT` (one headline + one number, nothing else), `ANNOUNCEMENT`
+(one company/product/policy payload), `MULTI_STEP_EXPLAINER` (a
+mechanism with ≥2 separable beats), `COMPARISON` (≥2 genuinely
+comparable named items/metrics), `ROUNDUP` (a themed multi-item digest),
+`BREAKING_DEVELOPING` (an unfolding event whose shape may still change),
+or `OPINION_ANALYSIS` (a durable analytical take).
+
+Count `distinct_beat_count`: genuinely separable, independently
+source-grounded ideas/steps/items only. Do not count a cover slide, a
+final/CTA slide, or a headline+its-own-supporting-stat as more than one
+beat. Never inflate this count to justify a longer post.
+
+### Step 2 — real-photo requirement (hard rule)
+
+`REAL_PHOTO_REQUIRED = YES` when CONTENT_SHAPE is `ANNOUNCEMENT` or
+`BREAKING_DEVELOPING`, OR the post depicts a specific named real-world
+subject (person/product/company/event/place), OR timeliness is
+`BREAKING`.
+
+If required and no real official/source photo is available, in order:
+1. use an on-topic source screenshot if one exists;
+2. else use a faithful data visualization if the claim supports one;
+3. else **do not produce this candidate as a normal draft** — write
+   BLOCKED/SKIP and stop. Generated/synthetic illustration is never an
+   acceptable substitute for a required real photo. This is the single
+   most important rule in this section: never choose "just generate an
+   image" to paper over missing real-world grounding.
+
+### Step 3 — carousel eligibility gate
+
+CAROUSEL is allowed only if **all** of:
+- CONTENT_SHAPE is not `SINGLE_FACT` and not `BREAKING_DEVELOPING`;
+- timeliness is not `BREAKING`;
+- `distinct_beat_count >= 3`.
+
+If any of these fail, CAROUSEL is forbidden for this candidate — no
+exceptions, regardless of how good the topic is or how much content
+could technically be padded onto extra slides.
+
+### FEED / SINGLE_POST
+
+- Fits `SINGLE_FACT`, most `ANNOUNCEMENT`s, and anything that fails the
+  carousel eligibility gate above (including a `MULTI_STEP_EXPLAINER` or
+  `COMPARISON` with only 1-2 real beats — do not force those into a
+  padded carousel).
 - one primary message
 - renderer: social/tools/render_texbrif_v2.py
 - exactly 1080x1350
 
-CAROUSEL
-- only when multiple slides materially improve understanding
+### CAROUSEL
+
+- Only reachable when Step 3's gate passes.
 - renderer: social/tools/render_carousel_v2.py
 - every slide exactly 1080x1350
-- normally 5-8 slides
+- slide count = `distinct_beat_count` (max 6, trim to the strongest
+  beats rather than padding) + 2 (cover + final) — normally 5-8, never
+  more than 10
 - never article-screenshot carousels
 
-STORY
+### STORY
+
 - renderer: social/tools/render_story_v2.py
 - exactly 1080x1920
-- comparison: two genuinely comparable verified metrics
+- comparison: two genuinely comparable verified metrics (this is the
+  normal home for a 2-item comparison that fails the carousel gate)
 - big-stat: one dominant verified number
-- breaking: genuinely time-sensitive only
+- breaking: genuinely time-sensitive only; prefer STORY over a permanent
+  FEED post when the story is still developing and facts may change
+  (`still_developing = true`) — a confirmed/stable breaking single fact
+  with a strong real photo still normally belongs on FEED, not STORY
 - explainer: context/understanding is primary
 
 Story creation:
 platformSpecificData.contentType = "story"
 is_draft = true
+
+### SKIP
+
+Do not produce a draft at all (write BLOCKED/SKIP and stop) when any of:
+- `VERIFICATION: BLOCKED` (existing rule, unconditional);
+- overall source grounding for the story is weak/unconfirmed even if the
+  claims actually used pass narrow verification;
+- estimated audience value is low and the item is not a genuinely
+  still-developing breaking story;
+- Step 2's real-photo requirement is unmet with no screenshot/data-viz
+  fallback available.
+
+"No suitable READY candidate at all" is a separate, pre-existing case
+(see "Production efficiency rules" / NO_REPLY above) — it is not a
+per-candidate SKIP decision.
 
 ## Visual hierarchy
 
