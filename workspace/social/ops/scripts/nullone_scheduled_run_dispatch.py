@@ -168,4 +168,5 @@ def run_story_trigger(trigger: dict[str, Any]) -> StoryScheduledResult:
         notifier=production_notifier,
     )
     result.context["story_provider"] = story_provider_name
+    result.context["story_model"] = getattr(writer, "model", "unknown")
     return result

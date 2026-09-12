@@ -116,10 +116,14 @@ class CommandConstructionTests(unittest.TestCase):
             story_adapter.DEFAULT_STORY_MODEL,
             "opencode/muse-spark-1.3-contributor-free",
         )
-        self.assertEqual(
-            story_adapter.OpenCodeStoryWriter.model,
-            "opencode/muse-spark-1.3-contributor-free",
-        )
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(story_adapter.OPENCODE_MODEL_ENV_VAR, None)
+            self.assertEqual(
+                story_adapter.OpenCodeStoryWriter(
+                    workspace=Path(tempfile.mkdtemp())
+                ).model,
+                "opencode/muse-spark-1.3-contributor-free",
+            )
 
     def test_shared_model_override_knob_still_works(self):
         self.assertEqual(story_adapter.resolve_story_model("  "), story_adapter.DEFAULT_STORY_MODEL)
@@ -204,6 +208,46 @@ class StructuredOutputContractTests(unittest.TestCase):
             writer = story_adapter.OpenCodeStoryWriter(workspace=Path(tempfile.mkdtemp()))
             with self.assertRaises(BridgeError):
                 writer({"topic": "probe"})
+
+    def test_prose_wrapped_json_is_rejected(self):
+        inner = json.dumps({"layout": "breaking", "headline": "x"})
+
+        def events_with(text: str) -> str:
+            return (
+                '{"type":"text","part":{"type":"text","text":'
+                + json.dumps(text)
+                + "}}\n"
+            )
+
+        for stdout in (
+            events_with("Here is the JSON: " + inner),
+            events_with("```json\n" + inner + "\n```"),
+            events_with(inner + " extra commentary here"),
+            events_with(inner + "\nAll done!"),
+        ):
+            with mock.patch.object(
+                story_adapter.subprocess,
+                "run",
+                side_effect=lambda cmd, _o=stdout, **kw: subprocess.CompletedProcess(
+                    cmd, 0, stdout=_o, stderr=""
+                ),
+            ):
+                writer = story_adapter.OpenCodeStoryWriter(workspace=Path(tempfile.mkdtemp()))
+                with self.assertRaises(BridgeError, msg=f"accepted looser envelope: {stdout[:60]!r}"):
+                    writer({"topic": "probe"})
+
+    def test_exact_object_parses(self):
+        exact = json.dumps({"layout": "breaking", "headline": "x"})
+        for stdout in (exact, "  " + exact + "\n"):
+            with mock.patch.object(
+                story_adapter.subprocess,
+                "run",
+                side_effect=lambda cmd, _o=stdout, **kw: subprocess.CompletedProcess(
+                    cmd, 0, stdout=_o, stderr=""
+                ),
+            ):
+                writer = story_adapter.OpenCodeStoryWriter(workspace=Path(tempfile.mkdtemp()))
+                self.assertEqual(writer({"topic": "probe"})["layout"], "breaking")
 
 
 class FailureClassificationTests(unittest.TestCase):
@@ -294,6 +338,54 @@ class FactorySelectionTests(unittest.TestCase):
             result = dispatch.run_story_trigger({"workflow_id": "story"})
         self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
         self.assertEqual(result.context.get("story_provider"), "claude")
+
+    def test_dispatch_default_opencode_context_shows_muse_spark(self):
+        import nullone_scheduled_run_dispatch as dispatch
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(story_factory.STORY_PROVIDER_ENV_VAR, None)
+            os.environ.pop(story_adapter.OPENCODE_MODEL_ENV_VAR, None)
+            result = dispatch.run_story_trigger({"workflow_id": "story"})
+        self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
+        self.assertEqual(result.context.get("story_provider"), "claude")
+        self.assertEqual(result.context.get("story_model"), "haiku")
+
+    def test_dispatch_opencode_override_context_is_accurate(self):
+        import nullone_scheduled_run_dispatch as dispatch
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                story_factory.STORY_PROVIDER_ENV_VAR: "opencode",
+                story_adapter.OPENCODE_MODEL_ENV_VAR: "nvidia/meta/llama-3.1-8b-instruct",
+            },
+        ):
+            result = dispatch.run_story_trigger({"workflow_id": "story"})
+        self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
+        self.assertEqual(result.context.get("story_provider"), "opencode")
+        self.assertEqual(result.context.get("story_model"), "nvidia/meta/llama-3.1-8b-instruct")
+
+    def test_dispatch_opencode_default_context_is_muse_spark(self):
+        import nullone_scheduled_run_dispatch as dispatch
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(story_adapter.OPENCODE_MODEL_ENV_VAR, None)
+            with mock.patch.dict(os.environ, {story_factory.STORY_PROVIDER_ENV_VAR: "opencode"}):
+                result = dispatch.run_story_trigger({"workflow_id": "story"})
+        self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
+        self.assertEqual(result.context.get("story_provider"), "opencode")
+        self.assertEqual(
+            result.context.get("story_model"), "opencode/muse-spark-1.3-contributor-free"
+        )
+
+    def test_misconfigured_provider_claims_no_model(self):
+        import nullone_scheduled_run_dispatch as dispatch
+
+        with mock.patch.dict(os.environ, {story_factory.STORY_PROVIDER_ENV_VAR: "bogus"}):
+            result = dispatch.run_story_trigger({"workflow_id": "story"})
+        self.assertEqual(result.reason_code, "STORY_PROVIDER_MISCONFIGURED")
+        self.assertEqual(result.context.get("story_provider"), "unknown")
+        self.assertNotIn("story_model", result.context)
 
     def test_dispatch_does_not_hard_import_claude_writer(self):
         source = (SCRIPTS / "nullone_scheduled_run_dispatch.py").read_text(encoding="utf-8")

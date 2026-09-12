@@ -167,24 +167,21 @@ def _response_text(stdout: str) -> str:
 
 
 def _parse_spec(response_text: str) -> dict[str, Any]:
-    """Parse the writer spec dict, failing closed on malformed output."""
+    """Parse the writer spec dict under a strict envelope.
 
-    stripped = response_text.strip()
+    After event extraction, the model response must be exactly one
+    JSON object: no prose prefix/suffix, no fences, no commentary.
+    Anything else fails closed, matching the strictness of the
+    previous schema-enforced Claude path (whose validator never saw
+    prose-wrapped output either).
+    """
+
     try:
-        parsed = json.loads(stripped)
-    except ValueError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start < 0 or end <= start:
-            raise BridgeError(
-                "OpenCode Story writer returned non-JSON output"
-            )
-        try:
-            parsed = json.loads(stripped[start : end + 1])
-        except ValueError as e:
-            raise BridgeError(
-                "OpenCode Story writer returned non-JSON output"
-            ) from e
+        parsed = json.loads(response_text.strip())
+    except ValueError as e:
+        raise BridgeError(
+            "OpenCode Story writer returned non-JSON output"
+        ) from e
     if not isinstance(parsed, dict):
         raise BridgeError(
             "OpenCode Story writer JSON output is not an object"
@@ -198,23 +195,28 @@ class OpenCodeStoryWriter:
     Implements the `StoryWriter` protocol
     (`(editorial_context) -> spec dict`); the pipeline validates,
     verifies, and persists -- this adapter only produces the raw spec.
-    """
 
-    model = DEFAULT_STORY_MODEL
+    The resolved non-secret model identifier is exposed as `.model`
+    (resolved once at construction, used for both the `--model` flag
+    and run metadata) so callers never duplicate resolution logic.
+    """
 
     def __init__(
         self,
         *,
         workspace: Path | str | None = None,
         timeout: float | int = STORY_WRITER_TIMEOUT_SECONDS,
+        model: str | None = None,
     ) -> None:
         self._workspace = Path(workspace) if workspace is not None else WORKSPACE
         self._timeout = timeout
+        self.model = model if model is not None else resolve_story_model()
 
     def build_command(self, editorial_context: dict[str, Any]) -> list[str]:
         return build_opencode_command(
             prompt=build_writer_prompt(editorial_context),
             workspace=self._workspace,
+            model=self.model,
         )
 
     def __call__(self, editorial_context: dict[str, Any]) -> dict[str, Any]:
