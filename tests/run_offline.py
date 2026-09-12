@@ -22,6 +22,7 @@ COMMANDS = [
     [sys.executable, "tests/test_story_workflow.py"],
     [sys.executable, "tests/test_story_workflow_capability_negative.py"],
     [sys.executable, "tests/test_editorial_candidate_handoff.py"],
+    [sys.executable, "tests/test_morning_handoff_prompt_contract.py"],
     [sys.executable, "tests/test_story_production_provider.py"],
     [sys.executable, "tests/test_story_scheduled_workflow.py"],
     [sys.executable, "tests/test_story_production_capability_negative.py"],
