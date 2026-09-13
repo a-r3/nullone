@@ -41,6 +41,7 @@ COMMANDS = [
     [sys.executable, "tests/test_approval_publication_instruction_safety.py"],
     [sys.executable, "tests/test_morning_editorial.py"],
     [sys.executable, "tests/test_editorial_provider_factory.py"],
+    [sys.executable, "tests/test_opencode_remaining_workflows.py"],
     [sys.executable, "tests/test_story_provider_factory.py"],
     [sys.executable, "tests/test_daily_analytics.py"],
     [sys.executable, "tests/test_failure_notify.py"],
@@ -123,6 +124,26 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_opencode_editorial_provider.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_opencode_role.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-draft-factory-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-breaking-radar-run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-weekly-strategy-run.py",
         "self-test",
     ],
     [
