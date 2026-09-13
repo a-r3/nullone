@@ -770,6 +770,327 @@ class AgentReceiptDenyTests(unittest.TestCase):
         self.assertEqual(resolve(f"{WS}/social/drafts/production/candidate-1-render-record.json"), "deny")
 
 
+class SourcePropagationTests(unittest.TestCase):
+    def _photo_setup(self, root, candidate_id="src-candidate"):
+        request = _request(
+            **{
+                "candidate.content_shape": "SINGLE_FACT",
+                "candidate.distinct_beat_count": 1,
+                "candidate.depicts_real_world_subject": True,
+                "assets.has_official_or_source_image": True,
+                "assets.image_on_topic": True,
+                "assets.image_quality_ok": True,
+            }
+        )
+        receipt = _receipt_for(request, candidate_id=candidate_id)
+        self.assertEqual(receipt["VISUAL_STYLE"], "REAL_PHOTO")
+        subdir = root / "social/drafts/production"
+        subdir.mkdir(parents=True, exist_ok=True)
+        receipt_path = subdir / f"{candidate_id}-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        photo = root / "evidence.jpg"
+        photo.write_bytes(b"real-photo-bytes")
+        asset = _asset_descriptor(
+            candidate_id=candidate_id, asset_kind="REAL_PHOTO",
+            local_path=str(photo), provenance="Official product page",
+        )
+        asset_path = root / "asset.json"
+        asset_path.write_text(json.dumps(asset), encoding="utf-8")
+        return receipt_path, asset_path, photo
+
+    def test_descriptor_source_reaches_renderer_without_freeform(self):
+        import argparse as _argparse
+
+        calls: list = []
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt_path, asset_path, photo = self._photo_setup(root)
+            out = root / "feed.png"
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out.write_text("png", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
+
+            args = _argparse.Namespace(
+                receipt=str(receipt_path), asset_file=str(asset_path), output=str(out),
+                spec=None, source=None, kicker="k", headline="h", stat=None, source_name="n",
+            )
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(dispatcher.render_command(args, root=root), 0)
+        self.assertEqual(len(calls), 1)
+        argv = calls[0]
+        self.assertIn(str(photo), argv)
+        self.assertNotIn(None, argv)
+
+    def test_freeform_source_cannot_override_descriptor(self):
+        import argparse as _argparse
+
+        calls: list = []
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt_path, asset_path, photo = self._photo_setup(root)
+            rogue = root / "rogue.jpg"
+            rogue.write_bytes(b"rogue")
+            out = root / "feed.png"
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out.write_text("png", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
+
+            args = _argparse.Namespace(
+                receipt=str(receipt_path), asset_file=str(asset_path), output=str(out),
+                spec=None, source=str(rogue), kicker="k", headline="h", stat=None, source_name="n",
+            )
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(dispatcher.render_command(args, root=root), 0)
+        sent_source = calls[0][calls[0].index("--source") + 1]
+        self.assertEqual(sent_source, str(photo))
+        self.assertNotEqual(sent_source, str(rogue))
+
+
+class DataVisualizationBoundTests(unittest.TestCase):
+    def _viz_receipt(self, root, candidate_id="viz-candidate"):
+        request = _request(
+            **{
+                "candidate.content_shape": "ANNOUNCEMENT",
+                "candidate.distinct_beat_count": 1,
+                "assets.data_visualization_possible": True,
+            }
+        )
+        receipt = _receipt_for(request, candidate_id=candidate_id)
+        self.assertEqual(receipt["VISUAL_STYLE"], "DATA_VISUALIZATION")
+        return receipt
+
+    def test_dataviz_without_local_path_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = self._viz_receipt(root)
+            descriptor = _asset_descriptor(
+                candidate_id="viz-candidate", asset_kind="DATA_VISUALIZATION",
+                provenance="Verified dataset",
+            )
+            with self.assertRaises(BridgeError):
+                receipt_mod.validate_asset_descriptor(descriptor, receipt, root=root)
+
+    def test_dataviz_outside_workspace_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = self._viz_receipt(root)
+            descriptor = _asset_descriptor(
+                candidate_id="viz-candidate", asset_kind="DATA_VISUALIZATION",
+                local_path="/etc/hostname", provenance="Verified dataset",
+            )
+            with self.assertRaises(BridgeError):
+                receipt_mod.validate_asset_descriptor(descriptor, receipt, root=root)
+
+    def test_dataviz_wrong_hash_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = self._viz_receipt(root)
+            data = root / "data.json"
+            data.write_text('{"n": 1}', encoding="utf-8")
+            descriptor = _asset_descriptor(
+                candidate_id="viz-candidate", asset_kind="DATA_VISUALIZATION",
+                local_path=str(data), provenance="Verified dataset", sha256="0" * 64,
+            )
+            with self.assertRaises(BridgeError) as ctx:
+                receipt_mod.validate_asset_descriptor(descriptor, receipt, root=root)
+            self.assertIn("sha256", str(ctx.exception))
+
+    def test_dataviz_valid_artifact_accepted_with_computed_hash(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = self._viz_receipt(root)
+            data = root / "data.json"
+            data.write_text('{"n": 1}', encoding="utf-8")
+            descriptor = _asset_descriptor(
+                candidate_id="viz-candidate", asset_kind="DATA_VISUALIZATION",
+                local_path=str(data), provenance="Verified dataset",
+            )
+            validated = receipt_mod.validate_asset_descriptor(descriptor, receipt, root=root)
+            import hashlib as _hashlib
+
+            self.assertEqual(validated["sha256"], _hashlib.sha256(b'{"n": 1}').hexdigest())
+            self.assertEqual(validated["asset_kind"], "DATA_VISUALIZATION")
+
+
+class CanonicalRenderRecordTests(unittest.TestCase):
+    def test_alternate_render_record_filename_rejected(self):
+        import argparse as _argparse
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            record = receipt_mod.build_render_record(
+                candidate_id="probe-candidate", receipt_hash="h", format_decision="SINGLE_POST",
+                asset_kind="NONE", outputs=[{"path": "x.png", "sha256": "y"}],
+            )
+            alt = root / "alt-record.json"
+            alt.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaises(BridgeError):
+                receipt_mod.require_canonical_render_record(alt, "probe-candidate", root=root)
+
+    def test_wrong_candidate_canonical_record_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            subdir = root / "social/drafts/production"
+            subdir.mkdir(parents=True, exist_ok=True)
+            other = subdir / "other-candidate-render-record.json"
+            other.write_text("{}", encoding="utf-8")
+            with self.assertRaises(BridgeError):
+                receipt_mod.require_canonical_render_record(other, "probe-candidate", root=root)
+
+
+class ManifestIntegrityTests(unittest.TestCase):
+    def test_mutated_bytes_blocked(self):
+        manifest = _load_hyphenated("nullone_manifest_cli2", "nullone-manifest.py")
+        from PIL import Image
+
+        tag = uuid.uuid4().hex
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        image = DRAFTS_PROD / f"test-{tag}.png"
+        out = DRAFTS_PROD / f"test-{tag}-manifest.json"
+        DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
+        for p in (caption, image, out):
+            self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
+        caption.write_text("Probe caption.", encoding="utf-8")
+        Image.new("RGB", (1080, 1350), (14, 14, 15)).save(image)
+        receipt = _receipt_for(_request())
+        receipt_path = DRAFTS_PROD / "probe-candidate-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: receipt_path.unlink(missing_ok=True))
+        record = receipt_mod.build_render_record(
+            candidate_id="probe-candidate", receipt_hash=receipt["receipt_hash"],
+            format_decision="SINGLE_POST", asset_kind="NONE",
+            outputs=[{"path": f"social/drafts/production/{image.name}", "sha256": "0" * 64}],
+        )
+        record_path = DRAFTS_PROD / "probe-candidate-render-record.json"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        self.addCleanup(lambda: record_path.unlink(missing_ok=True))
+        args = argparse.Namespace(
+            candidate_id="probe-candidate", topic="Probe", topic_cluster="probe",
+            content_type="NEWS", format="FEED",
+            caption_file=f"social/drafts/production/{caption.name}",
+            media=[f"social/drafts/production/{image.name}"],
+            manifest_id=None, output=f"social/drafts/production/{out.name}", force=False,
+            packaging_receipt=str(receipt_path), render_record=str(record_path),
+        )
+        # Same path, mutated bytes (valid PNG, different pixels) -> blocked.
+        Image.new("RGB", (1080, 1350), (200, 10, 10)).save(image)
+        with self.assertRaises(BridgeError) as ctx:
+            manifest.build(args)
+        self.assertIn("INTEGRITY", str(ctx.exception))
+
+    def test_carousel_one_slide_mutation_blocks_manifest(self):
+        manifest = _load_hyphenated("nullone_manifest_cli3", "nullone-manifest.py")
+        from PIL import Image
+
+        tag = uuid.uuid4().hex
+        slides = []
+        for i in range(6):
+            slide = DRAFTS_PROD / f"test-{tag}-s{i:02d}.png"
+            Image.new("RGB", (1080, 1350), (14, 14, 15)).save(slide)
+            self.addCleanup(lambda p=slide: p.unlink(missing_ok=True))
+            slides.append(f"social/drafts/production/{slide.name}")
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        caption.write_text("Probe caption.", encoding="utf-8")
+        self.addCleanup(lambda: caption.unlink(missing_ok=True))
+        out = DRAFTS_PROD / f"test-{tag}-manifest.json"
+        self.addCleanup(lambda: out.unlink(missing_ok=True))
+        request = _request(
+            **{
+                "candidate.content_shape": "MULTI_STEP_EXPLAINER",
+                "candidate.distinct_beat_count": 4,
+                "candidate.content_type": "EXPLAINER",
+            }
+        )
+        receipt = _receipt_for(request)
+        receipt_path = DRAFTS_PROD / "probe-candidate-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: receipt_path.unlink(missing_ok=True))
+        import hashlib as _hashlib
+
+        record = receipt_mod.build_render_record(
+            candidate_id="probe-candidate", receipt_hash=receipt["receipt_hash"],
+            format_decision="CAROUSEL", asset_kind="NONE",
+            outputs=[
+                {"path": rel, "sha256": _hashlib.sha256((DRAFTS_PROD / Path(rel).name).read_bytes()).hexdigest()}
+                for rel in slides
+            ],
+        )
+        record_path = DRAFTS_PROD / "probe-candidate-render-record.json"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        self.addCleanup(lambda: record_path.unlink(missing_ok=True))
+        # Mutate exactly one slide after the record was made.
+        Image.new("RGB", (1080, 1350), (1, 2, 3)).save(DRAFTS_PROD / Path(slides[3]).name)
+        args = argparse.Namespace(
+            candidate_id="probe-candidate", topic="Probe", topic_cluster="probe",
+            content_type="EXPLAINER", format="CAROUSEL",
+            caption_file=f"social/drafts/production/{caption.name}",
+            media=slides,
+            manifest_id=None, output=f"social/drafts/production/{out.name}", force=False,
+            packaging_receipt=str(receipt_path), render_record=str(record_path),
+        )
+        with self.assertRaises(BridgeError) as ctx:
+            manifest.build(args)
+        self.assertIn("INTEGRITY", str(ctx.exception))
+
+
+class AssetContainmentOrderTests(unittest.TestCase):
+    def test_external_asset_path_rejected_without_read(self):
+        import argparse as _argparse
+
+        reads: list = []
+        real_read_text = Path.read_text
+
+        def recording_read_text(self, *args, **kwargs):
+            if "outside" in str(self):
+                reads.append(str(self))
+            return real_read_text(self, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            subdir = root / "social/drafts/production"
+            subdir.mkdir(parents=True, exist_ok=True)
+            receipt = _receipt_for(_request())
+            receipt_path = subdir / "probe-candidate-packaging-decision.json"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            outside = Path(tempfile.mkdtemp()) / "outside-asset.json"
+            outside.write_text(json.dumps({"asset_kind": "NONE"}), encoding="utf-8")
+            args = _argparse.Namespace(
+                receipt=str(receipt_path), asset_file=str(outside), output=str(root / "o"),
+                spec=None, source=None, kicker=None, headline=None, stat=None, source_name=None,
+            )
+            with mock.patch.object(Path, "read_text", autospec=True, side_effect=recording_read_text):
+                with self.assertRaises(BridgeError):
+                    dispatcher.render_command(args, root=root)
+        self.assertEqual(reads, [])
+
+
+class AgentRenderRecordDenyTests(unittest.TestCase):
+    def test_model_cannot_write_render_record(self):
+        import fnmatch as _fnmatch
+
+        text = (ROOT / "workspace/.opencode/agents/nullone-draft-factory.md").read_text(encoding="utf-8")
+        head = text.split("---", 2)[1]
+        rules: list = []
+        for raw in head.splitlines():
+            stripped = raw.strip()
+            if stripped.startswith('"**/social/drafts/production/'):
+                pattern, action = stripped.rsplit(":", 1)
+                rules.append((pattern.strip().strip('"'), action.strip()))
+
+        def resolve(value: str):
+            result = None
+            for pattern, action in rules:
+                if _fnmatch.fnmatch(value, pattern):
+                    result = action
+            return result
+
+        self.assertEqual(resolve(f"{WS}/social/drafts/production/candidate-1-render-record.json"), "deny")
+
+
 class NoPublicationCapabilityTests(unittest.TestCase):
     NEW_FILES = (
         SCRIPTS / "nullone_packaging_receipt.py",

@@ -33,6 +33,7 @@ from nullone_packaging_receipt import (
     load_render_record,
     manifest_format_for_receipt,
     require_canonical_receipt,
+    require_canonical_render_record,
 )
 
 
@@ -63,6 +64,7 @@ def build(args: argparse.Namespace) -> int:
             f"PACKAGING_DECISION_MISMATCH: receipt allows {allowed_format}, requested {args.format}"
         )
     record = load_render_record(Path(args.render_record))
+    require_canonical_render_record(Path(args.render_record), args.candidate_id)
     if record.get("candidate_id") != args.candidate_id:
         raise BridgeError("PACKAGING_DECISION_MISMATCH: render record candidate mismatch")
     if record.get("receipt_hash") != receipt.get("receipt_hash"):
@@ -76,6 +78,12 @@ def build(args: argparse.Namespace) -> int:
         raise BridgeError(
             "PACKAGING_DECISION_MISMATCH: manifest media is not the validated render output"
         )
+    for rel, entry in zip(record_media, record.get("outputs", [])):
+        current = (WORKSPACE / rel).resolve()
+        if not current.is_file():
+            raise BridgeError("PACKAGING_RENDER_INTEGRITY_FAILED: validated render output missing")
+        if sha256_bytes(current.read_bytes()) != entry.get("sha256"):
+            raise BridgeError("PACKAGING_RENDER_INTEGRITY_FAILED: validated render output was modified")
 
     caption_path = resolve_workspace_path(args.caption_file)
 

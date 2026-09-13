@@ -75,6 +75,18 @@ def _carousel_slide_count(spec_path: Path) -> int:
     return len(slides)
 
 
+def contained_asset_text(args: argparse.Namespace, root: Path) -> str:
+    """Containment + regular-file check BEFORE reading the asset file."""
+
+    raw_path = Path(args.asset_file)
+    if raw_path.is_symlink():
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset file must not be a symlink")
+    resolved = contained_path(raw_path, root)
+    if not resolved.is_file():
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset file missing or not regular")
+    return resolved.read_text(encoding="utf-8")
+
+
 def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
     receipt = load_receipt(Path(args.receipt), root=root)
     require_canonical_receipt(Path(args.receipt), receipt["candidate_id"], root=root)
@@ -88,10 +100,9 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
     output = contained_path(Path(args.output), root)
 
     try:
-        asset_raw = json.loads(Path(args.asset_file).read_text(encoding="utf-8"))
+        asset_raw = json.loads(contained_asset_text(args, root))
     except (OSError, ValueError) as e:
         raise BridgeError("PACKAGING_INPUT_INVALID: asset file unreadable") from e
-    contained_path(Path(args.asset_file), root)
     asset = validate_asset_descriptor(asset_raw, receipt, root=root)
 
     candidate_id = receipt["candidate_id"]
@@ -108,7 +119,7 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
             [
                 sys.executable,
                 str(FEED_RENDERER),
-                "--source", args.source,
+                "--source", source,
                 "--kicker", args.kicker,
                 "--headline", args.headline,
                 "--stat", args.stat or "",

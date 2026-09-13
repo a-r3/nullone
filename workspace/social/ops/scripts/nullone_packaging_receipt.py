@@ -85,7 +85,10 @@ STYLE_TO_ASSET_KIND = {
 }
 
 # Asset kinds that must name an existing workspace-contained file.
-FILE_BACKED_ASSET_KINDS = frozenset({"REAL_PHOTO", "SOURCE_SCREENSHOT"})
+# DATA_VISUALIZATION is file-backed: the exact deterministic/local
+# visualization artifact is bound by path + hash, never a free-form
+# source string.
+FILE_BACKED_ASSET_KINDS = frozenset({"REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION"})
 
 
 def canonical_receipt_path(candidate_id: str, *, root: Path = WORKSPACE) -> Path:
@@ -113,6 +116,14 @@ def require_canonical_receipt(path: Path, candidate_id: str, *, root: Path = WOR
 
     if contained_path(Path(path), root) != canonical_receipt_path(candidate_id, root=root):
         raise BridgeError("PACKAGING_INPUT_INVALID: receipt path is not the canonical candidate receipt")
+    return contained_path(Path(path), root)
+
+
+def require_canonical_render_record(path: Path, candidate_id: str, *, root: Path = WORKSPACE) -> Path:
+    """Refuse any render-record path that is not the candidate's canonical one."""
+
+    if contained_path(Path(path), root) != canonical_render_record_path(candidate_id, root=root):
+        raise BridgeError("PACKAGING_INPUT_INVALID: render record path is not the canonical candidate record")
     return contained_path(Path(path), root)
 
 
@@ -264,16 +275,18 @@ def validate_asset_descriptor(descriptor: Any, receipt: dict[str, Any], *, root:
     if expected_kind in FILE_BACKED_ASSET_KINDS:
         if not isinstance(local_path, str) or not local_path.strip():
             raise BridgeError("PACKAGING_INPUT_INVALID: file-backed asset needs local_path")
+        if Path(local_path).is_symlink():
+            raise BridgeError("PACKAGING_INPUT_INVALID: asset file must not be a symlink")
         resolved = contained_path(Path(local_path), root)
-        if not resolved.is_file() or Path(local_path).is_symlink():
+        if not resolved.is_file():
             raise BridgeError("PACKAGING_INPUT_INVALID: asset file missing or not regular")
+        actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
         given_sha = descriptor.get("sha256")
-        if given_sha is not None:
-            actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
-            if given_sha != actual:
-                raise BridgeError("PACKAGING_ASSET_MISMATCH: asset sha256 mismatch")
+        if given_sha is not None and given_sha != actual:
+            raise BridgeError("PACKAGING_ASSET_MISMATCH: asset sha256 mismatch")
         descriptor = dict(descriptor)
         descriptor["local_path"] = str(resolved)
+        descriptor["sha256"] = actual
     else:
         if local_path is not None:
             raise BridgeError("PACKAGING_INPUT_INVALID: non-evidence asset must not name a file")
