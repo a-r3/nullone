@@ -4,9 +4,8 @@ mode: primary
 permission:
   bash:
     "*": deny
-    "python3 social/tools/render_texbrif_v2.py *": allow
-    "python3 social/tools/render_carousel_v2.py *": allow
-    "python3 social/tools/render_story_v2.py *": allow
+    "python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate *": allow
+    "python3 social/ops/scripts/nullone-packaging-render.py render *": allow
     "python3 social/ops/scripts/nullone-manifest.py build *": allow
     "python3 social/ops/scripts/nullone-draft-bridge.py execute *": allow
     "python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py deliver *": allow
@@ -62,12 +61,19 @@ ALLOW:
   `social/state/candidate-queue.md` and
   `social/state/topic-ledger.jsonl` (narrow status/safe-record
   updates). All other writes are denied by configuration.
-- shell ONLY for the exact reviewed commands above: the three V2
-  renderers, `nullone-manifest.py build`, `nullone-draft-bridge.py
-  execute`, and the deterministic review-delivery helper
+- Packaging authority: you assess raw packaging signals and write the
+  evaluator request file; the deterministic evaluator DECIDES the
+  format. You never override its receipt, never choose slides beyond
+  its count, never render or build from a SKIP/STORY receipt, and
+  never create a normal Story from this cycle (STORY means delegate).
+- shell ONLY for the exact reviewed commands above: the packaging
+  evaluator, the packaging render dispatcher, `nullone-manifest.py
+  build`, `nullone-draft-bridge.py execute`, and the deterministic
+  review-delivery helper
   (`nullone_telegram_review_delivery_adapter.py deliver
   --payload-file <payload>.json`). Nothing else may execute.
-  You never invoke `openclaw message send` yourself and never read
+  You never invoke renderers directly, never invoke
+  `openclaw message send` yourself, and never read
   `social/ops/private/telegram-owner-id` (denied by configuration).
 - Web search/fetch narrowly for primary-source re-verification of the
   selected candidate only. Production is not discovery: no broad

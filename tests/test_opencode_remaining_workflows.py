@@ -241,10 +241,14 @@ class DraftFactoryBoundaryTests(unittest.TestCase):
 
     def test_bash_allows_exactly_reviewed_commands(self):
         cases = {
-            "python3 social/tools/render_texbrif_v2.py --output x.png": "allow",
-            "python3 social/tools/render_carousel_v2.py --output x.png": "allow",
-            "python3 social/tools/render_story_v2.py --output x.png": "allow",
+            "python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate --candidate-id c --request-file r.json --receipt-out o.json": "allow",
+            "python3 social/ops/scripts/nullone-packaging-render.py render --receipt r.json --output o.png": "allow",
             "python3 social/ops/scripts/nullone-manifest.py build --candidate-id c": "allow",
+            "python3 social/ops/scripts/nullone-draft-bridge.py execute m.json": "allow",
+            "python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py deliver --payload-file p.json": "allow",
+            "python3 social/tools/render_texbrif_v2.py --output x.png": "deny",
+            "python3 social/tools/render_carousel_v2.py --output x.png": "deny",
+            "python3 social/tools/render_story_v2.py --output x.png": "deny",
             "python3 social/ops/scripts/nullone-draft-bridge.py execute m.json": "allow",
             "python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py deliver --payload-file p.json": "allow",
             "openclaw message send --account texbrif -m hi": "deny",

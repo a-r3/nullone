@@ -27,6 +27,7 @@ from nullone_bridge_common import (
     validate_media_count,
     workspace_relative,
 )
+from nullone_packaging_receipt import load_receipt, manifest_format_for_receipt
 
 
 def slug(value: str) -> str:
@@ -37,6 +38,21 @@ def slug(value: str) -> str:
 
 
 def build(args: argparse.Namespace) -> int:
+    # Packaging authority gate FIRST: no receipt, no manifest. The
+    # receipt must name this candidate and allow exactly the requested
+    # manifest format; SKIP/STORY receipts and mismatches fail closed
+    # before any caption/media work happens.
+    receipt = load_receipt(Path(args.packaging_receipt))
+    if receipt.get("candidate_id") != args.candidate_id:
+        raise BridgeError(
+            "PACKAGING_DECISION_MISMATCH: receipt candidate does not match --candidate-id"
+        )
+    allowed_format = manifest_format_for_receipt(receipt)
+    if allowed_format != args.format:
+        raise BridgeError(
+            f"PACKAGING_DECISION_MISMATCH: receipt allows {allowed_format}, requested {args.format}"
+        )
+
     caption_path = resolve_workspace_path(args.caption_file)
 
     if not caption_path.is_file():
@@ -135,6 +151,7 @@ def build(args: argparse.Namespace) -> int:
     print(f"MANIFEST_ID={manifest_id}")
     print("VERIFICATION=PASS")
     print(f"FORMAT={args.format}")
+    print(f"PACKAGING_FORMAT={receipt['FORMAT_DECISION']}")
     print(f"MEDIA_COUNT={len(media)}")
 
     return 0
@@ -311,6 +328,12 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--manifest-id")
     b.add_argument("--output")
     b.add_argument("--force", action="store_true")
+
+    b.add_argument(
+        "--packaging-receipt",
+        required=True,
+        help="Authoritative packaging decision receipt (PACKAGING_DECISION_MISMATCH blocks otherwise)",
+    )
 
     v = sub.add_parser("validate")
     v.add_argument("manifest")
