@@ -83,7 +83,14 @@ def resolve_opencode_binary(
 
     which_hit = shutil.which(OPENCODE_BINARY_BASENAME)
     if which_hit:
-        return which_hit
+        # shutil.which can return a relative path when PATH itself
+        # contains relative entries (e.g. PATH=relbin yields
+        # "relbin/opencode"). The contract promises an absolute,
+        # validated executable, so normalize against the invocation
+        # cwd and apply the same executable regular-file check.
+        normalized = Path(os.path.abspath(which_hit))
+        if _is_usable_executable(normalized):
+            return str(normalized)
 
     raise OpenCodeBinaryResolutionError(
         "OPENCODE_BINARY_NOT_FOUND: no usable opencode executable "

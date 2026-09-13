@@ -105,10 +105,61 @@ class ResolverPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "emptyhome"
             home.mkdir()
+            real = Path(td) / "bin" / "opencode"
+            real.parent.mkdir()
+            real.write_text("#!/bin/sh\n", encoding="utf-8")
+            real.chmod(0o755)
             with _clear_env():
                 os.environ.pop(OPENCODE_BINARY_ENV_VAR, None)
-                with mock.patch.object(binary_mod.shutil, "which", return_value="/usr/local/bin/opencode"):
-                    self.assertEqual(resolve_opencode_binary(home=home), "/usr/local/bin/opencode")
+                with mock.patch.object(binary_mod.shutil, "which", return_value=str(real)):
+                    self.assertEqual(resolve_opencode_binary(home=home), str(real))
+
+    def test_relative_which_result_resolves_to_validated_absolute(self):
+        # Faithful simulation (no which mock): a relative PATH entry
+        # makes real shutil.which return a relative path; the resolver
+        # must still hand back a validated ABSOLUTE executable.
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td) / "work"
+            relbin = work / "relbin"
+            relbin.mkdir(parents=True)
+            binary = relbin / "opencode"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            home = Path(td) / "emptyhome"
+            home.mkdir()
+            previous_cwd = os.getcwd()
+            os.chdir(work)
+            try:
+                with _clear_env():
+                    os.environ.pop(OPENCODE_BINARY_ENV_VAR, None)
+                    with mock.patch.dict(os.environ, {"PATH": "relbin"}):
+                        resolved = resolve_opencode_binary(home=home)
+            finally:
+                os.chdir(previous_cwd)
+            self.assertTrue(os.path.isabs(resolved))
+            self.assertEqual(resolved, str(work / "relbin/opencode"))
+
+    def test_relative_which_result_non_executable_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td) / "work"
+            relbin = work / "relbin"
+            relbin.mkdir(parents=True)
+            binary = relbin / "opencode"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(0o644)
+            home = Path(td) / "emptyhome"
+            home.mkdir()
+            previous_cwd = os.getcwd()
+            os.chdir(work)
+            try:
+                with _clear_env():
+                    os.environ.pop(OPENCODE_BINARY_ENV_VAR, None)
+                    with mock.patch.dict(os.environ, {"PATH": "relbin"}):
+                        with self.assertRaises(OpenCodeBinaryResolutionError) as ctx:
+                            resolve_opencode_binary(home=home)
+            finally:
+                os.chdir(previous_cwd)
+            self.assertIn("OPENCODE_BINARY_NOT_FOUND", str(ctx.exception))
 
     def test_nothing_resolves_fails_closed_with_typed_error(self):
         with tempfile.TemporaryDirectory() as td:
