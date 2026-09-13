@@ -66,10 +66,54 @@ RECEIPT_REQUIRED_FIELDS = (
 
 # Packaging FORMAT_DECISION -> manifest --format. STORY and SKIP have
 # no manifest mapping: they are refused, never built.
+MODEL_FACING_DIRNAME = "social/drafts/production"
+
+RECEIPT_FILENAME_SUFFIX = "-packaging-decision.json"
+RENDER_RECORD_FILENAME_SUFFIX = "-render-record.json"
+
+RENDER_RECORD_SCHEMA = "nullone.packaging-render-record.v1"
+
+ASSET_DESCRIPTOR_SCHEMA = "nullone.packaging-asset.v1"
+
+# Receipt VISUAL_STYLE -> the one asset_kind a descriptor may claim.
+STYLE_TO_ASSET_KIND = {
+    "REAL_PHOTO": "REAL_PHOTO",
+    "SOURCE_SCREENSHOT": "SOURCE_SCREENSHOT",
+    "DATA_VISUALIZATION": "DATA_VISUALIZATION",
+    "EDITORIAL_TYPOGRAPHY": "NONE",
+    "GENERATED_ILLUSTRATION_ALLOWED": "NONE",
+}
+
+# Asset kinds that must name an existing workspace-contained file.
+FILE_BACKED_ASSET_KINDS = frozenset({"REAL_PHOTO", "SOURCE_SCREENSHOT"})
+
+
+def canonical_receipt_path(candidate_id: str, *, root: Path = WORKSPACE) -> Path:
+    """The ONE authoritative receipt path for a candidate (derived, never caller-chosen)."""
+
+    check_candidate_id(candidate_id)
+    return (root / MODEL_FACING_DIRNAME / f"{candidate_id}{RECEIPT_FILENAME_SUFFIX}").resolve()
+
+
+def canonical_render_record_path(candidate_id: str, *, root: Path = WORKSPACE) -> Path:
+    check_candidate_id(candidate_id)
+    return (root / MODEL_FACING_DIRNAME / f"{candidate_id}{RENDER_RECORD_FILENAME_SUFFIX}").resolve()
+
+
+# Packaging FORMAT_DECISION -> manifest --format. STORY and SKIP have
+# no manifest mapping: they are refused, never built.
 FORMAT_TO_MANIFEST_FORMAT = {
     "SINGLE_POST": "FEED",
     "CAROUSEL": "CAROUSEL",
 }
+
+
+def require_canonical_receipt(path: Path, candidate_id: str, *, root: Path = WORKSPACE) -> Path:
+    """Refuse any receipt path that is not the candidate's canonical one."""
+
+    if contained_path(Path(path), root) != canonical_receipt_path(candidate_id, root=root):
+        raise BridgeError("PACKAGING_INPUT_INVALID: receipt path is not the canonical candidate receipt")
+    return contained_path(Path(path), root)
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -184,3 +228,97 @@ def manifest_format_for_receipt(receipt: dict[str, Any]) -> str:
     if mapped is None:
         raise BridgeError(f"PACKAGING_DECISION_MISMATCH: no manifest mapping for {decision!r}")
     return mapped
+
+
+def validate_asset_descriptor(descriptor: Any, receipt: dict[str, Any], *, root: Path = WORKSPACE) -> dict[str, Any]:
+    """Validate a model-written asset descriptor against the receipt's VISUAL_STYLE.
+
+    Returns the validated descriptor. Kind must equal the receipt's
+    implied kind exactly; file-backed kinds must name an existing
+    workspace-contained file (sha256 verified when given); provenance
+    is required wherever evidence matters; NONE-kind descriptors must
+    name no file (no smuggled evidence past typography).
+    """
+
+    if not isinstance(descriptor, dict):
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset descriptor must be an object")
+    if descriptor.get("schema") != ASSET_DESCRIPTOR_SCHEMA:
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset descriptor schema mismatch")
+    if descriptor.get("candidate_id") != receipt.get("candidate_id"):
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset descriptor candidate mismatch")
+    style = receipt.get("VISUAL_STYLE")
+    expected_kind = STYLE_TO_ASSET_KIND.get(style)
+    if expected_kind is None:
+        raise BridgeError(f"PACKAGING_INPUT_INVALID: receipt style needs no asset path: {style!r}")
+    kind = descriptor.get("asset_kind")
+    if kind != expected_kind:
+        raise BridgeError(
+            f"PACKAGING_ASSET_MISMATCH: receipt needs {expected_kind}, descriptor claims {kind!r}"
+        )
+    if receipt.get("REAL_PHOTO_REQUIRED") == "YES" and expected_kind not in FILE_BACKED_ASSET_KINDS and style != "DATA_VISUALIZATION":
+        raise BridgeError("PACKAGING_ASSET_REQUIREMENT_UNMET: required real photo has no file evidence")
+    provenance = descriptor.get("provenance")
+    if expected_kind != "NONE" and (not isinstance(provenance, str) or not provenance.strip()):
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset provenance required")
+    local_path = descriptor.get("local_path")
+    if expected_kind in FILE_BACKED_ASSET_KINDS:
+        if not isinstance(local_path, str) or not local_path.strip():
+            raise BridgeError("PACKAGING_INPUT_INVALID: file-backed asset needs local_path")
+        resolved = contained_path(Path(local_path), root)
+        if not resolved.is_file() or Path(local_path).is_symlink():
+            raise BridgeError("PACKAGING_INPUT_INVALID: asset file missing or not regular")
+        given_sha = descriptor.get("sha256")
+        if given_sha is not None:
+            actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if given_sha != actual:
+                raise BridgeError("PACKAGING_ASSET_MISMATCH: asset sha256 mismatch")
+        descriptor = dict(descriptor)
+        descriptor["local_path"] = str(resolved)
+    else:
+        if local_path is not None:
+            raise BridgeError("PACKAGING_INPUT_INVALID: non-evidence asset must not name a file")
+        local_data = descriptor.get("source_url")
+        if local_data is not None and not isinstance(local_data, str):
+            raise BridgeError("PACKAGING_INPUT_INVALID: source_url must be a string")
+    return descriptor
+
+
+def build_render_record(
+    *, candidate_id: str, receipt_hash: str, format_decision: str, asset_kind: str, outputs: list[dict[str, str]]
+) -> dict[str, Any]:
+    body = {
+        "schema": RENDER_RECORD_SCHEMA,
+        "candidate_id": candidate_id,
+        "receipt_hash": receipt_hash,
+        "format": format_decision,
+        "asset_kind": asset_kind,
+        "outputs": outputs,
+    }
+    body["record_hash"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return body
+
+
+def load_render_record(path: Path, *, root: Path = WORKSPACE) -> dict[str, Any]:
+    resolved = contained_path(Path(path), root)
+    if Path(path).is_symlink() or not resolved.is_file():
+        raise BridgeError("PACKAGING_INPUT_INVALID: render record is not a regular file")
+    try:
+        record = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise BridgeError("PACKAGING_INPUT_INVALID: render record is not valid JSON") from e
+    if not isinstance(record, dict) or record.get("schema") != RENDER_RECORD_SCHEMA:
+        raise BridgeError("PACKAGING_INPUT_INVALID: render record schema mismatch")
+    for field in ("candidate_id", "receipt_hash", "format", "asset_kind", "outputs", "record_hash"):
+        if field not in record:
+            raise BridgeError(f"PACKAGING_INPUT_INVALID: render record missing {field!r}")
+    body = {k: v for k, v in record.items() if k != "record_hash"}
+    if record.get("record_hash") != hashlib.sha256(canonical_json_bytes(body)).hexdigest():
+        raise BridgeError("PACKAGING_RECEIPT_TAMPERED: render record hash mismatch")
+    if not isinstance(record["outputs"], list) or not record["outputs"]:
+        raise BridgeError("PACKAGING_INPUT_INVALID: render record has no outputs")
+    for entry in record["outputs"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not isinstance(
+            entry.get("sha256"), str
+        ):
+            raise BridgeError("PACKAGING_INPUT_INVALID: render record output malformed")
+    return record

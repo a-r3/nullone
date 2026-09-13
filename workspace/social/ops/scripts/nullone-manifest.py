@@ -16,6 +16,7 @@ from nullone_bridge_common import (
     CANONICAL_ACCOUNT_ID,
     MANIFEST_DIR,
     SCHEMA,
+    WORKSPACE,
     BridgeError,
     atomic_write_json,
     inspect_media,
@@ -27,7 +28,12 @@ from nullone_bridge_common import (
     validate_media_count,
     workspace_relative,
 )
-from nullone_packaging_receipt import load_receipt, manifest_format_for_receipt
+from nullone_packaging_receipt import (
+    load_receipt,
+    load_render_record,
+    manifest_format_for_receipt,
+    require_canonical_receipt,
+)
 
 
 def slug(value: str) -> str:
@@ -39,10 +45,14 @@ def slug(value: str) -> str:
 
 def build(args: argparse.Namespace) -> int:
     # Packaging authority gate FIRST: no receipt, no manifest. The
-    # receipt must name this candidate and allow exactly the requested
-    # manifest format; SKIP/STORY receipts and mismatches fail closed
-    # before any caption/media work happens.
+    # receipt must be the candidate's canonical receipt and must allow
+    # exactly the requested manifest format; the render record must
+    # bind the same receipt hash and list exactly the media being
+    # manifested, so validated visual evidence cannot be swapped for
+    # arbitrary files before draft creation. SKIP/STORY receipts and
+    # mismatches fail closed before any caption/media work happens.
     receipt = load_receipt(Path(args.packaging_receipt))
+    require_canonical_receipt(Path(args.packaging_receipt), args.candidate_id)
     if receipt.get("candidate_id") != args.candidate_id:
         raise BridgeError(
             "PACKAGING_DECISION_MISMATCH: receipt candidate does not match --candidate-id"
@@ -51,6 +61,20 @@ def build(args: argparse.Namespace) -> int:
     if allowed_format != args.format:
         raise BridgeError(
             f"PACKAGING_DECISION_MISMATCH: receipt allows {allowed_format}, requested {args.format}"
+        )
+    record = load_render_record(Path(args.render_record))
+    if record.get("candidate_id") != args.candidate_id:
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: render record candidate mismatch")
+    if record.get("receipt_hash") != receipt.get("receipt_hash"):
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: render record is not bound to this receipt")
+    if record.get("format") != receipt.get("FORMAT_DECISION"):
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: render record format mismatch")
+    record_media = [entry["path"] for entry in record.get("outputs", [])]
+    requested_media = [str(resolve_workspace_path(p)) for p in args.media]
+    expected_media = [str((WORKSPACE / rel).resolve()) for rel in record_media]
+    if requested_media != expected_media:
+        raise BridgeError(
+            "PACKAGING_DECISION_MISMATCH: manifest media is not the validated render output"
         )
 
     caption_path = resolve_workspace_path(args.caption_file)
@@ -333,6 +357,12 @@ def parser() -> argparse.ArgumentParser:
         "--packaging-receipt",
         required=True,
         help="Authoritative packaging decision receipt (PACKAGING_DECISION_MISMATCH blocks otherwise)",
+    )
+
+    b.add_argument(
+        "--render-record",
+        required=True,
+        help="Render record binding validated outputs to the receipt (substitution blocked otherwise)",
     )
 
     v = sub.add_parser("validate")

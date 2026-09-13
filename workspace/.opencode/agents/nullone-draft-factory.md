@@ -17,6 +17,8 @@ permission:
   edit:
     "*": deny
     "**/social/drafts/production/*": allow
+    "**/social/drafts/production/*-packaging-decision.json": deny
+    "**/social/drafts/production/*-render-record.json": deny
     "**/social/publisher/*-draft.md": allow
     "**/social/state/candidate-queue.md": allow
     "**/social/state/topic-ledger.jsonl": allow
@@ -61,11 +63,16 @@ ALLOW:
   `social/state/candidate-queue.md` and
   `social/state/topic-ledger.jsonl` (narrow status/safe-record
   updates). All other writes are denied by configuration.
-- Packaging authority: you assess raw packaging signals and write the
-  evaluator request file; the deterministic evaluator DECIDES the
-  format. You never override its receipt, never choose slides beyond
-  its count, never render or build from a SKIP/STORY receipt, and
-  never create a normal Story from this cycle (STORY means delegate).
+- Packaging authority: you assess raw packaging signals, write the
+  evaluator request file and the asset descriptor file
+  (`*-packaging-asset.json`: kind, provenance, local evidence file
+  where the receipt requires one); the deterministic evaluator
+  DECIDES the format and writes the receipt itself — decision
+  receipts and render records are denied to your edit tool, so you
+  cannot create, alter, or replace them. You never override a
+  receipt, never choose slides beyond its count, never render or
+  build from a SKIP/STORY receipt, and never create a normal Story
+  from this cycle (STORY means delegate).
 - shell ONLY for the exact reviewed commands above: the packaging
   evaluator, the packaging render dispatcher, `nullone-manifest.py
   build`, `nullone-draft-bridge.py execute`, and the deterministic

@@ -3,13 +3,22 @@
 
     python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate \
         --candidate-id <CANDIDATE_ID> \
-        --request-file <workspace-contained request JSON> \
-        --receipt-out <workspace-contained receipt path>
+        --request-file <workspace-contained request JSON>
 
 Reads one model-assessed packaging request, validates it
 deterministically, runs the pure `nullone_packaging_policy`
-evaluator, and writes the authoritative decision receipt
-atomically. The model assesses raw signals only:
+evaluator, and writes the authoritative decision receipt to the ONE
+canonical path derived from the candidate id:
+
+    social/drafts/production/<candidate-id>-packaging-decision.json
+
+The caller chooses no receipt path: the same candidate always maps
+to the same receipt file, so no alternate valid receipt can exist
+to bypass a decision. Re-evaluating identical input is idempotent;
+a changed request for an already-receipted candidate is refused,
+never silently replaced.
+
+The model assesses raw signals only:
 
 - FORMAT_DECISION, FORMAT_REASON, VISUAL_STYLE, and
   slide_count_recommendation are evaluator OUTPUTS: a request
@@ -20,10 +29,7 @@ atomically. The model assesses raw signals only:
   both present must agree or the request is rejected. The Morning
   handoff schema itself is never altered.
 
-Receipts live under `social/drafts/production/` (the model-facing
-production directory). Re-evaluating identical input is idempotent;
-a changed request for an existing receipt is refused, never
-silently replaced. Receipts never carry secrets.
+Receipts never carry secrets.
 """
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ from typing import Any
 from nullone_bridge_common import BridgeError, WORKSPACE, atomic_write_json
 from nullone_packaging_receipt import (
     canonical_json_bytes,
+    canonical_receipt_path,
     check_candidate_id,
     contained_path,
     evaluate_request,
@@ -102,11 +109,8 @@ def evaluate_command(args: argparse.Namespace) -> int:
     candidate_id = check_candidate_id(args.candidate_id)
     request = load_validated_request(Path(args.request_file))
     receipt = evaluate_request(candidate_id, request)
-    out = contained_path(Path(args.receipt_out), WORKSPACE)
-    try:
-        out.relative_to(MODEL_FACING_ROOT.resolve())
-    except ValueError as e:
-        raise BridgeError("PACKAGING_INPUT_INVALID: receipt must live under social/drafts/production/") from e
+    out = canonical_receipt_path(candidate_id)
+    out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         try:
             existing = json.loads(out.read_text(encoding="utf-8"))
@@ -147,7 +151,6 @@ def main() -> int:
     e = sub.add_parser("evaluate")
     e.add_argument("--candidate-id", required=True)
     e.add_argument("--request-file", required=True)
-    e.add_argument("--receipt-out", required=True)
     sub.add_parser("self-test")
     args = parser.parse_args()
 

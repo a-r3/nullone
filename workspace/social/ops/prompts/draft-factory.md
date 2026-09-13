@@ -428,15 +428,22 @@ For every selected candidate, before any render or manifest work:
    below, verification mapped from the candidate's literal
    `verification` field, source grounding, audience value, asset
    availability). Write ONLY these signals — never a format decision —
-   to a request file under `social/drafts/production/`.
+   to a request file under `social/drafts/production/`. Also write an
+   asset descriptor file (`*-packaging-asset.json`) naming the exact
+   visual evidence the receipt will require: `asset_kind` one of
+   REAL_PHOTO / SOURCE_SCREENSHOT / DATA_VISUALIZATION / NONE, with
+   official/source provenance and the local evidence file where one
+   exists (typography claims NONE and names no file).
 2. Run exactly once:
    `python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate
-   --candidate-id <CANDIDATE_ID> --request-file <request>.json
-   --receipt-out social/drafts/production/<CANDIDATE_ID>-packaging-decision.json`
+   --candidate-id <CANDIDATE_ID> --request-file <request>.json`
+   The receipt path is derived deterministically
+   (`social/drafts/production/<CANDIDATE_ID>-packaging-decision.json`);
+   the same candidate can never have two authoritative receipts.
 3. Read the receipt and conform: render ONLY through
    `python3 social/ops/scripts/nullone-packaging-render.py render
-   --receipt <receipt> ...`, build the manifest ONLY with
-   `--packaging-receipt <receipt>`, create NOTHING when the receipt
+   --receipt <receipt> --asset-file <asset>.json ...`, build the manifest ONLY with
+   `--packaging-receipt <receipt> --render-record <record>`, create NOTHING when the receipt
    says SKIP, and delegate (do not produce) when it says STORY.
 
 CAROUSEL IS NEVER THE DEFAULT. It requires an explicit, countable,
@@ -815,6 +822,7 @@ This file is immutable after manifest creation.
 
    python3 social/ops/scripts/nullone-packaging-render.py render \
      --receipt <RECEIPT_PATH> \
+     --asset-file <ASSET_DESCRIPTOR_PATH> \
      --output <OUTPUT_FILE_OR_DIR> \
      [--spec <CAROUSEL_SPEC> | --source ... --kicker ... --headline ... --stat ... --source-name ...]
 
@@ -832,7 +840,8 @@ python3 social/ops/scripts/nullone-manifest.py build \
   --format "<FEED|CAROUSEL>" \
   --caption-file "<CAPTION_FILE>" \
   --media "<MEDIA_FILE>" \
-  --packaging-receipt "<RECEIPT_PATH>"
+  --packaging-receipt "<RECEIPT_PATH>" \
+  --render-record "<RENDER_RECORD_PATH>"
 
 A STORY receipt never reaches manifest build from this cycle: it means
 DELEGATE_TO_STORY_WORKFLOW (produce nothing here). A SKIP receipt

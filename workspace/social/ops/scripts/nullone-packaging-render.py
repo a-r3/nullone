@@ -2,12 +2,19 @@
 """Deterministic packaging render dispatcher (packaging runtime wiring).
 
     python3 social/ops/scripts/nullone-packaging-render.py render \
-        --receipt <decision receipt> \
+        --receipt <canonical decision receipt> \
+        --asset-file <validated asset descriptor> \
         --output <workspace-contained output file-or-dir> \
         [--spec <workspace-contained carousel spec>] \
-        [--source ... --kicker ... --headline ... --stat ... --source-name ...]
+        [--kicker ... --headline ... --stat ... --source-name ...]
 
-Renders ONLY the format the authoritative receipt decided:
+Renders ONLY the format the authoritative receipt decided, with ONLY
+the visual evidence it allows: the asset descriptor kind must equal
+the receipt's VISUAL_STYLE mapping (file-backed kinds need an
+existing workspace file with provenance; typography claims NONE).
+Feed --source comes from the validated descriptor file, never from
+free-form agent input. Every success writes a canonical render
+record binding outputs to the receipt hash for the manifest gate.
 
 - SINGLE_POST -> the V2 feed renderer with the given copy fields;
 - CAROUSEL    -> the V2 carousel renderer, but only when the spec's
@@ -28,9 +35,16 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
-from nullone_bridge_common import BridgeError, WORKSPACE
-from nullone_packaging_receipt import contained_path, load_receipt
+from nullone_bridge_common import BridgeError, WORKSPACE, atomic_write_json
+from nullone_packaging_receipt import (
+    canonical_render_record_path,
+    contained_path,
+    load_receipt,
+    require_canonical_receipt,
+    validate_asset_descriptor,
+)
 
 FEED_RENDERER = WORKSPACE / "social/tools/render_texbrif_v2.py"
 CAROUSEL_RENDERER = WORKSPACE / "social/tools/render_carousel_v2.py"
@@ -63,19 +77,33 @@ def _carousel_slide_count(spec_path: Path) -> int:
 
 def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
     receipt = load_receipt(Path(args.receipt), root=root)
+    require_canonical_receipt(Path(args.receipt), receipt["candidate_id"], root=root)
     if receipt.get("POST_DECISION") != "POST":
         raise BridgeError("PACKAGING_SKIPPED: receipt is not a POST decision")
     decision = receipt.get("FORMAT_DECISION")
-    output = contained_path(Path(args.output), root)
-
     if decision == "STORY":
         raise BridgeError("PACKAGING_STORY_DELEGATED: normal Draft Factory never produces Story")
     if decision == "SKIP":
         raise BridgeError("PACKAGING_SKIPPED: receipt forbids production")
+    output = contained_path(Path(args.output), root)
+
+    try:
+        asset_raw = json.loads(Path(args.asset_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise BridgeError("PACKAGING_INPUT_INVALID: asset file unreadable") from e
+    contained_path(Path(args.asset_file), root)
+    asset = validate_asset_descriptor(asset_raw, receipt, root=root)
+
+    candidate_id = receipt["candidate_id"]
     if decision == "SINGLE_POST":
-        missing = [f for f in ("source", "kicker", "headline", "source_name") if not getattr(args, f, None)]
+        missing = [f for f in ("kicker", "headline", "source_name") if not getattr(args, f, None)]
         if missing:
             raise BridgeError(f"PACKAGING_INPUT_INVALID: single-post render missing {missing}")
+        source = asset.get("local_path") or getattr(args, "source", None)
+        if not source:
+            raise BridgeError("PACKAGING_INPUT_INVALID: single-post render needs an image source")
+        if asset.get("local_path") is None:
+            contained_path(Path(source), root)
         _run_renderer(
             [
                 sys.executable,
@@ -90,6 +118,10 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         )
         if not output.is_file():
             raise BridgeError("PACKAGING_RENDER_FAILED: feed output missing")
+        _write_render_record(
+            candidate_id=candidate_id, receipt=receipt, format_decision=decision,
+            asset_kind=asset["asset_kind"], outputs=[output], root=root,
+        )
         print(f"RENDER_FORMAT=SINGLE_POST OUTPUT={output}")
         return 0
     if decision == "CAROUSEL":
@@ -107,9 +139,56 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         _run_renderer(
             [sys.executable, str(CAROUSEL_RENDERER), "--spec", str(spec_path), "--output-dir", str(output)]
         )
-        print(f"RENDER_FORMAT=CAROUSEL SLIDES={count} OUTPUT={output}")
+        slides = sorted(output.glob("*.png")) if output.is_dir() else []
+        if len(slides) != expected:
+            raise BridgeError(
+                f"PACKAGING_RENDER_FAILED: renderer produced {len(slides)} slides, receipt allows {expected}"
+            )
+        _write_render_record(
+            candidate_id=candidate_id, receipt=receipt, format_decision=decision,
+            asset_kind=asset["asset_kind"], outputs=slides, root=root,
+        )
+        print(f"RENDER_FORMAT=CAROUSEL SLIDES={len(slides)} OUTPUT={output}")
         return 0
     raise BridgeError(f"PACKAGING_DECISION_MISMATCH: unknown FORMAT_DECISION {decision!r}")
+
+
+def _write_render_record(*, candidate_id: str, receipt: dict[str, Any], format_decision: str,
+                         asset_kind: str, outputs: list[Path], root: Path) -> Path:
+    import hashlib
+
+    entries = []
+    for path in outputs:
+        if not path.is_file():
+            raise BridgeError("PACKAGING_RENDER_FAILED: expected render output missing")
+        entries.append(
+            {
+                "path": str(path.resolve().relative_to(root.resolve())),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    from nullone_packaging_receipt import build_render_record
+
+    record = build_render_record(
+        candidate_id=candidate_id,
+        receipt_hash=receipt["receipt_hash"],
+        format_decision=format_decision,
+        asset_kind=asset_kind,
+        outputs=entries,
+    )
+    out = canonical_render_record_path(candidate_id, root=root)
+    if out.exists():
+        try:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        if existing == record:
+            print(f"RENDER_RECORD={out} UNCHANGED")
+            return out
+        raise BridgeError("PACKAGING_RECEIPT_CONFLICT: a different render record already exists")
+    atomic_write_json(out, record)
+    print(f"RENDER_RECORD={out}")
+    return out
 
 
 def self_test() -> int:
@@ -134,11 +213,15 @@ def self_test() -> int:
                 "content_type": "NEWS",
             },
         )
-        receipt_path = root / "skip.json"
+        receipt_path = root / "social/drafts/production/probe-packaging-decision.json"
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_text(json.dumps(skip), encoding="utf-8")
+        asset_path = root / "asset.json"
+        asset_path.write_text(json.dumps({"asset_kind": "NONE"}), encoding="utf-8")
 
         class Args:
             receipt = str(receipt_path)
+            asset_file = str(asset_path)
             output = str(root / "out.png")
             spec = None
             source = kicker = headline = stat = source_name = None
@@ -160,6 +243,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     r = sub.add_parser("render")
     r.add_argument("--receipt", required=True)
+    r.add_argument("--asset-file", required=True)
     r.add_argument("--output", required=True)
     r.add_argument("--spec", default=None)
     r.add_argument("--source", default=None)
