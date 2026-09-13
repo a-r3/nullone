@@ -342,7 +342,9 @@ class ManifestGateTests(unittest.TestCase):
         tag = uuid.uuid4().hex
         caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
         image = DRAFTS_PROD / f"test-{tag}.png"
-        out = DRAFTS_PROD / f"test-{tag}-manifest.json"
+        from nullone_bridge_common import MANIFEST_DIR
+
+        out = MANIFEST_DIR / f"test-{tag}.json"
         DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
         for p in (caption, image, out):
             self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
@@ -359,17 +361,62 @@ class ManifestGateTests(unittest.TestCase):
             caption_file=str(image.parent / caption.name),
             media=[str(image)],
             output=str(out),
+            manifest_id=f"test-{tag}",
             packaging_receipt=str(receipt_path),
             render_record=str(record_path),
         )
         # caption/media must resolve inside the workspace: use relative paths.
         args.caption_file = f"social/drafts/production/{caption.name}"
         args.media = [f"social/drafts/production/{image.name}"]
-        args.output = f"social/drafts/production/{out.name}"
         self.assertEqual(manifest.build(args), 0)
         built = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(built["format"], "FEED")
         self.assertEqual(built["candidate_id"], "probe-candidate")
+        self.assertEqual(built["packaging"]["receipt_hash"], receipt["receipt_hash"])
+
+    def test_manifest_output_outside_manifests_dir_blocked(self):
+        manifest = _load_hyphenated("nullone_manifest_cli4", "nullone-manifest.py")
+        from PIL import Image
+
+        tag = uuid.uuid4().hex
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        image = DRAFTS_PROD / f"test-{tag}.png"
+        DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
+        for p in (caption, image):
+            self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
+        caption.write_text("Probe caption.", encoding="utf-8")
+        Image.new("RGB", (1080, 1350), (14, 14, 15)).save(image)
+        receipt = _receipt_for(_request())
+        receipt_path = self._write_receipt_in_workspace(receipt)
+        record_path = self._write_render_record_in_workspace(
+            receipt, [f"social/drafts/production/{image.name}"]
+        )
+        args = self._manifest_args(
+            format="FEED",
+            caption_file=f"social/drafts/production/{caption.name}",
+            media=[f"social/drafts/production/{image.name}"],
+            output=f"social/drafts/production/{tag}-bypass.json",
+            manifest_id=f"test-{tag}",
+            packaging_receipt=str(receipt_path),
+            render_record=str(record_path),
+        )
+        with self.assertRaises(BridgeError) as ctx:
+            manifest.build(args)
+        self.assertIn("manifests directory", str(ctx.exception))
+        self.assertFalse((DRAFTS_PROD / f"{tag}-bypass.json").exists())
+
+    def test_manifest_id_traversal_blocked(self):
+        manifest = _load_hyphenated("nullone_manifest_cli5", "nullone-manifest.py")
+        receipt = _receipt_for(_request())
+        receipt_path = self._write_receipt_in_workspace(receipt)
+        args = self._manifest_args(
+            manifest_id="../evil",
+            packaging_receipt=str(receipt_path),
+            render_record="unused.json",
+        )
+        with self.assertRaises(BridgeError) as ctx:
+            manifest.build(args)
+        self.assertIn("manifest_id", str(ctx.exception))
 
 
 class RenderDispatcherTests(unittest.TestCase):
@@ -493,8 +540,6 @@ class RenderDispatcherTests(unittest.TestCase):
             receipt_path = self._receipt_file(root, receipt)
             asset_path = self._asset_file(root, receipt)
             out = root / "feed.png"
-            bg = root / "bg.png"
-            bg.write_text("bg", encoding="utf-8")
 
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
@@ -508,7 +553,6 @@ class RenderDispatcherTests(unittest.TestCase):
                             receipt_path,
                             asset_file=str(asset_path),
                             output=str(out),
-                            source=str(bg),
                             kicker="k",
                             headline="h",
                             source_name="n",
@@ -519,6 +563,96 @@ class RenderDispatcherTests(unittest.TestCase):
                 )
         self.assertEqual(len(calls), 1)
         self.assertIn("render_texbrif_v2.py", calls[0][1])
+        sent_source = calls[0][calls[0].index("--source") + 1]
+        self.assertIn("nullone-neutral-bg-", sent_source)
+
+    def test_typography_freeform_source_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = _receipt_for(_request())
+            receipt_path = self._receipt_file(root, receipt)
+            asset_path = self._asset_file(root, receipt)
+            rogue = root / "rogue.jpg"
+            rogue.write_bytes(b"rogue")
+            with mock.patch.object(
+                dispatcher.subprocess, "run", side_effect=AssertionError("must not render")
+            ):
+                with self.assertRaises(BridgeError) as ctx:
+                    dispatcher.render_command(
+                        self._args(
+                            receipt_path, asset_file=str(asset_path), output=str(root / "o"),
+                            source=str(rogue), kicker="k", headline="h", source_name="n",
+                        ),
+                        root=root,
+                    )
+        self.assertIn("smuggling blocked", str(ctx.exception))
+
+    def test_generated_illustration_style_fails_closed(self):
+        calls: list = []
+        request = _request(
+            **{
+                "assets.has_usable_screenshot": True,
+                "assets.image_on_topic": False,
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = _receipt_for(request)
+            self.assertEqual(receipt["VISUAL_STYLE"], "GENERATED_ILLUSTRATION_ALLOWED")
+            receipt_path = self._receipt_file(root, receipt)
+            asset_path = self._asset_file(root, receipt)
+            with mock.patch.object(
+                dispatcher.subprocess, "run", side_effect=lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a[0], 0, "", "")
+            ):
+                with self.assertRaises(BridgeError) as ctx:
+                    dispatcher.render_command(
+                        self._args(
+                            receipt_path, asset_file=str(asset_path), output=str(root / "o"),
+                            kicker="k", headline="h", source_name="n",
+                        ),
+                        root=root,
+                    )
+        self.assertIn("PACKAGING_UNSUPPORTED_STYLE", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    def test_carousel_real_photo_fails_closed(self):
+        calls: list = []
+        request = _request(
+            **{
+                "candidate.content_shape": "MULTI_STEP_EXPLAINER",
+                "candidate.distinct_beat_count": 4,
+                "candidate.content_type": "EXPLAINER",
+                "candidate.depicts_real_world_subject": True,
+                "assets.has_official_or_source_image": True,
+                "assets.image_on_topic": True,
+                "assets.image_quality_ok": True,
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = _receipt_for(request)
+            self.assertEqual(receipt["FORMAT_DECISION"], "CAROUSEL")
+            self.assertEqual(receipt["VISUAL_STYLE"], "REAL_PHOTO")
+            receipt_path = self._receipt_file(root, receipt)
+            photo = root / "photo.jpg"
+            photo.write_bytes(b"photo")
+            asset = _asset_descriptor(
+                asset_kind="REAL_PHOTO", local_path=str(photo), provenance="Official",
+            )
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(asset), encoding="utf-8")
+            spec = root / "spec.json"
+            spec.write_text(json.dumps({"slides": [{}, {}, {}, {}, {}, {}]}), encoding="utf-8")
+            with mock.patch.object(
+                dispatcher.subprocess, "run", side_effect=lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a[0], 0, "", "")
+            ):
+                with self.assertRaises(BridgeError) as ctx:
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(root / "o")),
+                        root=root,
+                    )
+        self.assertIn("PACKAGING_UNSUPPORTED_STYLE", str(ctx.exception))
+        self.assertEqual(calls, [])
 
     def test_story_never_renders_in_factory(self):
         calls: list = []
@@ -1091,9 +1225,124 @@ class AgentRenderRecordDenyTests(unittest.TestCase):
         self.assertEqual(resolve(f"{WS}/social/drafts/production/candidate-1-render-record.json"), "deny")
 
 
+class BridgeGateTests(unittest.TestCase):
+    def _valid_factory_manifest(self, tag=None):
+
+        manifest = _load_hyphenated("nullone_manifest_cli6", "nullone-manifest.py")
+        from PIL import Image
+
+        tag = tag or uuid.uuid4().hex
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        image = DRAFTS_PROD / f"test-{tag}.png"
+        DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
+        for p in (caption, image):
+            self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
+        caption.write_text("Probe caption.", encoding="utf-8")
+        Image.new("RGB", (1080, 1350), (14, 14, 15)).save(image)
+        receipt = _receipt_for(_request())
+        receipt_path = DRAFTS_PROD / "probe-candidate-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: receipt_path.unlink(missing_ok=True))
+        record = receipt_mod.build_render_record(
+            candidate_id="probe-candidate", receipt_hash=receipt["receipt_hash"],
+            format_decision="SINGLE_POST", asset_kind="NONE",
+            outputs=[{"path": f"social/drafts/production/{image.name}",
+                      "sha256": __import__("hashlib").sha256(image.read_bytes()).hexdigest()}],
+        )
+        record_path = DRAFTS_PROD / "probe-candidate-render-record.json"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        self.addCleanup(lambda: record_path.unlink(missing_ok=True))
+        args = argparse.Namespace(
+            candidate_id="probe-candidate", topic="Probe", topic_cluster="probe",
+            content_type="NEWS", format="FEED",
+            caption_file=f"social/drafts/production/{caption.name}",
+            media=[f"social/drafts/production/{image.name}"],
+            manifest_id=f"test-{tag}", output=None, force=False,
+            packaging_receipt=str(receipt_path), render_record=str(record_path),
+        )
+        self.assertEqual(manifest.build(args), 0)
+        from nullone_bridge_common import MANIFEST_DIR
+
+        manifest_path = MANIFEST_DIR / f"test-{tag}.json"
+        self.addCleanup(lambda: manifest_path.unlink(missing_ok=True))
+        return manifest_path
+
+    def _execute_blocked(self, manifest_path):
+        import contextlib
+        import io
+
+        bridge = _load_hyphenated("nullone_draft_bridge_cli", "nullone-draft-bridge.py")
+
+        with mock.patch.object(
+            bridge, "build_production_draft_provider",
+            side_effect=AssertionError("provider must not be reached"),
+        ):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = bridge.execute(
+                    str(manifest_path.relative_to(WORKSPACE))
+                    if manifest_path.is_absolute() else str(manifest_path)
+                )
+        return code, buf.getvalue()
+
+    def test_handwritten_manifest_without_authority_blocked(self):
+        manifest_path = self._valid_factory_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del data["packaging"]
+        hand = manifest_path.with_name(manifest_path.stem + "-hand.json")
+        hand.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: hand.unlink(missing_ok=True))
+        code, out = self._execute_blocked(hand)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING_DECISION_MISMATCH", out)
+
+    def test_tampered_receipt_hash_blocked(self):
+        manifest_path = self._valid_factory_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data["packaging"]["receipt_hash"] = "0" * 64
+        tampered = manifest_path.with_name(manifest_path.stem + "-tamper.json")
+        tampered.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: tampered.unlink(missing_ok=True))
+        code, out = self._execute_blocked(tampered)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+
+    def test_substituted_media_blocked(self):
+        from PIL import Image
+
+        manifest_path = self._valid_factory_manifest()
+        tag = uuid.uuid4().hex
+        rogue = DRAFTS_PROD / f"test-{tag}-rogue.png"
+        Image.new("RGB", (1080, 1350), (99, 99, 99)).save(rogue)
+        self.addCleanup(lambda: rogue.unlink(missing_ok=True))
+        import hashlib as _hashlib
+
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data["media"] = [{
+            "local_path": f"social/drafts/production/{rogue.name}",
+            "sha256": _hashlib.sha256(rogue.read_bytes()).hexdigest(),
+            "content_type": "image/png",
+            "width": 1080,
+            "height": 1350,
+            "image_format": "PNG",
+        }]
+        swapped = manifest_path.with_name(manifest_path.stem + "-swap.json")
+        swapped.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: swapped.unlink(missing_ok=True))
+        code, out = self._execute_blocked(swapped)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+
+    def test_story_manifest_skips_packaging_gate(self):
+        bridge = _load_hyphenated("nullone_draft_bridge_cli", "nullone-draft-bridge.py")
+
+        self.assertIsNone(
+            bridge.require_packaging_authority(Path("/tmp/x.json"), {"format": "STORY"})
+        )
+
+
 class NoPublicationCapabilityTests(unittest.TestCase):
-    NEW_FILES = (
-        SCRIPTS / "nullone_packaging_receipt.py",
+    NEW_FILES = (        SCRIPTS / "nullone_packaging_receipt.py",
         SCRIPTS / "nullone-packaging-evaluator.py",
         SCRIPTS / "nullone-packaging-render.py",
     )

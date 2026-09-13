@@ -824,7 +824,13 @@ This file is immutable after manifest creation.
      --receipt <RECEIPT_PATH> \
      --asset-file <ASSET_DESCRIPTOR_PATH> \
      --output <OUTPUT_FILE_OR_DIR> \
-     [--spec <CAROUSEL_SPEC> | --source ... --kicker ... --headline ... --stat ... --source-name ...]
+     [--spec <CAROUSEL_SPEC> | --kicker ... --headline ... --stat ... --source-name ...]
+
+   The render source image always comes from the validated asset
+   descriptor (typography renders over a deterministic neutral canvas;
+   never pass --source yourself). Styles the V2 renderer cannot
+   faithfully support (generated illustration; photo evidence inside a
+   carousel) are refused deterministically — do not work around that.
 
 3. Validate dimensions locally.
 

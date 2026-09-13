@@ -45,7 +45,13 @@ def slug(value: str) -> str:
 
 
 def build(args: argparse.Namespace) -> int:
-    # Packaging authority gate FIRST: no receipt, no manifest. The
+    # Input-shape validation first (cheap, local): safe manifest id
+    # and manifests-directory containment, before any authority work.
+    manifest_id = args.manifest_id or f"{now_iso()[:10]}-{slug(args.candidate_id)}"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", manifest_id):
+        raise BridgeError("PACKAGING_INPUT_INVALID: manifest_id must be a safe slug")
+
+    # Packaging authority gate: no receipt, no manifest. The
     # receipt must be the candidate's canonical receipt and must allow
     # exactly the requested manifest format; the render record must
     # bind the same receipt hash and list exactly the media being
@@ -111,16 +117,15 @@ def build(args: argparse.Namespace) -> int:
 
     created = now_iso()
 
-    manifest_id = (
-        args.manifest_id
-        or f"{created[:10]}-{slug(args.candidate_id)}"
-    )
-
     out = (
         resolve_workspace_path(args.output)
         if args.output
         else MANIFEST_DIR / f"{manifest_id}.json"
     )
+    try:
+        out.resolve().relative_to(MANIFEST_DIR.resolve())
+    except (OSError, ValueError) as e:
+        raise BridgeError("PACKAGING_INPUT_INVALID: manifest output must stay inside the manifests directory") from e
 
     if out.exists() and not args.force:
         raise BridgeError(
@@ -147,6 +152,19 @@ def build(args: argparse.Namespace) -> int:
         },
 
         "media": media,
+
+        "packaging": {
+            "receipt_path": str(
+                Path(args.packaging_receipt).resolve().relative_to(WORKSPACE.resolve())
+            ),
+            "receipt_hash": receipt["receipt_hash"],
+            "render_record_path": str(
+                Path(args.render_record).resolve().relative_to(WORKSPACE.resolve())
+            ),
+            "record_hash": record["record_hash"],
+            "format_decision": receipt["FORMAT_DECISION"],
+            "asset_kind": record["asset_kind"],
+        },
 
         "review": {
             "create_attempts": 0,

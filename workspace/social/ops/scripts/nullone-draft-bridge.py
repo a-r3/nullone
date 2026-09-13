@@ -29,10 +29,19 @@ from nullone_bridge_common import (
     load_manifest,
     now_iso,
     resolve_workspace_path,
+    sha256_bytes,
     validate_manifest,
     workspace_relative,
 )
+import nullone_bridge_common as bridge_common
 from nullone_draft_provider_factory import build_production_draft_provider
+from nullone_packaging_receipt import (
+    load_receipt,
+    load_render_record,
+    manifest_format_for_receipt,
+    require_canonical_receipt,
+    require_canonical_render_record,
+)
 from nullone_zernio_draft_adapter import (
     DraftConnectorUnauthorizedError,
     DraftConnectorUnavailableError,
@@ -71,10 +80,73 @@ def require_not_created(m: dict) -> None:
         )
 
 
+def require_packaging_authority(manifest_path: Path, m: dict) -> None:
+    """Re-validate packaging authority immediately before draft creation.
+
+    Factory formats (FEED/CAROUSEL) must carry the embedded packaging
+    block from a deterministic manifest build AND that block must
+    still verify against the canonical on-disk receipt/record: same
+    candidate, same receipt hash, same record hash, receipt format
+    mapping to the manifest format, and manifest media exactly equal
+    to the record's validated outputs (path + current bytes hash). A
+    hand-written manifest without this block, or with any drifted
+    binding, fails closed here with zero Zernio effects. STORY
+    manifests are owned by StoryWorkflow and skip this gate.
+    """
+
+    if m.get("format") == "STORY":
+        return
+
+    packaging = m.get("packaging")
+    if not isinstance(packaging, dict):
+        raise BridgeError(
+            "PACKAGING_DECISION_MISMATCH: factory manifest lacks packaging authority"
+        )
+
+    candidate_id = m.get("candidate_id")
+    root = bridge_common.WORKSPACE
+
+    receipt_arg = root / str(packaging.get("receipt_path", ""))
+    receipt = load_receipt(receipt_arg, root=root)
+    require_canonical_receipt(receipt_arg, candidate_id, root=root)
+    if receipt.get("candidate_id") != candidate_id:
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: receipt candidate mismatch")
+    if receipt.get("receipt_hash") != packaging.get("receipt_hash"):
+        raise BridgeError("PACKAGING_RECEIPT_TAMPERED: embedded receipt hash mismatch")
+    allowed_format = manifest_format_for_receipt(receipt)
+    if allowed_format != m.get("format"):
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: receipt forbids this manifest format")
+
+    record_arg = root / str(packaging.get("render_record_path", ""))
+    record = load_render_record(record_arg, root=root)
+    require_canonical_render_record(record_arg, candidate_id, root=root)
+    if record.get("candidate_id") != candidate_id:
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: render record candidate mismatch")
+    if record.get("receipt_hash") != receipt.get("receipt_hash"):
+        raise BridgeError("PACKAGING_DECISION_MISMATCH: render record is not bound to this receipt")
+    if record.get("record_hash") != packaging.get("record_hash"):
+        raise BridgeError("PACKAGING_RECEIPT_TAMPERED: embedded render-record hash mismatch")
+
+    record_media = {entry["path"]: entry["sha256"] for entry in record.get("outputs", [])}
+    for item in m.get("media", []):
+        rel = item.get("local_path") if isinstance(item, dict) else None
+        if rel not in record_media:
+            raise BridgeError("PACKAGING_DECISION_MISMATCH: manifest media is not validated render output")
+        current = resolve_workspace_path(rel)
+        if not current.is_file() or sha256_bytes(current.read_bytes()) != record_media[rel]:
+            raise BridgeError("PACKAGING_RENDER_INTEGRITY_FAILED: manifest media was modified")
+
+
 def execute(manifest_arg: str) -> int:
     manifest_path, m = load_manifest(manifest_arg)
 
     require_not_created(m)
+
+    try:
+        require_packaging_authority(manifest_path, m)
+    except BridgeError as e:
+        print(f"BLOCKED={e}")
+        return 2
 
     # Traceability anchor: create_attempts is persisted as 1 by the
     # underlying ZernioDraftProvider before the single POST /posts.

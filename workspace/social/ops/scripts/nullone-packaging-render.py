@@ -106,15 +106,23 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
     asset = validate_asset_descriptor(asset_raw, receipt, root=root)
 
     candidate_id = receipt["candidate_id"]
+    style = receipt.get("VISUAL_STYLE")
+    if style == "GENERATED_ILLUSTRATION_ALLOWED":
+        raise BridgeError(
+            "PACKAGING_UNSUPPORTED_STYLE: no reviewed generation path exists; refusing rather than substituting arbitrary media"
+        )
     if decision == "SINGLE_POST":
         missing = [f for f in ("kicker", "headline", "source_name") if not getattr(args, f, None)]
         if missing:
             raise BridgeError(f"PACKAGING_INPUT_INVALID: single-post render missing {missing}")
-        source = asset.get("local_path") or getattr(args, "source", None)
-        if not source:
-            raise BridgeError("PACKAGING_INPUT_INVALID: single-post render needs an image source")
-        if asset.get("local_path") is None:
-            contained_path(Path(source), root)
+        if asset.get("local_path") is not None:
+            source = asset["local_path"]
+        else:
+            if getattr(args, "source", None):
+                raise BridgeError(
+                    "PACKAGING_INPUT_INVALID: typography receipt takes no image source; smuggling blocked"
+                )
+            source = _neutral_background(root)
         _run_renderer(
             [
                 sys.executable,
@@ -136,6 +144,11 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         print(f"RENDER_FORMAT=SINGLE_POST OUTPUT={output}")
         return 0
     if decision == "CAROUSEL":
+        if asset["asset_kind"] in ("REAL_PHOTO", "SOURCE_SCREENSHOT"):
+            raise BridgeError(
+                "PACKAGING_UNSUPPORTED_STYLE: the V2 carousel renderer takes no input images, "
+                "so file-backed photo evidence cannot be faithfully bound into a carousel"
+            )
         if not args.spec:
             raise BridgeError("PACKAGING_INPUT_INVALID: carousel render needs --spec")
         spec_path = contained_path(Path(args.spec), root)
@@ -162,6 +175,27 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         print(f"RENDER_FORMAT=CAROUSEL SLIDES={len(slides)} OUTPUT={output}")
         return 0
     raise BridgeError(f"PACKAGING_DECISION_MISMATCH: unknown FORMAT_DECISION {decision!r}")
+
+
+def _neutral_background(root: Path) -> str:
+    """Deterministic neutral canvas for typography receipts.
+
+    The V2 feed renderer always composites over a source image, but a
+    typography receipt claims no photo evidence -- so no agent-supplied
+    image may be used. This generates a fresh blank canvas per
+    invocation under the system temp dir (never persisted into the
+    workspace, never agent-addressable), closing the smuggling surface
+    without inventing evidentiary imagery.
+    """
+
+    import tempfile
+
+    from PIL import Image
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="nullone-neutral-bg-"))
+    canvas = tmpdir / "neutral-bg.png"
+    Image.new("RGB", (1080, 1350), (15, 15, 15)).save(canvas)
+    return str(canvas)
 
 
 def _write_render_record(*, candidate_id: str, receipt: dict[str, Any], format_decision: str,
