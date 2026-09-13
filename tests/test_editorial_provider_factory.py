@@ -166,6 +166,13 @@ class WorkflowsAreProviderNeutralTests(unittest.TestCase):
 
 
 class OpenCodeCommandConstructionTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(
+            opencode_adapter, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_argv_is_deterministic_and_exact(self):
         workspace = Path("/tmp/nullone-opencode-determinism-check")
         first = opencode_adapter.build_opencode_command(
@@ -252,6 +259,13 @@ class OpenCodeCommandConstructionTests(unittest.TestCase):
 
 
 class OpenCodeFailureMappingTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(
+            opencode_adapter, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def _invoke_with(self, effect, **kwargs):
         workspace = Path(tempfile.mkdtemp(prefix="nullone-opencode-fail-"))
         with mock.patch.object(

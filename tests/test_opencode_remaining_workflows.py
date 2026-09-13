@@ -172,6 +172,14 @@ class SharedTransportTests(unittest.TestCase):
 
 
 class RoleWrapperTests(unittest.TestCase):
+    def setUp(self):
+        for module in (draft_wrapper, radar_wrapper, weekly_wrapper):
+            patcher = mock.patch.object(
+                module, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+            )
+            self.addCleanup(patcher.stop)
+            patcher.start()
+
     def test_command_shape_per_role(self):
         for role, agent, module, timeout in WRAPPERS:
             with self.subTest(role=role):

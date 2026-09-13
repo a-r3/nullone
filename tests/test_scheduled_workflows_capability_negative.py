@@ -69,6 +69,7 @@ INFRASTRUCTURE_ADAPTER_MODULES = (
     "nullone_editorial_provider_factory.py",
     "nullone_opencode_story_provider.py",
     "nullone_story_provider_factory.py",
+    "nullone_opencode_binary.py",
     "nullone_opencode_role.py",
     "nullone-draft-factory-run.py",
     "nullone-breaking-radar-run.py",
