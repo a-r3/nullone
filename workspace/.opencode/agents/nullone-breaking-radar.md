@@ -16,6 +16,8 @@ permission:
     "**/social/ops/breaking-staging/*": allow
   read:
     "*": allow
+    "**/social/ops/private/*": deny
+    "social/ops/private/*": deny
     ".env": deny
     ".env.*": deny
     "**/.env": deny

@@ -14,6 +14,8 @@ permission:
     "**/MEMORY.md": allow
   read:
     "*": allow
+    "**/social/ops/private/*": deny
+    "social/ops/private/*": deny
     ".env": deny
     ".env.*": deny
     "**/.env": deny

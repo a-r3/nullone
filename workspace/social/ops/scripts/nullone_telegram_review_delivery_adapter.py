@@ -321,15 +321,53 @@ def self_test() -> int:
     return 0
 
 
+def deliver(payload_path: str) -> int:
+    """Deliver one validated preview payload file, then exit by status.
+
+    The ONLY model-reachable delivery edge: accepts a payload file
+    path and nothing else. The Telegram target is read privately by
+    the adapter itself (`OWNER_ID_FILE`); no caller-supplied target,
+    account, or message argv exists on this surface, so arbitrary
+    delivery destinations are structurally impossible. Invalid
+    payloads fail closed before any transport attempt; ambiguous
+    sends are never retried (adapter contract above).
+    """
+
+    try:
+        raw = Path(payload_path).read_text(encoding="utf-8")
+    except OSError:
+        print("DELIVERY_STATUS=PAYLOAD_UNREADABLE")
+        return 1
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        print("DELIVERY_STATUS=INVALID_PAYLOAD")
+        return 1
+
+    result = TelegramReviewDeliveryAdapter().send(payload)
+    status = result.get("status", "FAILED")
+    print(f"DELIVERY_STATUS={status}")
+    if status == "SENT":
+        print(f"MEDIA_MESSAGE_IDS={len(result.get('media_message_ids', []))}")
+        print(f"APPROVAL_MESSAGE_ID={result.get('approval_message_id')}")
+        return 0
+    print(f"DELIVERY_ERROR={result.get('error', status)}")
+    return 1
+
+
 def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="NullOne Telegram ReviewDelivery adapter")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("self-test")
+    deliver_parser = sub.add_parser("deliver")
+    deliver_parser.add_argument("--payload-file", required=True)
     args = parser.parse_args()
     if args.command == "self-test":
         return self_test()
+    if args.command == "deliver":
+        return deliver(args.payload_file)
     return 2
 
 

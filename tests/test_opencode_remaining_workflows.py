@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import fnmatch
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -237,7 +238,9 @@ class DraftFactoryBoundaryTests(unittest.TestCase):
             "python3 social/tools/render_story_v2.py --output x.png": "allow",
             "python3 social/ops/scripts/nullone-manifest.py build --candidate-id c": "allow",
             "python3 social/ops/scripts/nullone-draft-bridge.py execute m.json": "allow",
-            "openclaw message send --account texbrif -m hi": "allow",
+            "python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py deliver --payload-file p.json": "allow",
+            "openclaw message send --account texbrif -m hi": "deny",
+            "openclaw message send --dry-run -m hi": "deny",
             "openclaw message ban @x": "deny",
             "openclaw message delete --message-id 1": "deny",
             "openclaw message broadcast -m spam": "deny",
@@ -251,6 +254,13 @@ class DraftFactoryBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 _resolve_permission(self.RULES["bash"], command), expected, msg=command
             )
+
+    def test_owner_id_file_denied_to_draft_agent(self):
+        for path in (
+            f"{WS}/social/ops/private/telegram-owner-id",
+            f"{WS}/social/ops/private/anything.env",
+        ):
+            self.assertEqual(_resolve_permission(self.RULES["read"], path), "deny", msg=path)
 
     def test_write_scope_exact(self):
         allowed = (
@@ -387,6 +397,96 @@ class WeeklyBoundaryTests(unittest.TestCase):
         prompt = (PROMPTS / "weekly-strategy.md").read_text(encoding="utf-8")
         self.assertIn("social/analytics/reports/YYYY-WW-weekly-strategy.md", prompt)
 
+
+class PrivateRuntimeDenyTests(unittest.TestCase):
+    AGENT_FILES = (
+        AGENTS / "nullone-draft-factory.md",
+        AGENTS / "nullone-breaking-radar.md",
+        AGENTS / "nullone-weekly-strategy.md",
+    )
+
+    def test_private_runtime_denied_to_all_three_agents(self):
+        for agent_file in self.AGENT_FILES:
+            rules = _parse_agent_permission_block(agent_file)
+            for path in (
+                f"{WS}/social/ops/private/telegram-owner-id",
+                f"{WS}/social/ops/private/other-secret",
+            ):
+                self.assertEqual(
+                    _resolve_permission(rules["read"], path),
+                    "deny",
+                    msg=f"{agent_file.name}: {path} must never be readable",
+                )
+
+    def test_editorial_reads_still_available(self):
+        for agent_file in self.AGENT_FILES:
+            rules = _parse_agent_permission_block(agent_file)
+            self.assertEqual(
+                _resolve_permission(rules["read"], f"{WS}/social/ACCOUNT.md"),
+                "allow",
+                msg=f"{agent_file.name} must keep editorial reads",
+            )
+
+
+class DeterministicDeliveryHelperTests(unittest.TestCase):
+    ADAPTER = SCRIPTS / "nullone_telegram_review_delivery_adapter.py"
+
+    def test_deliver_cli_has_no_target_or_account_surface(self):
+        cp = subprocess.run(
+            [sys.executable, str(self.ADAPTER), "deliver", "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(cp.returncode, 0)
+        out = cp.stdout
+        self.assertIn("--payload-file", out)
+        for token in ("--target", "--account", "--message", "--media"):
+            self.assertNotIn(token, out)
+
+    def test_deliver_missing_file_fails_closed(self):
+        cp = subprocess.run(
+            [sys.executable, str(self.ADAPTER), "deliver", "--payload-file", "/tmp/nullone-no-such-payload-123.json"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("DELIVERY_STATUS=", cp.stdout)
+
+    def test_deliver_malformed_payload_fails_closed_without_transport(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write("{not json")
+            payload_path = fh.name
+        try:
+            cp = subprocess.run(
+                [sys.executable, str(self.ADAPTER), "deliver", "--payload-file", payload_path],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            os.unlink(payload_path)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("DELIVERY_STATUS=INVALID_PAYLOAD", cp.stdout)
+
+    def test_deliver_invalid_shape_fails_closed_without_transport(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"schema": "bogus", "text": "hi"}, fh)
+            payload_path = fh.name
+        try:
+            # Fresh interpreter: validation must reject the shape before
+            # any transport attempt, so no fake is needed.
+            cp = subprocess.run(
+                [sys.executable, str(self.ADAPTER), "deliver", "--payload-file", payload_path],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            os.unlink(payload_path)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("DELIVERY_STATUS=INVALID_PAYLOAD", cp.stdout)
 
 class NoActiveAnthropicDependencyTests(unittest.TestCase):
     def test_prompts_require_no_anthropic_model(self):

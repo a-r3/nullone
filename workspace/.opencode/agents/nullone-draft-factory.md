@@ -9,7 +9,7 @@ permission:
     "python3 social/tools/render_story_v2.py *": allow
     "python3 social/ops/scripts/nullone-manifest.py build *": allow
     "python3 social/ops/scripts/nullone-draft-bridge.py execute *": allow
-    "openclaw message send *": allow
+    "python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py deliver *": allow
   task: deny
   skill: deny
   lsp: deny
@@ -23,6 +23,8 @@ permission:
     "**/social/state/topic-ledger.jsonl": allow
   read:
     "*": allow
+    "**/social/ops/private/*": deny
+    "social/ops/private/*": deny
     ".env": deny
     ".env.*": deny
     "**/.env": deny
@@ -62,8 +64,11 @@ ALLOW:
   updates). All other writes are denied by configuration.
 - shell ONLY for the exact reviewed commands above: the three V2
   renderers, `nullone-manifest.py build`, `nullone-draft-bridge.py
-  execute`, and `openclaw message send` for the Telegram preview +
-  approval card. Nothing else may execute.
+  execute`, and the deterministic review-delivery helper
+  (`nullone_telegram_review_delivery_adapter.py deliver
+  --payload-file <payload>.json`). Nothing else may execute.
+  You never invoke `openclaw message send` yourself and never read
+  `social/ops/private/telegram-owner-id` (denied by configuration).
 - Web search/fetch narrowly for primary-source re-verification of the
   selected candidate only. Production is not discovery: no broad
   scans, no reference-account browsing.
@@ -74,10 +79,19 @@ CONSEQUENTIAL SPLIT (enforced):
 - Zernio transport belongs exclusively to the deterministic
   `nullone-draft-bridge.py` (exactly one `execute` per manifest;
   never twice; never direct Zernio calls, keys, or REST from you).
-- Telegram delivery uses `openclaw message send` to the owner only,
-  with the exact approval-card template and legacy callback values
-  from the prompt. Message content beyond that template is
-  instruction-bound, never invented.
+- Telegram delivery belongs exclusively to the deterministic
+  review-delivery helper. You write ONLY a validated preview payload
+  file (`schema` `nullone.main-preview.v1` for feed/carousel or
+  `nullone.story-preview.v1` for Story previews; exact `brand`,
+  non-empty `review_post_id`, `text`, verified `media` entries with
+  `local_path` + `sha256` + dimensions, and a `presentation` blocks
+  object with exactly the approve/reject/revise buttons bound to
+  that review_post_id), then run the helper once with
+  `--payload-file`. The helper reads the owner target privately,
+  validates media integrity, sends sequentially, and returns
+  messageId proof; ambiguous sends are never retried. Telegram
+  content beyond that validated payload is instruction-bound, never
+  invented.
 
 DENY — refuse and stop the cycle instead:
 

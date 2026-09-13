@@ -47,8 +47,11 @@ Transport note: this run executes with the workspace root as its
 working directory. Invoke helpers as
 `python3 social/ops/scripts/<name>.py ...` and
 `python3 social/tools/<name>.py ...` (workspace-relative).
-Deliver the Telegram preview and approval card with
-`openclaw message send` to the owner only, exactly as specified.
+Telegram delivery happens ONLY through
+`python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py
+deliver --payload-file <validated-payload>.json`: never invoke
+`openclaw message send` directly and never read
+`social/ops/private/telegram-owner-id` yourself.
 """
 
 
