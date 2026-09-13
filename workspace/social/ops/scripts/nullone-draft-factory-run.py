@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
+from nullone_opencode_binary import resolve_opencode_binary
 from nullone_opencode_role import (
     build_opencode_command,
     describe_cycle,
@@ -59,6 +60,7 @@ def build_command(
     *,
     workspace: Path | str | None = None,
     model: str | None = None,
+    binary: str = "opencode",
 ) -> list[str]:
     """Build the deterministic Draft Factory argv (pure, no I/O)."""
 
@@ -69,13 +71,14 @@ def build_command(
         workspace=resolved_workspace,
         agent=AGENT,
         model=model if model is not None else resolve_role_model(),
+        binary=binary,
     )
 
 
 def execute() -> int:
     model = resolve_role_model()
     print(describe_cycle(role=ROLE, agent=AGENT, model=model))
-    cmd: Sequence[str] = build_command(model=model)
+    cmd: Sequence[str] = build_command(model=model, binary=resolve_opencode_binary())
     try:
         run_opencode_cycle(
             cmd, cwd=WORKSPACE, timeout=DRAFT_FACTORY_TIMEOUT_SECONDS, role=ROLE

@@ -75,6 +75,10 @@ from pathlib import Path
 from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
+from nullone_opencode_binary import (
+    OpenCodeBinaryResolutionError,
+    resolve_opencode_binary,
+)
 from nullone_editorial_runtime import (
     PROVIDER_CALL_TIMEOUT_SECONDS,
     REACHABILITY_PATTERN,
@@ -110,17 +114,21 @@ def build_opencode_command(
     prompt: str,
     workspace: Path | str,
     model: str | None = None,
+    binary: str = "opencode",
 ) -> list[str]:
     """Build the deterministic `opencode run` argv for one editorial cycle.
 
-    Pure function (no I/O, no subprocess): the exact argv shape is
-    pinned here so offline tests can prove it byte-for-byte.
+    Pure function (no I/O, no subprocess, no resolution): the exact
+    argv shape is pinned here so offline tests can prove it
+    byte-for-byte. Production callers MUST pass
+    `binary=resolve_opencode_binary()`; the bare default exists only
+    so unit tests stay filesystem-independent.
     """
 
     resolved_model = model if model is not None else resolve_opencode_model()
     workspace_text = str(workspace)
     return [
-        "opencode",
+        binary,
         "run",
         prompt,
         "--agent",
@@ -172,6 +180,7 @@ def default_invoke_provider(
     cmd: Sequence[str] = build_opencode_command(
         prompt=resolved_prompt,
         workspace=resolved_workspace,
+        binary=resolve_opencode_binary(),
     )
 
     try:
@@ -191,7 +200,9 @@ def default_invoke_provider(
             "OpenCode invocation exceeded its execution deadline"
         ) from e
     except FileNotFoundError as e:
-        raise BridgeError("opencode binary not found") from e
+        raise OpenCodeBinaryResolutionError(
+            "OPENCODE_BINARY_NOT_FOUND: resolved opencode executable vanished at spawn"
+        ) from e
 
     if cp.returncode != 0:
         combined = f"{cp.stdout}\n{cp.stderr}"

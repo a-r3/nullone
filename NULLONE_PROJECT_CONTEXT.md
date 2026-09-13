@@ -1813,3 +1813,9 @@ publisher-disabled restore proven on fixtures with zero side effects;
 private snapshot validation requires separate explicit authorization;
 production RPO/RTO remain UNPROVEN. Issue #37 remains open; production
 stabilization state unchanged.
+
+### OpenCode scheduler binary resolution fix (repo-level, NOT DEPLOYED)
+
+Verified production facts: OpenCode migration production activation occurred (Morning + Story + Draft/Radar/Weekly automation conversions); the Zen credential issue was repaired (`opencode` entry present in the user credential store; a manual headless Muse Spark probe passed). Natural scheduled OpenCode runs then revealed a SEPARATE executable-resolution failure: the live Gateway/scheduler PATH does not contain `~/.opencode/bin` while all OpenCode adapters invoked bare `opencode`, producing instant `FileNotFoundError: [Errno 2]` before any OpenCode session existed (143–300ms failures, no sessions, no logs). Interactive probes worked only because the interactive PATH resolves the binary.
+
+Fix (repo-only, this branch): shared deterministic resolver `nullone_opencode_binary.py` (`NULLONE_OPENCODE_BINARY` explicit override, else HOME-derived `~/.opencode/bin/opencode`, else `shutil.which` compatibility fallback; fail closed with typed `OpenCodeBinaryResolutionError` / `OPENCODE_BINARY_NOT_FOUND`, secret-free). All three transports (shared role helper for Draft/Radar/Weekly, Morning adapter, Story adapter) build production argv from the resolved absolute binary; pure builders keep a bare default so unit tests stay filesystem-independent. No provider/model/prompt/agent/schedule/permission changes. Do not claim production recovered before deployment + natural proof. #37 OPEN; #111 OPEN; #112 OPEN.

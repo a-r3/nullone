@@ -73,6 +73,13 @@ def _json_events(payload: dict) -> str:
 
 
 class CommandConstructionTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(
+            story_adapter, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_argv_is_deterministic_and_exact(self):
         workspace = Path("/tmp/nullone-story-determinism-check")
         context = {"topic": "probe"}
@@ -157,6 +164,13 @@ class CommandConstructionTests(unittest.TestCase):
 
 
 class StructuredOutputContractTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(
+            story_adapter, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_shared_prompt_builder_is_reused(self):
         context = {"topic": "probe", "rank": 1}
         prompt = story_adapter.build_writer_prompt(context)
@@ -251,6 +265,13 @@ class StructuredOutputContractTests(unittest.TestCase):
 
 
 class FailureClassificationTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(
+            story_adapter, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def _writer(self):
         return story_adapter.OpenCodeStoryWriter(workspace=Path(tempfile.mkdtemp()))
 

@@ -69,6 +69,10 @@ from typing import Any, Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_runtime import REACHABILITY_PATTERN
+from nullone_opencode_binary import (
+    OpenCodeBinaryResolutionError,
+    resolve_opencode_binary,
+)
 from nullone_story_pipeline import _writer_prompt
 
 OPENCODE_STORY_AGENT_NAME = "nullone-story-writer"
@@ -115,17 +119,20 @@ def build_opencode_command(
     prompt: str,
     workspace: Path | str,
     model: str | None = None,
+    binary: str = "opencode",
 ) -> list[str]:
     """Build the deterministic `opencode run` argv for one writer call.
 
-    Pure function (no I/O, no subprocess) so offline tests can pin the
-    exact argv shape.
+    Pure function (no I/O, no subprocess, no resolution) so offline
+    tests can pin the exact argv shape. Production callers MUST pass
+    `binary=resolve_opencode_binary()`; the bare default exists only
+    so unit tests stay filesystem-independent.
     """
 
     resolved_model = model if model is not None else resolve_story_model()
     workspace_text = str(workspace)
     return [
-        "opencode",
+        binary,
         "run",
         prompt,
         "--agent",
@@ -217,6 +224,7 @@ class OpenCodeStoryWriter:
             prompt=build_writer_prompt(editorial_context),
             workspace=self._workspace,
             model=self.model,
+            binary=resolve_opencode_binary(),
         )
 
     def __call__(self, editorial_context: dict[str, Any]) -> dict[str, Any]:
@@ -224,6 +232,7 @@ class OpenCodeStoryWriter:
         cmd: Sequence[str] = build_opencode_command(
             prompt=prompt,
             workspace=self._workspace,
+            binary=resolve_opencode_binary(),
         )
 
         try:
@@ -240,7 +249,9 @@ class OpenCodeStoryWriter:
                 "OpenCode Story writer exceeded its execution deadline"
             ) from e
         except FileNotFoundError as e:
-            raise BridgeError("opencode binary not found") from e
+            raise OpenCodeBinaryResolutionError(
+                "OPENCODE_BINARY_NOT_FOUND: resolved opencode executable vanished at spawn"
+            ) from e
 
         if cp.returncode != 0:
             combined = f"{cp.stdout}\n{cp.stderr}"

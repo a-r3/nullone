@@ -29,6 +29,7 @@ from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_runtime import REACHABILITY_PATTERN
+from nullone_opencode_binary import OpenCodeBinaryResolutionError
 
 OPENCODE_MODEL_ENV_VAR = "NULLONE_OPENCODE_MODEL"
 
@@ -57,11 +58,14 @@ def build_opencode_command(
     workspace: Path | str,
     agent: str,
     model: str | None = None,
+    binary: str = "opencode",
 ) -> list[str]:
     """Build the deterministic `opencode run` argv for one role cycle.
 
-    Pure function (no I/O, no subprocess) so offline tests can pin the
-    exact argv shape per role.
+    Pure function (no I/O, no subprocess, no resolution) so offline
+    tests can pin the exact argv shape per role. Production callers
+    MUST pass `binary=resolve_opencode_binary()`; the bare default
+    exists only so unit tests stay filesystem-independent.
     """
 
     resolved_model = model if model is not None else resolve_role_model()
@@ -69,7 +73,7 @@ def build_opencode_command(
     if not prompt.strip() or not agent.strip() or not workspace_text.strip():
         raise BridgeError("OpenCode role command misconfigured: blank prompt/agent/workspace")
     return [
-        "opencode",
+        binary,
         "run",
         prompt,
         "--agent",
@@ -122,7 +126,9 @@ def run_opencode_cycle(
             f"OpenCode {role} run exceeded its execution deadline"
         ) from e
     except FileNotFoundError as e:
-        raise BridgeError("opencode binary not found") from e
+        raise OpenCodeBinaryResolutionError(
+            "OPENCODE_BINARY_NOT_FOUND: resolved opencode executable vanished at spawn"
+        ) from e
 
     if cp.returncode != 0:
         combined = f"{cp.stdout}\n{cp.stderr}"
