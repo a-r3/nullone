@@ -1341,6 +1341,311 @@ class BridgeGateTests(unittest.TestCase):
         )
 
 
+class BridgeCanonicalManifestTests(unittest.TestCase):
+    """Blocker A regressions: canonical MANIFEST_DIR + exact ordered media binding."""
+
+    def _build_feed_manifest(self, candidate_id=None, tag=None):
+        manifest = _load_hyphenated("nullone_manifest_cli_canonical", "nullone-manifest.py")
+        from PIL import Image
+
+        tag = tag or uuid.uuid4().hex
+        candidate_id = candidate_id or f"probe-{tag}"
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        image = DRAFTS_PROD / f"test-{tag}.png"
+        DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
+        for p in (caption, image):
+            self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
+        caption.write_text("Probe caption.", encoding="utf-8")
+        Image.new("RGB", (1080, 1350), (14, 14, 15)).save(image)
+        receipt = _receipt_for(_request(), candidate_id=candidate_id)
+        receipt_path = DRAFTS_PROD / f"{candidate_id}-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: receipt_path.unlink(missing_ok=True))
+        record = receipt_mod.build_render_record(
+            candidate_id=candidate_id, receipt_hash=receipt["receipt_hash"],
+            format_decision="SINGLE_POST", asset_kind="NONE",
+            outputs=[{"path": f"social/drafts/production/{image.name}",
+                      "sha256": __import__("hashlib").sha256(image.read_bytes()).hexdigest()}],
+        )
+        record_path = DRAFTS_PROD / f"{candidate_id}-render-record.json"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        self.addCleanup(lambda: record_path.unlink(missing_ok=True))
+        from nullone_bridge_common import MANIFEST_DIR
+
+        args = argparse.Namespace(
+            candidate_id=candidate_id, topic="Probe", topic_cluster="probe",
+            content_type="NEWS", format="FEED",
+            caption_file=f"social/drafts/production/{caption.name}",
+            media=[f"social/drafts/production/{image.name}"],
+            manifest_id=f"test-{tag}", output=None, force=False,
+            packaging_receipt=str(receipt_path), render_record=str(record_path),
+        )
+        self.assertEqual(manifest.build(args), 0)
+        manifest_path = MANIFEST_DIR / f"test-{tag}.json"
+        self.addCleanup(lambda: manifest_path.unlink(missing_ok=True))
+        return manifest_path
+
+    def _build_carousel_manifest(self, tag=None):
+        manifest = _load_hyphenated("nullone_manifest_cli_carousel", "nullone-manifest.py")
+        from PIL import Image
+
+        tag = tag or uuid.uuid4().hex
+        candidate_id = f"carousel-{tag}"
+        slides = []
+        for i in range(6):
+            slide = DRAFTS_PROD / f"test-{tag}-s{i:02d}.png"
+            Image.new("RGB", (1080, 1350), (14, 14, 15)).save(slide)
+            self.addCleanup(lambda p=slide: p.unlink(missing_ok=True))
+            slides.append(f"social/drafts/production/{slide.name}")
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        caption.write_text("Probe caption.", encoding="utf-8")
+        self.addCleanup(lambda: caption.unlink(missing_ok=True))
+        request = _request(
+            **{
+                "candidate.content_shape": "MULTI_STEP_EXPLAINER",
+                "candidate.distinct_beat_count": 4,
+                "candidate.content_type": "EXPLAINER",
+            }
+        )
+        receipt = _receipt_for(request, candidate_id=candidate_id)
+        self.assertEqual(receipt["FORMAT_DECISION"], "CAROUSEL")
+        receipt_path = DRAFTS_PROD / f"{candidate_id}-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: receipt_path.unlink(missing_ok=True))
+        import hashlib as _hashlib
+
+        record = receipt_mod.build_render_record(
+            candidate_id=candidate_id, receipt_hash=receipt["receipt_hash"],
+            format_decision="CAROUSEL", asset_kind="NONE",
+            outputs=[
+                {"path": rel, "sha256": _hashlib.sha256((DRAFTS_PROD / Path(rel).name).read_bytes()).hexdigest()}
+                for rel in slides
+            ],
+        )
+        record_path = DRAFTS_PROD / f"{candidate_id}-render-record.json"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        self.addCleanup(lambda: record_path.unlink(missing_ok=True))
+        from nullone_bridge_common import MANIFEST_DIR
+
+        args = argparse.Namespace(
+            candidate_id=candidate_id, topic="Probe", topic_cluster="probe",
+            content_type="EXPLAINER", format="CAROUSEL",
+            caption_file=f"social/drafts/production/{caption.name}",
+            media=list(slides),
+            manifest_id=f"test-{tag}", output=None, force=False,
+            packaging_receipt=str(receipt_path), render_record=str(record_path),
+        )
+        self.assertEqual(manifest.build(args), 0)
+        manifest_path = MANIFEST_DIR / f"test-{tag}.json"
+        self.addCleanup(lambda: manifest_path.unlink(missing_ok=True))
+        return manifest_path
+
+    def _execute_blocked(self, manifest_path):
+        import contextlib
+        import io
+
+        bridge = _load_hyphenated("nullone_draft_bridge_canonical", "nullone-draft-bridge.py")
+        calls: list = []
+
+        def _forbidden():
+            calls.append(1)
+            raise AssertionError("provider must not be reached")
+
+        with mock.patch.object(bridge, "build_production_draft_provider", side_effect=lambda: _forbidden()):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = bridge.execute(
+                    str(manifest_path.relative_to(WORKSPACE))
+                    if manifest_path.is_absolute() else str(manifest_path)
+                )
+        return code, buf.getvalue(), calls
+
+    def test_canonical_manifest_passes_offline_gate(self):
+        bridge = _load_hyphenated("nullone_draft_bridge_canonical2", "nullone-draft-bridge.py")
+        manifest_path = self._build_feed_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIsNone(bridge.require_packaging_authority(manifest_path, data))
+
+    def test_manual_valid_packaging_manifest_in_production_dir_blocked(self):
+        manifest_path = self._build_feed_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        tag = uuid.uuid4().hex
+        manual = DRAFTS_PROD / f"test-{tag}-manual.json"
+        manual.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: manual.unlink(missing_ok=True))
+        code, out, calls = self._execute_blocked(manual)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+        self.assertEqual(calls, [])
+
+    def test_carousel_subset_blocked(self):
+        from nullone_bridge_common import MANIFEST_DIR
+
+        manifest_path = self._build_carousel_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(data["media"]), 6)
+        data["media"] = data["media"][:2]
+        tag = uuid.uuid4().hex
+        subset = MANIFEST_DIR / f"test-{tag}-subset.json"
+        subset.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: subset.unlink(missing_ok=True))
+        code, out, calls = self._execute_blocked(subset)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+        self.assertEqual(calls, [])
+
+    def test_carousel_reorder_blocked(self):
+        from nullone_bridge_common import MANIFEST_DIR
+
+        manifest_path = self._build_carousel_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        media = list(data["media"])
+        media[0], media[1] = media[1], media[0]
+        data["media"] = media
+        tag = uuid.uuid4().hex
+        reordered = MANIFEST_DIR / f"test-{tag}-reordered.json"
+        reordered.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: reordered.unlink(missing_ok=True))
+        code, out, calls = self._execute_blocked(reordered)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+        self.assertEqual(calls, [])
+
+    def test_duplicate_manifest_media_blocked(self):
+        from nullone_bridge_common import MANIFEST_DIR
+
+        manifest_path = self._build_carousel_manifest()
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        media = list(data["media"])
+        media[-1] = dict(media[0])
+        data["media"] = media
+        tag = uuid.uuid4().hex
+        dup = MANIFEST_DIR / f"test-{tag}-dup.json"
+        dup.write_text(json.dumps(data), encoding="utf-8")
+        self.addCleanup(lambda: dup.unlink(missing_ok=True))
+        code, out, calls = self._execute_blocked(dup)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+        self.assertEqual(calls, [])
+
+    def test_symlink_manifest_blocked(self):
+        from nullone_bridge_common import MANIFEST_DIR
+
+        manifest_path = self._build_feed_manifest()
+        tag = uuid.uuid4().hex
+        link = MANIFEST_DIR / f"test-{tag}-link.json"
+        try:
+            link.symlink_to(manifest_path)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        self.addCleanup(lambda: link.unlink(missing_ok=True))
+        code, out, calls = self._execute_blocked(link)
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", out)
+        self.assertEqual(calls, [])
+
+
+class CarouselDatavizFailClosedTests(unittest.TestCase):
+    """Blocker B regressions: carousel DATA_VISUALIZATION fails closed pre-subprocess."""
+
+    def _args(self, receipt_path, asset_file=None, output=None, **overrides):
+        args = argparse.Namespace(
+            receipt=str(receipt_path),
+            asset_file=str(asset_file) if asset_file is not None else "",
+            output=output or "",
+            spec=None,
+            source=None,
+            kicker=None,
+            headline=None,
+            stat=None,
+            source_name=None,
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def _receipt_file(self, root, receipt, candidate_id="probe-candidate"):
+        subdir = root / "social/drafts/production"
+        subdir.mkdir(parents=True, exist_ok=True)
+        path = subdir / f"{candidate_id}-packaging-decision.json"
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+        return path
+
+    def test_carousel_dataviz_fails_closed_before_subprocess(self):
+        calls: list = []
+        request = _request(
+            **{
+                "candidate.content_shape": "MULTI_STEP_EXPLAINER",
+                "candidate.distinct_beat_count": 4,
+                "candidate.content_type": "EXPLAINER",
+                "assets.data_visualization_possible": True,
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = _receipt_for(request)
+            self.assertEqual(receipt["FORMAT_DECISION"], "CAROUSEL")
+            self.assertEqual(receipt["VISUAL_STYLE"], "DATA_VISUALIZATION")
+            receipt_path = self._receipt_file(root, receipt)
+            data = root / "data.json"
+            data.write_text('{"n": 1}', encoding="utf-8")
+            descriptor = _asset_descriptor(
+                asset_kind="DATA_VISUALIZATION", local_path=str(data),
+                provenance="Verified dataset",
+            )
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(descriptor), encoding="utf-8")
+            spec = root / "spec.json"
+            spec.write_text(json.dumps({"slides": [{}, {}, {}, {}, {}, {}]}), encoding="utf-8")
+            with mock.patch.object(
+                dispatcher.subprocess, "run", side_effect=lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a[0], 0, "", "")
+            ):
+                with self.assertRaises(BridgeError) as ctx:
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(root / "o")),
+                        root=root,
+                    )
+        self.assertIn("PACKAGING_UNSUPPORTED_STYLE", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    def test_typography_carousel_still_renders(self):
+        calls: list = []
+        request = _request(
+            **{
+                "candidate.content_shape": "MULTI_STEP_EXPLAINER",
+                "candidate.distinct_beat_count": 4,
+                "candidate.content_type": "EXPLAINER",
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = _receipt_for(request)
+            self.assertEqual(receipt["VISUAL_STYLE"], "EDITORIAL_TYPOGRAPHY")
+            receipt_path = self._receipt_file(root, receipt)
+            descriptor = _asset_descriptor(asset_kind="NONE")
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(descriptor), encoding="utf-8")
+            spec = root / "spec.json"
+            spec.write_text(json.dumps({"slides": [{}, {}, {}, {}, {}, {}]}), encoding="utf-8")
+            out_dir = root / "slides"
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for i in range(1, 7):
+                    (out_dir / f"{i:02d}.png").write_text("png", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "SLIDES=6", "")
+
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(out_dir)), root=root
+                    ),
+                    0,
+                )
+        self.assertEqual(len(calls), 1)
+
+
 class NoPublicationCapabilityTests(unittest.TestCase):
     NEW_FILES = (        SCRIPTS / "nullone_packaging_receipt.py",
         SCRIPTS / "nullone-packaging-evaluator.py",

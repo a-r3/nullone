@@ -144,10 +144,10 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         print(f"RENDER_FORMAT=SINGLE_POST OUTPUT={output}")
         return 0
     if decision == "CAROUSEL":
-        if asset["asset_kind"] in ("REAL_PHOTO", "SOURCE_SCREENSHOT"):
+        if asset["asset_kind"] in ("REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION"):
             raise BridgeError(
                 "PACKAGING_UNSUPPORTED_STYLE: the V2 carousel renderer takes no input images, "
-                "so file-backed photo evidence cannot be faithfully bound into a carousel"
+                "so file-backed evidence cannot be faithfully bound into a carousel"
             )
         if not args.spec:
             raise BridgeError("PACKAGING_INPUT_INVALID: carousel render needs --spec")
