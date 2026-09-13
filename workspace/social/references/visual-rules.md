@@ -110,8 +110,23 @@ Operational design spec for @nullone.az. Dimensions are platform-fixed; the rest
 
 ---
 
+## Format eligibility (Editorial Packaging Contract V1)
+
+Carousel is never a default choice. It requires an explicit, countable,
+multi-beat justification: content shape not `SINGLE_FACT`/
+`BREAKING_DEVELOPING`, timeliness not `BREAKING`, and at least 3
+genuinely distinct beats. See
+`docs/contracts/editorial-packaging-contract-v1.md` (operative rules
+duplicated in `ops/prompts/draft-factory.md`'s "Format selection"
+section, since production prompts cannot read outside this workspace).
+
 ## Standing visual constraints
-- No AI-generated imagery when a source/official visual or screenshot exists.
+- No AI-generated imagery when a source/official visual or screenshot
+  exists. When a real photo is *required* (breaking/announcement/a
+  specific named real-world subject) and none is available, prefer a
+  screenshot, then a faithful data visualization; if neither exists, the
+  candidate must be skipped rather than packaged with generated
+  illustration standing in for missing real-world grounding.
 - One consistent typeface + 2 accent colors across all formats.
 - Dark scrims for text legibility over images.
 - Brand mark always bottom-right, subtle, inside safe margin.
