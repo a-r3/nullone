@@ -61,6 +61,7 @@ COMMANDS = [
     [sys.executable, "tests/test_scheduled_occurrence_authority.py"],
     [sys.executable, "tests/test_scheduled_run_dispatch.py"],
     [sys.executable, "tests/test_scheduled_wakeup_cli.py"],
+    [sys.executable, "tests/test_story_wakeup_expected_gate.py"],
     [sys.executable, "tests/test_publish_ipc.py"],
     [sys.executable, "tests/test_publish_receipt.py"],
     [sys.executable, "tests/test_final_publish_controller.py"],

@@ -94,6 +94,34 @@ DOMAIN_BLOCKED_OUTCOMES = frozenset(
     }
 )
 
+# Scheduler-health classification for expected domain gates (owned here,
+# consumed by the M0 wake-up edge `nullone-scheduled-wakeup.py`).
+#
+# MORNING_SOURCE_UNPROVEN is normal workflow semantics, not an
+# infrastructure or execution failure: the occurrence was correctly
+# evaluated, but there is no proven same-day SUCCEEDED Morning source to
+# consume, so this path invokes no provider/writer/draft/delivery, sends
+# no domain notification, and persists no #27 result. The scheduler must
+# not count it as a failure -- repeated expected gates (e.g. a Morning
+# outage spanning many Story slots) must never auto-disable the Story
+# automation. Every other FAILED reason code remains a hard scheduler
+# failure.
+EXPECTED_GATE_REASON_CODES = frozenset({"MORNING_SOURCE_UNPROVEN"})
+
+
+def is_expected_scheduler_gate(result: Any) -> bool:
+    """Typed expected-gate check for scheduler-health classification.
+
+    True only for a FAILED application execution carrying one of the
+    reviewed expected-gate reason codes. Operates on the result object's
+    structured fields -- never on rendered shell/operator text.
+    """
+
+    return (
+        getattr(result, "application_execution", None) == "FAILED"
+        and getattr(result, "reason_code", None) in EXPECTED_GATE_REASON_CODES
+    )
+
 
 class StoryScheduledWorkflowError(RuntimeError):
     """Caller contract violation building a StoryScheduledResult (never

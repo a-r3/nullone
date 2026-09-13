@@ -56,8 +56,16 @@ Exit-code contract (distinct from, but consistent with,
 - `DUE` + `application_execution == "COMPLETED"`: exit 0, regardless of
   domain health (`SUCCEEDED`/`BLOCKED`/`FAILED`/actionable `UNKNOWN`),
   preserving the merged #59 scheduler-vs-domain semantics unchanged.
-- `DUE` + `application_execution == "FAILED"`: non-zero. No retry layer is
-  added here; #28/#29's own bounded retry already ran before this point.
+- `DUE` + `application_execution == "FAILED"` carrying a reviewed
+  expected domain gate (`nullone_story_scheduled_workflow.
+  EXPECTED_GATE_REASON_CODES`, currently exactly
+  `MORNING_SOURCE_UNPROVEN`): exit 0. The gate is truthful -- no
+  provider, no draft, no notification -- but it is normal workflow
+  semantics (no proven same-day Morning source), so it must not poison
+  scheduler health or auto-disable the automation.
+- `DUE` + any other `application_execution == "FAILED"`: non-zero. No
+  retry layer is added here; #28/#29's own bounded retry already ran
+  before this point.
 
 Manual/repeated wake-up semantics: because `scheduled_for`/
 `external_occurrence_id`/`occurrence_id` are derived only from the
@@ -83,6 +91,7 @@ from nullone_scheduled_run_dispatch import (
     run_morning_trigger,
     run_story_trigger,
 )
+from nullone_story_scheduled_workflow import is_expected_scheduler_gate
 
 WORKFLOW_BY_COMMAND = {
     "morning": "morning-editorial",
@@ -198,7 +207,16 @@ def _report_due(resolution: ScheduledOccurrenceResolution, result: Any) -> int:
     print(f"NOTIFICATION_STATUS={result.notification_status}")
     print(f"REASON_CODE={result.reason_code}")
     print(f"REASON_TEXT={result.reason_text}")
-    return 0 if result.application_execution == "COMPLETED" else 1
+    if result.application_execution == "COMPLETED":
+        return 0
+    # Expected domain gates (e.g. Story MORNING_SOURCE_UNPROVEN) are
+    # truthful non-executions, not scheduler failures: the occurrence
+    # was correctly evaluated with zero provider/draft/notification
+    # effects, so scheduler health must stay green. Classification is
+    # the domain-owned typed check above -- never a blanket FAILED->0.
+    if is_expected_scheduler_gate(result):
+        return 0
+    return 1
 
 
 def wake_up(
@@ -436,6 +454,52 @@ def self_test() -> int:
     assert len(story_calls) == 3
     assert story_calls[2]["occurrence_id"] != story_calls[0]["occurrence_id"]
     assert story_calls[2]["scheduled_for"] == "2026-09-08T09:30:00Z"
+
+    # 12. Expected domain gate (Story MORNING_SOURCE_UNPROVEN) is a
+    #     truthful non-execution, not a scheduler failure: exit 0.
+    #     Any other FAILED execution stays non-zero (no blanket FAILED->0).
+    class _FakeExpectedGateResult(_FakeMorningResult):
+        def __init__(self) -> None:
+            super().__init__()
+            self.application_execution = "FAILED"
+            self.domain_outcome = None
+            self.reason_code = "MORNING_SOURCE_UNPROVEN"
+            self.reason_text = "No proven SUCCEEDED Morning Editorial result for this date."
+
+    def expected_gate_dispatch(_trigger: dict[str, Any]) -> _FakeExpectedGateResult:
+        return _FakeExpectedGateResult()
+
+    for slot in (
+        _dt(2026, 9, 8, 6, 30, 0, tzinfo=timezone.utc),
+        _dt(2026, 9, 8, 9, 30, 0, tzinfo=timezone.utc),
+        _dt(2026, 9, 8, 14, 30, 0, tzinfo=timezone.utc),
+    ):
+        exit_code = wake_up(
+            "story",
+            source="openclaw",
+            now=lambda s=slot: s,
+            dispatch_by_workflow={"story": expected_gate_dispatch},
+        )
+        assert exit_code == 0
+
+    # Other FAILED reasons (e.g. RUNTIME_CRASHED) remain scheduler failures.
+    class _FakeHardFailureResult(_FakeMorningResult):
+        def __init__(self) -> None:
+            super().__init__()
+            self.application_execution = "FAILED"
+            self.domain_outcome = None
+            self.reason_code = "RUNTIME_CRASHED"
+
+    def hard_failure_dispatch(_trigger: dict[str, Any]) -> _FakeHardFailureResult:
+        return _FakeHardFailureResult()
+
+    exit_code = wake_up(
+        "story",
+        source="openclaw",
+        now=lambda: _dt(2026, 9, 8, 14, 30, 0, tzinfo=timezone.utc),
+        dispatch_by_workflow={"story": hard_failure_dispatch},
+    )
+    assert exit_code != 0
 
     print("SCHEDULED_WAKEUP_CLI_SELF_TEST=PASS")
     print("NO_OPENCLAW_EXECUTION=TRUE")
