@@ -262,6 +262,52 @@ class RealPhotoFallbackLadderTest(unittest.TestCase):
                     )
 
 
+class NamedSubjectVisualGroundingTest(unittest.TestCase):
+    def test_named_subject_without_photo_or_fallback_skips(self):
+        request = base_request(
+            **{
+                "candidate.content_shape": "SINGLE_FACT",
+                "candidate.distinct_beat_count": 1,
+                "candidate.depicts_real_world_subject": True,
+                "assets.data_visualization_possible": False,
+            }
+        )
+        result = evaluate_packaging(request)
+        self.assertEqual(result["REAL_PHOTO_REQUIRED"], "YES")
+        self.assertEqual(result["POST_DECISION"], "SKIP")
+        self.assertEqual(result["FORMAT_REASON"], "REAL_PHOTO_REQUIRED_NO_FALLBACK")
+
+    def test_named_subject_with_official_photo_posts_real_photo(self):
+        request = base_request(
+            **{
+                "candidate.content_shape": "SINGLE_FACT",
+                "candidate.distinct_beat_count": 1,
+                "candidate.depicts_real_world_subject": True,
+                "assets.has_official_or_source_image": True,
+                "assets.image_on_topic": True,
+                "assets.image_quality_ok": True,
+            }
+        )
+        result = evaluate_packaging(request)
+        self.assertEqual(result["POST_DECISION"], "POST")
+        self.assertEqual(result["FORMAT_DECISION"], "SINGLE_POST")
+        self.assertEqual(result["VISUAL_STYLE"], "REAL_PHOTO")
+
+    def test_abstract_concept_may_use_typography_without_photo(self):
+        request = base_request(
+            **{
+                "candidate.content_shape": "OPINION_ANALYSIS",
+                "candidate.distinct_beat_count": 1,
+                "candidate.depicts_real_world_subject": False,
+                "assets.data_visualization_possible": False,
+            }
+        )
+        result = evaluate_packaging(request)
+        self.assertEqual(result["REAL_PHOTO_REQUIRED"], "NO")
+        self.assertEqual(result["POST_DECISION"], "POST")
+        self.assertEqual(result["VISUAL_STYLE"], "EDITORIAL_TYPOGRAPHY")
+
+
 class AudienceValueGateTest(unittest.TestCase):
     def test_low_audience_value_skips(self):
         request = base_request(**{"candidate.audience_value": "LOW"})
