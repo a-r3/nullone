@@ -573,10 +573,20 @@ def _resolve_permission(rules, path: str) -> str | None:
 
 class AgentWriteScopeTests(unittest.TestCase):
     """The checked-in agent must allow exactly the Morning write surface
-    proven required by the current prompt -- nothing else."""
+    proven required by the current prompt -- nothing else.
 
-    # Absolute tool-call paths, as the permission layer matches them
-    # (proven live: bare relative patterns never match).
+    Issue #120: live OpenCode 1.18.30 disabled the entire Morning cycle
+    because the agent granted no `write` tool at all and its `edit`-only
+    `**/`-prefixed patterns denied every absolute tool-call path inside
+    the (git) production worktree. The offline fnmatch model below can
+    only prove static allowlist shape -- it is NOT the live engine and
+    must never again be the sole proof that writes work. Authoritative
+    proof is the disposable live probe (scratch git worktree, real
+    `opencode run`): allowed new-file write ok, allowed existing-file
+    edit ok, outside-path write denied, bash denied.
+    """
+
+    # Absolute tool-call paths, as the model layer passes them.
     WS = "/home/oem/.openclaw/workspace"
 
     REQUIRED_WRITE_PATHS = (
@@ -584,6 +594,15 @@ class AgentWriteScopeTests(unittest.TestCase):
         f"{WS}/social/research/daily/2026-09-13-editorial-candidates.json",
         f"{WS}/social/state/candidate-queue.md",
         f"{WS}/social/state/topic-ledger.jsonl",
+    )
+
+    # Worktree-relative forms, as the live engine matches them inside a
+    # git worktree (issue #120: `**/`-only rules deny everything there).
+    REQUIRED_RELATIVE_PATHS = (
+        "social/research/daily/2026-09-13-editorial-board.md",
+        "social/research/daily/2026-09-13-editorial-candidates.json",
+        "social/state/candidate-queue.md",
+        "social/state/topic-ledger.jsonl",
     )
 
     DENIED_WRITE_PATHS = (
@@ -599,44 +618,95 @@ class AgentWriteScopeTests(unittest.TestCase):
         f"{WS}/social/published/anything.md",
     )
 
+    EXPECTED_DUAL_FORM_ALLOWS = {
+        "**/social/research/daily/*-editorial-board.md",
+        "**/social/research/daily/*-editorial-candidates.json",
+        "**/social/state/candidate-queue.md",
+        "**/social/state/topic-ledger.jsonl",
+        "social/research/daily/*-editorial-board.md",
+        "social/research/daily/*-editorial-candidates.json",
+        "social/state/candidate-queue.md",
+        "social/state/topic-ledger.jsonl",
+    }
+
     def test_muse_spark_is_the_current_default_model(self):
         self.assertEqual(
             opencode_adapter.DEFAULT_OPENCODE_MODEL,
             "opencode/muse-spark-1.3-contributor-free",
         )
 
+    def test_write_allowlist_is_exactly_the_required_morning_surface(self):
+        """New daily board/handoff files REQUIRE the `write` namespace:
+        `edit` cannot create a file (issue #120)."""
+
+        rules = _parse_agent_permission_block()
+        self.assertIn("write", rules, msg="agent must grant a write section")
+        write_rules = rules["write"]
+        self.assertEqual(write_rules[0], ("*", "deny"))
+        allowed = {pattern for pattern, action in write_rules if action == "allow"}
+        self.assertEqual(allowed, self.EXPECTED_DUAL_FORM_ALLOWS)
+
     def test_edit_allowlist_is_exactly_the_required_morning_surface(self):
         rules = _parse_agent_permission_block()
         edit_rules = rules["edit"]
         self.assertEqual(edit_rules[0], ("*", "deny"))
         allowed = {pattern for pattern, action in edit_rules if action == "allow"}
-        self.assertEqual(
-            allowed,
-            {
-                "**/social/research/daily/*-editorial-board.md",
-                "**/social/research/daily/*-editorial-candidates.json",
-                "**/social/state/candidate-queue.md",
-                "**/social/state/topic-ledger.jsonl",
-            },
-        )
+        self.assertEqual(allowed, self.EXPECTED_DUAL_FORM_ALLOWS)
+
+    def test_relative_forms_present_for_git_worktree_matching(self):
+        """A `**/`-only allowlist passes the fnmatch model below yet
+        denies every write inside a git worktree on live 1.18.30
+        (issue #120). Both namespaces must therefore carry the bare
+        worktree-relative forms explicitly."""
+
+        rules = _parse_agent_permission_block()
+        for namespace in ("write", "edit"):
+            allowed = {
+                pattern
+                for pattern, action in rules[namespace]
+                if action == "allow"
+            }
+            for relative in (
+                "social/research/daily/*-editorial-board.md",
+                "social/research/daily/*-editorial-candidates.json",
+                "social/state/candidate-queue.md",
+                "social/state/topic-ledger.jsonl",
+            ):
+                self.assertIn(
+                    relative,
+                    allowed,
+                    msg=f"{namespace} must carry relative form {relative}",
+                )
 
     def test_required_morning_paths_resolve_to_allow(self):
         rules = _parse_agent_permission_block()
-        for path in self.REQUIRED_WRITE_PATHS:
-            self.assertEqual(
-                _resolve_permission(rules["edit"], path),
-                "allow",
-                msg=f"{path} must be writable",
-            )
+        for namespace in ("write", "edit"):
+            for path in self.REQUIRED_WRITE_PATHS:
+                self.assertEqual(
+                    _resolve_permission(rules[namespace], path),
+                    "allow",
+                    msg=f"{namespace}:{path} must be writable",
+                )
+            for path in self.REQUIRED_RELATIVE_PATHS:
+                self.assertEqual(
+                    _resolve_permission(rules[namespace], path),
+                    "allow",
+                    msg=f"{namespace}:{path} must be writable",
+                )
 
     def test_unrelated_paths_resolve_to_deny(self):
         rules = _parse_agent_permission_block()
-        for path in self.DENIED_WRITE_PATHS:
-            self.assertEqual(
-                _resolve_permission(rules["edit"], path),
-                "deny",
-                msg=f"{path} must never be writable",
-            )
+        for namespace in ("write", "edit"):
+            for path in self.DENIED_WRITE_PATHS:
+                self.assertEqual(
+                    _resolve_permission(rules[namespace], path),
+                    "deny",
+                    msg=f"{namespace}:{path} must never be writable",
+                )
+
+    def test_bash_remains_denied(self):
+        rules = _parse_agent_permission_block()
+        self.assertEqual(rules.get("bash"), "deny")
 
 
 class AgentSecretReadDenialTests(unittest.TestCase):
