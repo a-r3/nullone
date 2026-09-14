@@ -8,10 +8,25 @@ permission:
   lsp: deny
   question: deny
   todowrite: deny
+  # Path forms are load-bearing (issues #120/#121, proven live against
+  # 1.18.30): every allowed path MUST appear in BOTH forms. Inside a git
+  # worktree (production included) `**/`-only rules deny everything and
+  # only bare worktree-relative patterns match. `write` (new weekly
+  # report) and `edit` (MEMORY.md, report corrections) are separate
+  # namespaces -- both are required. No shell exists for this role, so
+  # these file rules are the only write route.
+  write:
+    "*": deny
+    "**/social/analytics/reports/*-weekly-strategy.md": allow
+    "**/MEMORY.md": allow
+    "social/analytics/reports/*-weekly-strategy.md": allow
+    "MEMORY.md": allow
   edit:
     "*": deny
     "**/social/analytics/reports/*-weekly-strategy.md": allow
     "**/MEMORY.md": allow
+    "social/analytics/reports/*-weekly-strategy.md": allow
+    "MEMORY.md": allow
   read:
     "*": allow
     "**/social/ops/private/*": deny

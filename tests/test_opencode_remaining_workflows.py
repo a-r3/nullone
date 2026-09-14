@@ -271,12 +271,44 @@ class DraftFactoryBoundaryTests(unittest.TestCase):
             self.assertEqual(_resolve_permission(self.RULES["read"], path), "deny", msg=path)
 
     def test_write_scope_exact(self):
+        """Dual-form write+edit contract (issues #120/#121).
+
+        Live OpenCode 1.18.30 denies everything inside a git worktree
+        under `**/`-only rules, and `edit` cannot create new files, so
+        every allowed path must appear in BOTH forms under BOTH the
+        `write` and `edit` namespaces. The fnmatch model below is only
+        a static shape check, never proof of live behavior (see the
+        disposable git-worktree probes recorded on #121).
+        """
+        expected_allows = {
+            "**/social/drafts/production/*",
+            "**/social/publisher/*-draft.md",
+            "**/social/state/candidate-queue.md",
+            "**/social/state/topic-ledger.jsonl",
+            "social/drafts/production/*",
+            "social/publisher/*-draft.md",
+            "social/state/candidate-queue.md",
+            "social/state/topic-ledger.jsonl",
+        }
+        for namespace in ("write", "edit"):
+            self.assertIn(namespace, self.RULES, msg=f"agent must grant {namespace}")
+            section = self.RULES[namespace]
+            self.assertEqual(section[0], ("*", "deny"), msg=namespace)
+            self.assertEqual(
+                {pattern for pattern, action in section if action == "allow"},
+                expected_allows,
+                msg=namespace,
+            )
         allowed = (
             f"{WS}/social/drafts/production/2026-09-13-x-caption.txt",
             f"{WS}/social/drafts/production/2026-09-13-x.png",
             f"{WS}/social/publisher/2026-09-13-x-draft.md",
             f"{WS}/social/state/candidate-queue.md",
             f"{WS}/social/state/topic-ledger.jsonl",
+            "social/drafts/production/2026-09-13-x-caption.txt",
+            "social/publisher/2026-09-13-x-draft.md",
+            "social/state/candidate-queue.md",
+            "social/state/topic-ledger.jsonl",
         )
         denied = (
             f"{WS}/social/ops/scripts/nullone-manifest.py",
@@ -285,11 +317,13 @@ class DraftFactoryBoundaryTests(unittest.TestCase):
             f"{WS}/social/state/publish-ledger.jsonl",
             f"{WS}/.opencode/agents/nullone-draft-factory.md",
             f"{WS}/social/drafts/review/x.md",
+            "social/drafts/review/x.md",
         )
-        for path in allowed:
-            self.assertEqual(_resolve_permission(self.RULES["edit"], path), "allow", msg=path)
-        for path in denied:
-            self.assertEqual(_resolve_permission(self.RULES["edit"], path), "deny", msg=path)
+        for namespace in ("write", "edit"):
+            for path in allowed:
+                self.assertEqual(_resolve_permission(self.RULES[namespace], path), "allow", msg=f"{namespace}:{path}")
+            for path in denied:
+                self.assertEqual(_resolve_permission(self.RULES[namespace], path), "deny", msg=f"{namespace}:{path}")
 
     def test_secret_reads_denied(self):
         for path in (f"{WS}/.env", f"{WS}/.env.local", f"{WS}/social/.env", f"{WS}/k.pem"):
@@ -345,20 +379,43 @@ class RadarBoundaryTests(unittest.TestCase):
             self.assertEqual(_resolve_permission(self.RULES["bash"], command), "deny", msg=command)
 
     def test_write_scope_exact(self):
+        """Dual-form write+edit contract (issues #120/#121): the radar
+        report and staged assessments are NEW files per scan, so `write`
+        is required; `**/`-only rules deny everything inside the git
+        production worktree on live 1.18.30."""
+        expected_allows = {
+            "**/social/research/daily/*-breaking-*.md",
+            "**/social/ops/breaking-staging/*",
+            "social/research/daily/*-breaking-*.md",
+            "social/ops/breaking-staging/*",
+        }
+        for namespace in ("write", "edit"):
+            self.assertIn(namespace, self.RULES, msg=f"agent must grant {namespace}")
+            section = self.RULES[namespace]
+            self.assertEqual(section[0], ("*", "deny"), msg=namespace)
+            self.assertEqual(
+                {pattern for pattern, action in section if action == "allow"},
+                expected_allows,
+                msg=namespace,
+            )
         allowed = (
             f"{WS}/social/research/daily/2026-09-13-breaking-1130.md",
             f"{WS}/social/ops/breaking-staging/abc123.json",
+            "social/research/daily/2026-09-13-breaking-1130.md",
+            "social/ops/breaking-staging/abc123.json",
         )
         denied = (
             f"{WS}/social/ops/breaking-handoffs/scan/x.json",
             f"{WS}/social/state/publish-ledger.jsonl",
             f"{WS}/social/state/candidate-queue.md",
             f"{WS}/social/drafts/production/x.md",
+            "social/ops/breaking-handoffs/scan/x.json",
         )
-        for path in allowed:
-            self.assertEqual(_resolve_permission(self.RULES["edit"], path), "allow", msg=path)
-        for path in denied:
-            self.assertEqual(_resolve_permission(self.RULES["edit"], path), "deny", msg=path)
+        for namespace in ("write", "edit"):
+            for path in allowed:
+                self.assertEqual(_resolve_permission(self.RULES[namespace], path), "allow", msg=f"{namespace}:{path}")
+            for path in denied:
+                self.assertEqual(_resolve_permission(self.RULES[namespace], path), "deny", msg=f"{namespace}:{path}")
 
     def test_web_available_and_secrets_denied(self):
         self.assertEqual(self.RULES.get("webfetch"), "allow")
@@ -379,20 +436,43 @@ class WeeklyBoundaryTests(unittest.TestCase):
         self.assertEqual(self.RULES.get("bash"), "deny")
 
     def test_write_scope_exact(self):
+        """Dual-form write+edit contract (issues #120/#121): the weekly
+        report is a NEW file per run (requires `write`; this role has no
+        shell fallback), MEMORY.md is an existing-file edit. `**/`-only
+        rules deny everything inside the git production worktree."""
+        expected_allows = {
+            "**/social/analytics/reports/*-weekly-strategy.md",
+            "**/MEMORY.md",
+            "social/analytics/reports/*-weekly-strategy.md",
+            "MEMORY.md",
+        }
+        for namespace in ("write", "edit"):
+            self.assertIn(namespace, self.RULES, msg=f"agent must grant {namespace}")
+            section = self.RULES[namespace]
+            self.assertEqual(section[0], ("*", "deny"), msg=namespace)
+            self.assertEqual(
+                {pattern for pattern, action in section if action == "allow"},
+                expected_allows,
+                msg=namespace,
+            )
         allowed = (
             f"{WS}/social/analytics/reports/2026-37-weekly-strategy.md",
             f"{WS}/MEMORY.md",
+            "social/analytics/reports/2026-37-weekly-strategy.md",
+            "MEMORY.md",
         )
         denied = (
             f"{WS}/social/CONTENT_STRATEGY.md",
             f"{WS}/social/ACCOUNT.md",
             f"{WS}/social/state/publish-ledger.jsonl",
             f"{WS}/social/analytics/reports/raw.json",
+            "social/analytics/reports/raw.json",
         )
-        for path in allowed:
-            self.assertEqual(_resolve_permission(self.RULES["edit"], path), "allow", msg=path)
-        for path in denied:
-            self.assertEqual(_resolve_permission(self.RULES["edit"], path), "deny", msg=path)
+        for namespace in ("write", "edit"):
+            for path in allowed:
+                self.assertEqual(_resolve_permission(self.RULES[namespace], path), "allow", msg=f"{namespace}:{path}")
+            for path in denied:
+                self.assertEqual(_resolve_permission(self.RULES[namespace], path), "deny", msg=f"{namespace}:{path}")
 
     def test_no_publication_capability(self):
         agent = (AGENTS / "nullone-weekly-strategy.md").read_text(encoding="utf-8")
@@ -404,6 +484,105 @@ class WeeklyBoundaryTests(unittest.TestCase):
     def test_output_contract_path_preserved(self):
         prompt = (PROMPTS / "weekly-strategy.md").read_text(encoding="utf-8")
         self.assertIn("social/analytics/reports/YYYY-WW-weekly-strategy.md", prompt)
+
+
+class RoleFilesystemContractTests(unittest.TestCase):
+    """End-to-end filesystem-contract guards shared by all three roles
+    (issue #121). These encode the live-engine findings so a future
+    allowlist regression fails offline even though the fnmatch model
+    above would still pass a `**/`-only file."""
+
+    AGENTS = {
+        "nullone-draft-factory.md": (
+            "social/drafts/production/2026-09-13-x-caption.txt",
+            "social/publisher/2026-09-13-x-draft.md",
+        ),
+        "nullone-breaking-radar.md": (
+            "social/research/daily/2026-09-13-breaking-1130.md",
+            "social/ops/breaking-staging/abc123.json",
+        ),
+        "nullone-weekly-strategy.md": (
+            "social/analytics/reports/2026-37-weekly-strategy.md",
+            "MEMORY.md",
+        ),
+    }
+
+    def test_new_file_roles_grant_write(self):
+        """Every role that must create new files grants the `write`
+        namespace: `edit` cannot create a file."""
+
+        for agent_file, _ in self.AGENTS.items():
+            rules = _parse_agent_permission_block(AGENTS / agent_file)
+            self.assertIn("write", rules, msg=f"{agent_file} must grant write")
+
+    def test_relative_forms_required_in_both_namespaces(self):
+        """A `**/`-only allowlist passes fnmatch yet denies everything
+        inside a git worktree on live 1.18.30. Both namespaces must
+        therefore carry bare worktree-relative allows, and the role's
+        own sample relative paths must resolve to allow."""
+
+        for agent_file, sample_paths in self.AGENTS.items():
+            rules = _parse_agent_permission_block(AGENTS / agent_file)
+            for namespace in ("write", "edit"):
+                allowed = {
+                    pattern
+                    for pattern, action in rules[namespace]
+                    if action == "allow"
+                }
+                relatives = [p for p in allowed if not p.startswith("**/")]
+                self.assertTrue(
+                    relatives,
+                    msg=f"{agent_file}:{namespace} must carry relative forms",
+                )
+                for path in sample_paths:
+                    self.assertEqual(
+                        _resolve_permission(rules[namespace], path),
+                        "allow",
+                        msg=f"{agent_file}:{namespace}:{path}",
+                    )
+
+    def test_transport_ignores_stdout_body(self):
+        """No stdout side channel: file-role transport returns None on
+        exit 0 regardless of body content, and raises typed errors on
+        failure. Nothing in stdout can fabricate or suppress artifacts."""
+
+        with mock.patch.object(
+            role_transport.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                ["opencode"], 0, stdout="garbage\n{\"fake\": true}", stderr=""
+            ),
+        ):
+            self.assertIsNone(
+                role_transport.run_opencode_cycle(
+                    ["opencode"], cwd=Path("/tmp"), timeout=1, role="probe"
+                )
+            )
+
+    def test_sequential_retries_are_stateless(self):
+        """Two consecutive scheduler retries issue byte-identical argv
+        with no in-process accumulation: duplication guards live in the
+        domain helpers (scan commit, manifest, draft bridge), never in
+        transport state."""
+
+        calls: list = []
+
+        def effect(cmd, **kwargs):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(
+            draft_wrapper, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        ):
+            with mock.patch.object(role_transport.subprocess, "run", side_effect=effect):
+                workspace = Path("/tmp/nullone-retry-check")
+                first = draft_wrapper.build_command(workspace=workspace)
+                self.assertEqual(draft_wrapper.execute(), 0)
+                second = draft_wrapper.build_command(workspace=workspace)
+                self.assertEqual(draft_wrapper.execute(), 0)
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
 
 
 class PrivateRuntimeDenyTests(unittest.TestCase):
