@@ -494,7 +494,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
             captured["kwargs"] = kwargs
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
+        with patch.object(claude_editorial_provider, "run_tree_command", side_effect=fake_run):
             _default_wrapper_invoke_provider()()
 
         self.assertEqual(
@@ -512,7 +512,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
 
-        with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
+        with patch.object(claude_editorial_provider, "run_tree_command", side_effect=fake_run):
             with self.assertRaises(claude_editorial_provider.ProviderExecutionTimeoutError):
                 _default_wrapper_invoke_provider()()
 
@@ -525,7 +525,7 @@ class MorningEditorialRuntimeTests(unittest.TestCase):
                 cmd, 1, "", "API Error: Can't reach the API server — ENOTFOUND"
             )
 
-        with patch.object(claude_editorial_provider.subprocess, "run", side_effect=fake_run):
+        with patch.object(claude_editorial_provider, "run_tree_command", side_effect=fake_run):
             with self.assertRaises(ProviderUnreachableError):
                 _default_wrapper_invoke_provider()()
 
