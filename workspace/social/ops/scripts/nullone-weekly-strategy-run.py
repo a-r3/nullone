@@ -18,6 +18,7 @@ report writing in one cycle.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -64,14 +65,42 @@ def build_command(
     )
 
 
+def find_fresh_reports(*, workspace: Path, since_epoch: float) -> list[Path]:
+    """Strategy reports created during this invocation (issue #124).
+
+    Pure workspace scan: any `*-weekly-strategy.md` under
+    `social/analytics/reports/` with mtime at or after `since_epoch`
+    counts. MEMORY.md is optional per prompt (durable findings only),
+    so the report alone is the required durable proof. A transport
+    success that produced no report is a hollow COMPLETED and must
+    fail closed downstream.
+    """
+
+    reports = workspace / "social/analytics/reports"
+    if not reports.is_dir():
+        return []
+    fresh: list[Path] = []
+    for path in sorted(reports.glob("*-weekly-strategy.md")):
+        try:
+            if path.is_file() and path.stat().st_mtime >= since_epoch:
+                fresh.append(path)
+        except OSError:
+            continue
+    return fresh
+
+
 def execute() -> int:
     model = resolve_role_model()
     print(describe_cycle(role=ROLE, agent=AGENT, model=model))
     cmd: Sequence[str] = build_command(model=model, binary=resolve_opencode_binary())
+    started = time.time()
     try:
         run_opencode_cycle(cmd, cwd=WORKSPACE, timeout=WEEKLY_TIMEOUT_SECONDS, role=ROLE)
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        return 1
+    if not find_fresh_reports(workspace=WORKSPACE, since_epoch=started):
+        print("ROLE_OUTCOME=BLOCKED reason=MissingWeeklyReport")
         return 1
     print("ROLE_OUTCOME=COMPLETED")
     return 0

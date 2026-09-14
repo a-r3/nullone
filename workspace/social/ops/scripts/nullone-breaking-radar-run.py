@@ -21,6 +21,7 @@ source verification in one cycle.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -72,14 +73,40 @@ def build_command(
     )
 
 
+def find_fresh_reports(*, workspace: Path, since_epoch: float) -> list[Path]:
+    """Breaking reports created during this invocation (issue #124).
+
+    Pure workspace scan (no slot/date math, no timezone logic): any
+    `*-breaking-*.md` under `social/research/daily/` with mtime at or
+    after `since_epoch` counts. A transport success that produced no
+    report is a hollow COMPLETED and must fail closed downstream.
+    """
+
+    daily = workspace / "social/research/daily"
+    if not daily.is_dir():
+        return []
+    fresh: list[Path] = []
+    for path in sorted(daily.glob("*-breaking-*.md")):
+        try:
+            if path.is_file() and path.stat().st_mtime >= since_epoch:
+                fresh.append(path)
+        except OSError:
+            continue
+    return fresh
+
+
 def execute() -> int:
     model = resolve_role_model()
     print(describe_cycle(role=ROLE, agent=AGENT, model=model))
     cmd: Sequence[str] = build_command(model=model, binary=resolve_opencode_binary())
+    started = time.time()
     try:
         run_opencode_cycle(cmd, cwd=WORKSPACE, timeout=RADAR_TIMEOUT_SECONDS, role=ROLE)
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        return 1
+    if not find_fresh_reports(workspace=WORKSPACE, since_epoch=started):
+        print("ROLE_OUTCOME=BLOCKED reason=MissingRadarReport")
         return 1
     print("ROLE_OUTCOME=COMPLETED")
     return 0
