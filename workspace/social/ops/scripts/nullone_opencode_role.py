@@ -30,6 +30,7 @@ from typing import Sequence
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_runtime import REACHABILITY_PATTERN
 from nullone_opencode_binary import OpenCodeBinaryResolutionError
+from nullone_process_tree import run_tree_command
 
 OPENCODE_MODEL_ENV_VAR = "NULLONE_OPENCODE_MODEL"
 
@@ -113,13 +114,10 @@ def run_opencode_cycle(
     """
 
     try:
-        cp = subprocess.run(
+        cp = run_tree_command(
             cmd,
             cwd=cwd,
-            text=True,
-            capture_output=True,
             timeout=timeout,
-            check=False,
         )
     except subprocess.TimeoutExpired as e:
         raise RoleExecutionTimeoutError(

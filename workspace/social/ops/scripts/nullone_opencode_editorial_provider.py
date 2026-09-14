@@ -79,6 +79,7 @@ from nullone_opencode_binary import (
     OpenCodeBinaryResolutionError,
     resolve_opencode_binary,
 )
+from nullone_process_tree import run_tree_command
 from nullone_editorial_runtime import (
     PROVIDER_CALL_TIMEOUT_SECONDS,
     REACHABILITY_PATTERN,
@@ -184,13 +185,10 @@ def default_invoke_provider(
     )
 
     try:
-        cp = subprocess.run(
+        cp = run_tree_command(
             cmd,
             cwd=resolved_workspace,
-            text=True,
-            capture_output=True,
             timeout=resolved_timeout,
-            check=False,
         )
     except subprocess.TimeoutExpired as e:
         # The whole `opencode run` agent process exceeded its outer

@@ -235,7 +235,7 @@ class SchedulerRegressionTests(unittest.TestCase):
                 return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
 
             with mock.patch.object(module, "resolve_opencode_binary", side_effect=fake_resolve):
-                with mock.patch.object(role_mod.subprocess, "run", side_effect=fake_run):
+                with mock.patch.object(role_mod, "run_tree_command", side_effect=fake_run):
                     self.assertEqual(module.execute(), 0)
             self.assertEqual(captured["cmd"][0], expected)
 
@@ -256,7 +256,7 @@ class SchedulerRegressionTests(unittest.TestCase):
             with mock.patch.object(
                 editorial, "resolve_opencode_binary", return_value=expected
             ):
-                with mock.patch.object(editorial.subprocess, "run", side_effect=fake_run):
+                with mock.patch.object(editorial, "run_tree_command", side_effect=fake_run):
                     editorial.default_invoke_provider(
                         prompt="probe", workspace=Path(td), timeout=30
                     )

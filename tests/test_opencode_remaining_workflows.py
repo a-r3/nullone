@@ -148,19 +148,19 @@ class SharedTransportTests(unittest.TestCase):
         def timeout_effect(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-        with mock.patch.object(role_transport.subprocess, "run", side_effect=timeout_effect):
+        with mock.patch.object(role_transport, "run_tree_command", side_effect=timeout_effect):
             with self.assertRaises(role_transport.RoleExecutionTimeoutError):
                 role_transport.run_opencode_cycle(["opencode"], cwd=Path("/tmp"), timeout=1, role="probe")
 
         def unreachable_effect(cmd, **kwargs):
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="ETIMEDOUT now")
 
-        with mock.patch.object(role_transport.subprocess, "run", side_effect=unreachable_effect):
+        with mock.patch.object(role_transport, "run_tree_command", side_effect=unreachable_effect):
             with self.assertRaises(role_transport.RoleUnreachableError):
                 role_transport.run_opencode_cycle(["opencode"], cwd=Path("/tmp"), timeout=1, role="probe")
 
         with mock.patch.object(
-            role_transport.subprocess, "run", side_effect=FileNotFoundError("x")
+            role_transport, "run_tree_command", side_effect=FileNotFoundError("x")
         ):
             with self.assertRaises(BridgeError):
                 role_transport.run_opencode_cycle(["opencode"], cwd=Path("/tmp"), timeout=1, role="probe")
@@ -206,14 +206,14 @@ class RoleWrapperTests(unittest.TestCase):
                 def effect(cmd, **kwargs):
                     return subprocess.CompletedProcess(cmd, 3, stdout="", stderr="boom")
 
-                with mock.patch.object(role_transport.subprocess, "run", side_effect=effect):
+                with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
                     self.assertEqual(module.execute(), 1)
 
     def test_execute_success_returns_zero(self):
         def effect(cmd, **kwargs):
             return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
 
-        with mock.patch.object(role_transport.subprocess, "run", side_effect=effect):
+        with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
             self.assertEqual(radar_wrapper.execute(), 0)
 
     def test_metadata_describe_is_secret_free(self):
@@ -547,8 +547,8 @@ class RoleFilesystemContractTests(unittest.TestCase):
         failure. Nothing in stdout can fabricate or suppress artifacts."""
 
         with mock.patch.object(
-            role_transport.subprocess,
-            "run",
+            role_transport,
+            "run_tree_command",
             return_value=subprocess.CompletedProcess(
                 ["opencode"], 0, stdout="garbage\n{\"fake\": true}", stderr=""
             ),
@@ -574,7 +574,7 @@ class RoleFilesystemContractTests(unittest.TestCase):
         with mock.patch.object(
             draft_wrapper, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
         ):
-            with mock.patch.object(role_transport.subprocess, "run", side_effect=effect):
+            with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
                 workspace = Path("/tmp/nullone-retry-check")
                 first = draft_wrapper.build_command(workspace=workspace)
                 self.assertEqual(draft_wrapper.execute(), 0)

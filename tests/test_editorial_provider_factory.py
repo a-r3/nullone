@@ -222,7 +222,7 @@ class OpenCodeCommandConstructionTests(unittest.TestCase):
 
         workspace = Path(tempfile.mkdtemp(prefix="nullone-opencode-cwd-"))
         with mock.patch.object(
-            opencode_adapter.subprocess, "run", side_effect=fake_run
+            opencode_adapter, "run_tree_command", side_effect=fake_run
         ):
             opencode_adapter.default_invoke_provider(
                 prompt="probe",
@@ -236,7 +236,6 @@ class OpenCodeCommandConstructionTests(unittest.TestCase):
             str(workspace),
         )
         self.assertEqual(captured["kwargs"]["timeout"], 30)
-        self.assertTrue(captured["kwargs"]["capture_output"])
         self.assertNotIn("--auto", argv)
 
     def test_model_override_mechanism(self):
@@ -269,7 +268,7 @@ class OpenCodeFailureMappingTests(unittest.TestCase):
     def _invoke_with(self, effect, **kwargs):
         workspace = Path(tempfile.mkdtemp(prefix="nullone-opencode-fail-"))
         with mock.patch.object(
-            opencode_adapter.subprocess, "run", side_effect=effect
+            opencode_adapter, "run_tree_command", side_effect=effect
         ):
             opencode_adapter.default_invoke_provider(
                 prompt="probe", workspace=workspace, timeout=30, **kwargs
@@ -420,7 +419,7 @@ class ClaudeAdapterPreservedTests(unittest.TestCase):
         def effect(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-        with mock.patch.object(claude_adapter.subprocess, "run", side_effect=effect):
+        with mock.patch.object(claude_adapter, "run_tree_command", side_effect=effect):
             with self.assertRaises(ProviderExecutionTimeoutError):
                 claude_adapter.default_invoke_provider()
 

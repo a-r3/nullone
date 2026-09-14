@@ -31,6 +31,7 @@ from nullone_editorial_runtime import (
     ProviderExecutionTimeoutError,
     ProviderUnreachableError,
 )
+from nullone_process_tree import run_tree_command
 
 PROMPT_PATH = WORKSPACE / "social/ops/prompts/morning-editorial.md"
 
@@ -41,7 +42,7 @@ def default_invoke_provider() -> None:
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     try:
-        cp = subprocess.run(
+        cp = run_tree_command(
             [
                 "claude",
                 "-p",
@@ -54,10 +55,7 @@ def default_invoke_provider() -> None:
                 "Read,Write,WebSearch,WebFetch",
             ],
             cwd=WORKSPACE,
-            text=True,
-            capture_output=True,
             timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
-            check=False,
         )
     except subprocess.TimeoutExpired as e:
         # The whole `claude -p` agent process exceeded its outer
