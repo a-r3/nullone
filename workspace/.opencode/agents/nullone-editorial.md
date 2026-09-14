@@ -8,16 +8,36 @@ permission:
   lsp: deny
   question: deny
   todowrite: deny
-  # `**/` prefix is load-bearing: the edit tool matches absolute paths,
-  # so bare worktree-relative patterns never match and would block even
-  # the required artifact writes (proven live against 1.18.30).
+  # Path forms are load-bearing (issue #120, proven live against 1.18.30):
+  # every allowed path MUST appear in BOTH forms below. In a non-git
+  # worktree the engine matches `**/`-prefixed patterns against absolute
+  # tool-call paths; inside a git worktree (production included) the same
+  # `**/`-only rules deny everything and only bare worktree-relative
+  # patterns match. Omitting either form re-blocks required artifact
+  # writes. `write` (new-file creation) and `edit` (existing-file update)
+  # are separate namespaces: new daily board/handoff files REQUIRE the
+  # `write` allows -- `edit` cannot create a file.
   # Outside-worktree writes stay denied via `external_directory: deny`.
+  write:
+    "*": deny
+    "**/social/research/daily/*-editorial-board.md": allow
+    "**/social/research/daily/*-editorial-candidates.json": allow
+    "**/social/state/candidate-queue.md": allow
+    "**/social/state/topic-ledger.jsonl": allow
+    "social/research/daily/*-editorial-board.md": allow
+    "social/research/daily/*-editorial-candidates.json": allow
+    "social/state/candidate-queue.md": allow
+    "social/state/topic-ledger.jsonl": allow
   edit:
     "*": deny
     "**/social/research/daily/*-editorial-board.md": allow
     "**/social/research/daily/*-editorial-candidates.json": allow
     "**/social/state/candidate-queue.md": allow
     "**/social/state/topic-ledger.jsonl": allow
+    "social/research/daily/*-editorial-board.md": allow
+    "social/research/daily/*-editorial-candidates.json": allow
+    "social/state/candidate-queue.md": allow
+    "social/state/topic-ledger.jsonl": allow
   read:
     "*": allow
     ".env": deny
