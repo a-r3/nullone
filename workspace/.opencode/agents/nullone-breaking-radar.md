@@ -10,10 +10,25 @@ permission:
   lsp: deny
   question: deny
   todowrite: deny
+  # Path forms are load-bearing (issues #120/#121, proven live against
+  # 1.18.30): every allowed path MUST appear in BOTH forms. Inside a git
+  # worktree (production included) `**/`-only rules deny everything and
+  # only bare worktree-relative patterns match. `write` (new breaking
+  # report, new staged assessments) and `edit` are separate namespaces.
+  # Handoff commits stay behind the deterministic scan helper (bash
+  # below), never behind these file rules.
+  write:
+    "*": deny
+    "**/social/research/daily/*-breaking-*.md": allow
+    "**/social/ops/breaking-staging/*": allow
+    "social/research/daily/*-breaking-*.md": allow
+    "social/ops/breaking-staging/*": allow
   edit:
     "*": deny
     "**/social/research/daily/*-breaking-*.md": allow
     "**/social/ops/breaking-staging/*": allow
+    "social/research/daily/*-breaking-*.md": allow
+    "social/ops/breaking-staging/*": allow
   read:
     "*": allow
     "**/social/ops/private/*": deny

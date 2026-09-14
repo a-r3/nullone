@@ -15,12 +15,34 @@ permission:
   lsp: deny
   question: deny
   todowrite: deny
+  # Path forms are load-bearing (issues #120/#121, proven live against
+  # 1.18.30): every allowed path MUST appear in BOTH forms. Inside a git
+  # worktree (production included) `**/`-only rules deny everything and
+  # only bare worktree-relative patterns match. `write` (new-file
+  # creation: captions/specs/payloads, publisher report) and `edit`
+  # (queue/ledger updates) are separate namespaces -- both are required.
+  # Consequential Zernio/media side effects stay behind the reviewed
+  # bash helpers below, never behind these file rules.
+  write:
+    "*": deny
+    "**/social/drafts/production/*": allow
+    "**/social/publisher/*-draft.md": allow
+    "**/social/state/candidate-queue.md": allow
+    "**/social/state/topic-ledger.jsonl": allow
+    "social/drafts/production/*": allow
+    "social/publisher/*-draft.md": allow
+    "social/state/candidate-queue.md": allow
+    "social/state/topic-ledger.jsonl": allow
   edit:
     "*": deny
     "**/social/drafts/production/*": allow
     "**/social/publisher/*-draft.md": allow
     "**/social/state/candidate-queue.md": allow
     "**/social/state/topic-ledger.jsonl": allow
+    "social/drafts/production/*": allow
+    "social/publisher/*-draft.md": allow
+    "social/state/candidate-queue.md": allow
+    "social/state/topic-ledger.jsonl": allow
   read:
     "*": allow
     "**/social/ops/private/*": deny
