@@ -160,7 +160,7 @@ class SharedTransportTests(unittest.TestCase):
                 role_transport.run_opencode_cycle(["opencode"], cwd=Path("/tmp"), timeout=1, role="probe")
 
         with mock.patch.object(
-            role_transport.subprocess, "run", side_effect=FileNotFoundError("x")
+            role_transport, "run_tree_command", side_effect=FileNotFoundError("x")
         ):
             with self.assertRaises(BridgeError):
                 role_transport.run_opencode_cycle(["opencode"], cwd=Path("/tmp"), timeout=1, role="probe")
