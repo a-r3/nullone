@@ -214,7 +214,10 @@ class RoleWrapperTests(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
 
         with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
-            self.assertEqual(radar_wrapper.execute(), 0)
+            with mock.patch.object(
+                radar_wrapper, "find_fresh_reports", return_value=[Path("/tmp/fake-report.md")]
+            ):
+                self.assertEqual(radar_wrapper.execute(), 0)
 
     def test_metadata_describe_is_secret_free(self):
         text = role_transport.describe_cycle(role="breaking-radar", agent="nullone-breaking-radar", model=MUSE_SPARK)
@@ -583,6 +586,73 @@ class RoleFilesystemContractTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0], calls[1])
+
+
+class RoleArtifactValidationTests(unittest.TestCase):
+    """Fail-closed artifact proof for Radar/Weekly wrappers (issue #124).
+
+    A transport success (exit 0) that produced no fresh required
+    report is a hollow COMPLETED and must return BLOCKED/exit 1.
+    Draft Factory is intentionally excluded: legitimate no-output
+    outcomes (BLOCKED/SKIP content) exist there, so freshness alone
+    cannot distinguish hollow from legitimate (see #124).
+    """
+
+    def _seed(self, root: Path, rel: str, *, mtime: float) -> Path:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("probe", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_radar_finds_only_fresh_reports(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            now = 1789300000.0
+            fresh = self._seed(root, "social/research/daily/2026-09-14-breaking-1130.md", mtime=now + 10)
+            self._seed(root, "social/research/daily/2026-09-13-breaking-1130.md", mtime=now - 9999)
+            self._seed(root, "social/research/daily/2026-09-14-notes.md", mtime=now + 10)
+            found = radar_wrapper.find_fresh_reports(workspace=root, since_epoch=now)
+            self.assertEqual(found, [fresh])
+
+    def test_radar_missing_dir_is_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(
+                radar_wrapper.find_fresh_reports(workspace=Path(td), since_epoch=0),
+                [],
+            )
+
+    def test_weekly_finds_only_fresh_reports(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            now = 1789300000.0
+            fresh = self._seed(root, "social/analytics/reports/2026-37-weekly-strategy.md", mtime=now + 10)
+            self._seed(root, "social/analytics/reports/2026-36-weekly-strategy.md", mtime=now - 9999)
+            self._seed(root, "social/analytics/reports/raw.json", mtime=now + 10)
+            found = weekly_wrapper.find_fresh_reports(workspace=root, since_epoch=now)
+            self.assertEqual(found, [fresh])
+
+    def _run_execute(self, module, *, fresh: bool) -> int:
+        with mock.patch.object(module, "resolve_opencode_binary", return_value="/tmp/fake-opencode"), \
+            mock.patch.object(module, "run_opencode_cycle", return_value=None), \
+            mock.patch.object(
+                module,
+                "find_fresh_reports",
+                return_value=[Path("/tmp/fake-report.md")] if fresh else [],
+            ):
+            return module.execute()
+
+    def test_hollow_radar_run_is_blocked(self):
+        self.assertEqual(self._run_execute(radar_wrapper, fresh=False), 1)
+
+    def test_fresh_radar_run_completes(self):
+        self.assertEqual(self._run_execute(radar_wrapper, fresh=True), 0)
+
+    def test_hollow_weekly_run_is_blocked(self):
+        self.assertEqual(self._run_execute(weekly_wrapper, fresh=False), 1)
+
+    def test_fresh_weekly_run_completes(self):
+        self.assertEqual(self._run_execute(weekly_wrapper, fresh=True), 0)
 
 
 class PrivateRuntimeDenyTests(unittest.TestCase):
