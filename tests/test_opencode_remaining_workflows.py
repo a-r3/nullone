@@ -547,8 +547,8 @@ class RoleFilesystemContractTests(unittest.TestCase):
         failure. Nothing in stdout can fabricate or suppress artifacts."""
 
         with mock.patch.object(
-            role_transport.subprocess,
-            "run",
+            role_transport,
+            "run_tree_command",
             return_value=subprocess.CompletedProcess(
                 ["opencode"], 0, stdout="garbage\n{\"fake\": true}", stderr=""
             ),
@@ -574,7 +574,7 @@ class RoleFilesystemContractTests(unittest.TestCase):
         with mock.patch.object(
             draft_wrapper, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
         ):
-            with mock.patch.object(role_transport.subprocess, "run", side_effect=effect):
+            with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
                 workspace = Path("/tmp/nullone-retry-check")
                 first = draft_wrapper.build_command(workspace=workspace)
                 self.assertEqual(draft_wrapper.execute(), 0)
