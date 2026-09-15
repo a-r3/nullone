@@ -4,9 +4,8 @@ mode: primary
 permission:
   bash:
     "*": deny
-    "python3 social/tools/render_texbrif_v2.py *": allow
-    "python3 social/tools/render_carousel_v2.py *": allow
-    "python3 social/tools/render_story_v2.py *": allow
+    "python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate *": allow
+    "python3 social/ops/scripts/nullone-packaging-render.py render *": allow
     "python3 social/ops/scripts/nullone-manifest.py build *": allow
     "python3 social/ops/scripts/nullone-draft-bridge.py execute *": allow
     "python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py deliver *": allow
@@ -33,6 +32,10 @@ permission:
     "social/publisher/*-draft.md": allow
     "social/state/candidate-queue.md": allow
     "social/state/topic-ledger.jsonl": allow
+    "**/social/drafts/production/*-packaging-decision.json": deny
+    "**/social/drafts/production/*-render-record.json": deny
+    "social/drafts/production/*-packaging-decision.json": deny
+    "social/drafts/production/*-render-record.json": deny
   edit:
     "*": deny
     "**/social/drafts/production/*": allow
@@ -43,6 +46,10 @@ permission:
     "social/publisher/*-draft.md": allow
     "social/state/candidate-queue.md": allow
     "social/state/topic-ledger.jsonl": allow
+    "**/social/drafts/production/*-packaging-decision.json": deny
+    "**/social/drafts/production/*-render-record.json": deny
+    "social/drafts/production/*-packaging-decision.json": deny
+    "social/drafts/production/*-render-record.json": deny
   read:
     "*": allow
     "**/social/ops/private/*": deny
@@ -84,12 +91,24 @@ ALLOW:
   `social/state/candidate-queue.md` and
   `social/state/topic-ledger.jsonl` (narrow status/safe-record
   updates). All other writes are denied by configuration.
-- shell ONLY for the exact reviewed commands above: the three V2
-  renderers, `nullone-manifest.py build`, `nullone-draft-bridge.py
-  execute`, and the deterministic review-delivery helper
+- Packaging authority: you assess raw packaging signals, write the
+  evaluator request file and the asset descriptor file
+  (`*-packaging-asset.json`: kind, provenance, local evidence file
+  where the receipt requires one); the deterministic evaluator
+  DECIDES the format and writes the receipt itself — decision
+  receipts and render records are denied to your write/edit tools, so
+  you cannot create, alter, or replace them. You never override a
+  receipt, never choose slides beyond its count, never render or
+  build from a SKIP/STORY receipt, and never create a normal Story
+  from this cycle (STORY means delegate).
+- shell ONLY for the exact reviewed commands above: the packaging
+  evaluator, the packaging render dispatcher, `nullone-manifest.py
+  build`, `nullone-draft-bridge.py execute`, and the deterministic
+  review-delivery helper
   (`nullone_telegram_review_delivery_adapter.py deliver
   --payload-file <payload>.json`). Nothing else may execute.
-  You never invoke `openclaw message send` yourself and never read
+  You never invoke renderers directly, never invoke
+  `openclaw message send` yourself, and never read
   `social/ops/private/telegram-owner-id` (denied by configuration).
 - Web search/fetch narrowly for primary-source re-verification of the
   selected candidate only. Production is not discovery: no broad
