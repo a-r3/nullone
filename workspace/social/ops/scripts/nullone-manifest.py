@@ -77,6 +77,11 @@ def build(args: argparse.Namespace) -> int:
         raise BridgeError("PACKAGING_DECISION_MISMATCH: render record is not bound to this receipt")
     if record.get("format") != receipt.get("FORMAT_DECISION"):
         raise BridgeError("PACKAGING_DECISION_MISMATCH: render record format mismatch")
+    if receipt.get("visual_requirement") == "SOURCE_GROUNDED" and record.get("asset_kind") == "NONE":
+        raise BridgeError(
+            "PACKAGING_VISUAL_GROUNDING_UNMET: receipt declares a visual block but"
+            " the render record binds no evidence; refusing publication-ready manifest"
+        )
     record_media = [entry["path"] for entry in record.get("outputs", [])]
     requested_media = [str(resolve_workspace_path(p)) for p in args.media]
     expected_media = [str((WORKSPACE / rel).resolve()) for rel in record_media]

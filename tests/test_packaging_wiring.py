@@ -76,6 +76,7 @@ def _request(**overrides):
         "distinct_beat_count": 1,
         "depicts_real_world_subject": False,
         "still_developing": False,
+        "visual_requirement": "NONE",
     }
     assets = {
         "has_official_or_source_image": False,
@@ -1824,6 +1825,308 @@ class RendererSemanticIntegrationTests(unittest.TestCase):
             record = json.loads(record_path.read_text(encoding="utf-8"))
             self.assertEqual(record["receipt_hash"], receipt["receipt_hash"])
             self.assertEqual(len(record["outputs"]), 6)
+
+
+class VisualGroundingTests(unittest.TestCase):
+    """Issue #138 (E2E e2e-20260915-1925-controlled).
+
+    The V2 feed renderer always emits a hero visual region, so a
+    SINGLE_POST backed by no evidence renders an empty decorative
+    frame. A declared SOURCE_GROUNDED requirement with no usable
+    evidence must fail closed before receipt/render/manifest/draft/
+    Telegram; explicit NONE (typography-only) stays valid.
+    """
+
+    def _grounded_request(self, **asset_overrides):
+        request = _request()
+        request["candidate"]["visual_requirement"] = "SOURCE_GROUNDED"
+        for key, value in asset_overrides.items():
+            request["assets"][key] = value
+        return request
+
+    def _receipt_file(self, root, receipt, candidate_id="ground-candidate"):
+        subdir = root / "social/drafts/production"
+        subdir.mkdir(parents=True, exist_ok=True)
+        path = subdir / f"{candidate_id}-packaging-decision.json"
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+        return path
+
+    def _args(self, receipt_path, asset_file, output, **overrides):
+        args = argparse.Namespace(
+            receipt=str(receipt_path), asset_file=str(asset_file), output=str(output),
+            spec=None, source=None, kicker="k", headline="h", stat=None,
+            source_name="n",
+        )
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def test_undeclared_requirement_rejected(self):
+        request = _request()
+        del request["candidate"]["visual_requirement"]
+        with self.assertRaises(BridgeError) as ctx:
+            receipt_mod.evaluate_request("ground-candidate", request)
+        self.assertIn("visual_requirement", str(ctx.exception))
+
+    def test_invalid_requirement_rejected(self):
+        request = _request()
+        request["candidate"]["visual_requirement"] = "MAYBE"
+        with self.assertRaises(BridgeError) as ctx:
+            receipt_mod.evaluate_request("ground-candidate", request)
+        self.assertIn("visual_requirement", str(ctx.exception))
+
+    def test_grounded_without_evidence_fails_before_receipt(self):
+        with self.assertRaises(BridgeError) as ctx:
+            receipt_mod.evaluate_request("ground-candidate", self._grounded_request())
+        self.assertIn("PACKAGING_VISUAL_GROUNDING_UNMET", str(ctx.exception))
+
+    def test_grounded_requirement_bound_into_receipt_hash(self):
+        request = self._grounded_request(
+            has_usable_screenshot=True, image_on_topic=True,
+        )
+        receipt = receipt_mod.evaluate_request("ground-candidate", request)
+        self.assertEqual(receipt["POST_DECISION"], "POST")
+        self.assertEqual(receipt["FORMAT_DECISION"], "SINGLE_POST")
+        self.assertEqual(receipt["VISUAL_STYLE"], "SOURCE_SCREENSHOT")
+        self.assertEqual(receipt["visual_requirement"], "SOURCE_GROUNDED")
+        tampered = dict(receipt)
+        tampered["visual_requirement"] = "NONE"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "r.json"
+            path.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaises(BridgeError) as ctx:
+                receipt_mod.load_receipt(path, root=root)
+            self.assertIn("TAMPERED", str(ctx.exception))
+
+    def test_dispatcher_refuses_grounded_none_asset_without_subprocess(self):
+        calls: list = []
+        decision = {
+            "POST_DECISION": "POST", "CONTENT_SHAPE": "SINGLE_FACT",
+            "REAL_PHOTO_AVAILABLE": "NO", "REAL_PHOTO_REQUIRED": "NO",
+            "VISUAL_EVIDENCE_REQUIRED": "NO", "ASSET_STRENGTH": "NONE",
+            "TEXT_DENSITY": "LOW", "TIMELINESS": "TODAY",
+            "FORMAT_DECISION": "SINGLE_POST", "FORMAT_REASON": "SINGLE_FACT_FITS_SINGLE_POST",
+            "VISUAL_STYLE": "EDITORIAL_TYPOGRAPHY", "slide_count_recommendation": None,
+            "source_grounding": "STRONG_PRIMARY", "distinct_beat_count": 1,
+            "content_type": "NEWS",
+        }
+        validated = {"candidate": {"visual_requirement": "SOURCE_GROUNDED"}, "assets": {}}
+        receipt = receipt_mod.build_receipt_body(
+            candidate_id="ground-candidate", validated_request=validated, decision=decision,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt_path = self._receipt_file(root, receipt)
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(_asset_descriptor(
+                candidate_id="ground-candidate", asset_kind="NONE",
+            )), encoding="utf-8")
+            with mock.patch.object(
+                dispatcher.subprocess, "run", side_effect=AssertionError("must not render")
+            ):
+                with self.assertRaises(BridgeError) as ctx:
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_path, root / "o.png"), root=root
+                    )
+        self.assertIn("PACKAGING_VISUAL_GROUNDING_UNMET", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    def test_manifest_refuses_grounded_none_record(self):
+        manifest = _load_hyphenated("nullone_manifest_cli_ground", "nullone-manifest.py")
+        tag = uuid.uuid4().hex
+        candidate_id = f"ground-{tag}"
+        request = self._grounded_request(
+            has_usable_screenshot=True, image_on_topic=True,
+        )
+        receipt = receipt_mod.evaluate_request(candidate_id, request)
+        DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
+        receipt_path = DRAFTS_PROD / f"{candidate_id}-packaging-decision.json"
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        self.addCleanup(lambda: receipt_path.unlink(missing_ok=True))
+        record = receipt_mod.build_render_record(
+            candidate_id=candidate_id, receipt_hash=receipt["receipt_hash"],
+            format_decision="SINGLE_POST", asset_kind="NONE",
+            outputs=[{"path": "social/drafts/production/x.png", "sha256": "y"}],
+        )
+        record_path = DRAFTS_PROD / f"{candidate_id}-render-record.json"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        self.addCleanup(lambda: record_path.unlink(missing_ok=True))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            args = argparse.Namespace(
+                candidate_id=candidate_id, topic="Probe", topic_cluster="probe",
+                content_type="NEWS", format="FEED", caption_file="x.txt", media=[],
+                manifest_id=f"ground-{tag}", output=str(root / "m.json"), force=False,
+                packaging_receipt=str(receipt_path), render_record=str(record_path),
+            )
+            with self.assertRaises(BridgeError) as ctx:
+                manifest.build(args)
+            self.assertIn("PACKAGING_VISUAL_GROUNDING_UNMET", str(ctx.exception))
+            self.assertFalse((root / "m.json").exists())
+
+    def test_grounded_screenshot_single_post_passes(self):
+        calls: list = []
+        request = self._grounded_request(
+            has_usable_screenshot=True, image_on_topic=True,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = receipt_mod.evaluate_request("ground-candidate", request)
+            self.assertEqual(receipt["VISUAL_STYLE"], "SOURCE_SCREENSHOT")
+            receipt_path = self._receipt_file(root, receipt)
+            shot = root / "shot.png"
+            shot.write_bytes(b"shot-bytes")
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(_asset_descriptor(
+                candidate_id="ground-candidate", asset_kind="SOURCE_SCREENSHOT",
+                local_path=str(shot), provenance="Primary source screenshot",
+            )), encoding="utf-8")
+            out = root / "feed.png"
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out.write_text("png", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
+
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_path, out), root=root
+                    ),
+                    0,
+                )
+        self.assertEqual(len(calls), 1)
+        self.assertIn(str(shot), calls[0])
+
+    def test_grounded_dataviz_single_post_passes(self):
+        calls: list = []
+        request = self._grounded_request(data_visualization_possible=True)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = receipt_mod.evaluate_request("ground-candidate", request)
+            self.assertEqual(receipt["VISUAL_STYLE"], "DATA_VISUALIZATION")
+            receipt_path = self._receipt_file(root, receipt)
+            data = root / "data.json"
+            data.write_text('{"n": 1}', encoding="utf-8")
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(_asset_descriptor(
+                candidate_id="ground-candidate", asset_kind="DATA_VISUALIZATION",
+                local_path=str(data), provenance="Verified dataset",
+            )), encoding="utf-8")
+            out = root / "feed.png"
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out.write_text("png", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
+
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_path, out), root=root
+                    ),
+                    0,
+                )
+        self.assertEqual(len(calls), 1)
+
+    def test_typography_none_single_post_passes(self):
+        calls: list = []
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            receipt = receipt_mod.evaluate_request("ground-candidate", _request())
+            self.assertEqual(receipt["POST_DECISION"], "POST")
+            self.assertEqual(receipt["visual_requirement"], "NONE")
+            receipt_path = self._receipt_file(root, receipt)
+            asset_path = root / "asset.json"
+            asset_path.write_text(json.dumps(_asset_descriptor(
+                candidate_id="ground-candidate", asset_kind="NONE",
+            )), encoding="utf-8")
+            out = root / "feed.png"
+
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out.write_text("png", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
+
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(
+                    dispatcher.render_command(
+                        self._args(receipt_path, asset_path, out), root=root
+                    ),
+                    0,
+                )
+        self.assertEqual(len(calls), 1)
+
+    def test_grandfathered_fieldless_receipt_loads_as_none(self):
+        receipt = receipt_mod.evaluate_request("ground-candidate", _request())
+        body = {k: v for k, v in receipt.items() if k not in ("receipt_hash", "visual_requirement")}
+        import hashlib as _hashlib
+
+        fieldless = dict(body)
+        fieldless["receipt_hash"] = _hashlib.sha256(
+            receipt_mod.canonical_json_bytes(body)
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "old.json"
+            path.write_text(json.dumps(fieldless), encoding="utf-8")
+            loaded = receipt_mod.load_receipt(path, root=root)
+            self.assertEqual(loaded["visual_requirement"], "NONE")
+
+    def test_zero_side_effects_on_grounding_rejection(self):
+        import contextlib
+        import io
+
+        from nullone_bridge_common import MANIFEST_DIR
+
+        bridge = _load_hyphenated("nullone_draft_bridge_ground", "nullone-draft-bridge.py")
+        from PIL import Image
+
+        tag = uuid.uuid4().hex
+        DRAFTS_PROD.mkdir(parents=True, exist_ok=True)
+        caption = DRAFTS_PROD / f"test-{tag}-caption.txt"
+        image = DRAFTS_PROD / f"test-{tag}.png"
+        caption.write_text("Probe caption.", encoding="utf-8")
+        Image.new("RGB", (1080, 1350), (14, 14, 15)).save(image)
+        for p in (caption, image):
+            self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
+        hand = MANIFEST_DIR / f"test-{tag}-hand.json"
+        hand.write_text(json.dumps({
+            "schema": "nullone.production.v1",
+            "manifest_id": f"test-{tag}",
+            "candidate_id": "ground-candidate",
+            "topic": "Probe",
+            "topic_cluster": "probe",
+            "content_type": "NEWS",
+            "format": "FEED",
+            "verification": "PASS",
+            "account_id": "6a982bbf77555aae01c28f21",
+            "caption": {
+                "file": f"social/drafts/production/{caption.name}",
+                "sha256": __import__("hashlib").sha256(caption.read_bytes()).hexdigest(),
+            },
+            "media": [{
+                "local_path": f"social/drafts/production/{image.name}",
+                "sha256": __import__("hashlib").sha256(image.read_bytes()).hexdigest(),
+                "content_type": "image/png",
+                "width": 1080,
+                "height": 1350,
+                "image_format": "PNG",
+            }],
+            "review": {"create_attempts": 0, "state": "NOT_CREATED", "zernio_draft_id": None},
+            "publication": {"state": "NOT_REQUESTED", "attempts": 0},
+        }), encoding="utf-8")
+        self.addCleanup(lambda: hand.unlink(missing_ok=True))
+        with mock.patch.object(
+            bridge, "build_production_draft_provider",
+            side_effect=AssertionError("provider must not be reached"),
+        ):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = bridge.execute(f"social/ops/manifests/{hand.name}")
+        self.assertEqual(code, 2)
+        self.assertIn("PACKAGING", buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -225,6 +225,7 @@ def make_manifest(tmp_path, fmt="FEED", media_count=1, content_type="NEWS"):
                 "distinct_beat_count": 4 if fmt == "CAROUSEL" else 1,
                 "depicts_real_world_subject": False,
                 "still_developing": False,
+                "visual_requirement": "NONE",
             },
             "assets": {
                 "has_official_or_source_image": False,

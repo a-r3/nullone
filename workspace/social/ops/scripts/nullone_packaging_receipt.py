@@ -61,6 +61,7 @@ RECEIPT_REQUIRED_FIELDS = (
     "source_grounding",
     "distinct_beat_count",
     "content_type",
+    "visual_requirement",
     "receipt_hash",
 )
 
@@ -135,6 +136,55 @@ def input_fingerprint(validated_request: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(validated_request)).hexdigest()
 
 
+# Declared visual requirement (issue #138, E2E e2e-20260915-1925-controlled).
+#
+# Renderers such as the V2 feed card always emit a hero visual region:
+# a layout backed by no evidence renders an empty decorative frame
+# that must never become publication-ready. The model declares, as a
+# raw signal like depicts_real_world_subject, whether the intended
+# layout needs source-grounded visual evidence:
+#
+#   NONE             layout intentionally declares NO visual block
+#                    (typography-only remains valid);
+#   SOURCE_GROUNDED  layout declares a visual block that must be
+#                    backed by a real photo, source screenshot/document
+#                    visual, or faithful data visualization.
+#
+# The declaration is mandatory: an undeclared requirement is malformed
+# input and fails closed. A grounded requirement with no usable
+# evidence fails closed before any receipt exists.
+VISUAL_REQUIREMENT_VALUES = frozenset({"NONE", "SOURCE_GROUNDED"})
+
+
+def visual_requirement_of(validated_request: dict[str, Any]) -> str:
+    candidate = validated_request.get("candidate")
+    requirement = candidate.get("visual_requirement") if isinstance(candidate, dict) else None
+    if requirement not in VISUAL_REQUIREMENT_VALUES:
+        raise BridgeError(
+            "PACKAGING_INPUT_INVALID: candidate.visual_requirement must be one of"
+            " ['NONE', 'SOURCE_GROUNDED']"
+        )
+    return requirement
+
+
+def visual_evidence_available(validated_request: dict[str, Any]) -> bool:
+    """Coarse evidence presence: any file-backed asset flag or dataviz flag.
+
+    Finer checks (on-topic, quality, provenance, hash) stay in
+    validate_asset_descriptor; this gate only refuses the fully
+    assetless grounded case before consequential work starts.
+    """
+
+    assets = validated_request.get("assets")
+    if not isinstance(assets, dict):
+        return False
+    return bool(
+        assets.get("has_official_or_source_image")
+        or assets.get("has_usable_screenshot")
+        or assets.get("data_visualization_possible")
+    )
+
+
 def build_receipt_body(
     *, candidate_id: str, validated_request: dict[str, Any], decision: dict[str, Any]
 ) -> dict[str, Any]:
@@ -158,6 +208,7 @@ def build_receipt_body(
         "source_grounding": decision["source_grounding"],
         "distinct_beat_count": decision["distinct_beat_count"],
         "content_type": decision["content_type"],
+        "visual_requirement": visual_requirement_of(validated_request),
     }
     body["receipt_hash"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
     return body
@@ -181,6 +232,12 @@ def evaluate_request(candidate_id: str, validated_request: dict[str, Any]) -> di
     from nullone_packaging_policy import PackagingContractError
 
     candidate_id = check_candidate_id(candidate_id)
+    requirement = visual_requirement_of(validated_request)
+    if requirement == "SOURCE_GROUNDED" and not visual_evidence_available(validated_request):
+        raise BridgeError(
+            "PACKAGING_VISUAL_GROUNDING_UNMET: layout declares a visual block but"
+            " no usable evidence asset, source screenshot, or data visualization exists"
+        )
     try:
         decision = evaluate_packaging(validated_request)
     except PackagingContractError as e:
@@ -216,11 +273,25 @@ def load_receipt(path: Path, *, root: Path = WORKSPACE) -> dict[str, Any]:
     if not isinstance(receipt, dict):
         raise BridgeError("PACKAGING_INPUT_INVALID: receipt is not an object")
     for field in RECEIPT_REQUIRED_FIELDS:
+        if field == "visual_requirement":
+            continue
         if field not in receipt:
             raise BridgeError(f"PACKAGING_INPUT_INVALID: receipt missing field {field!r}")
     if receipt.get("schema") != SCHEMA or receipt.get("contract_version") != CONTRACT_VERSION:
         raise BridgeError("PACKAGING_INPUT_INVALID: receipt schema/contract mismatch")
+    grandfathered = "visual_requirement" not in receipt
+    if grandfathered:
+        # Grandfather pre-grounding receipts (created before issue
+        # #138): their hash covers the fieldless body, so the default
+        # is applied without altering the verified bytes. No NEW
+        # evaluation can produce a fieldless receipt.
+        receipt = dict(receipt)
+        receipt["visual_requirement"] = "NONE"
+    elif receipt.get("visual_requirement") not in VISUAL_REQUIREMENT_VALUES:
+        raise BridgeError("PACKAGING_INPUT_INVALID: receipt visual_requirement unknown")
     body = {k: v for k, v in receipt.items() if k != "receipt_hash"}
+    if grandfathered:
+        del body["visual_requirement"]
     expected = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
     if receipt.get("receipt_hash") != expected:
         raise BridgeError("PACKAGING_RECEIPT_TAMPERED: receipt hash mismatch")
