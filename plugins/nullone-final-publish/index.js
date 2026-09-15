@@ -3,9 +3,12 @@
  *
  * Registers ONE interactive handler (channel telegram, namespace texbrif).
  * `publish:<POST_ID>` callbacks take the deterministic route: envelope +
- * HMAC over the private daemon pipe, zero LLM involvement. Every other
- * `texbrif:*` callback returns handled:false so existing approval/reject/
- * revise/back agent flow is byte-for-byte unchanged.
+ * HMAC over the private daemon pipe, zero LLM involvement.
+ * `approve|reject|revise|back:<POST_ID>` callbacks take the deterministic
+ * first-stage control route (issue #132): authenticated validation +
+ * per-post state transition + bounded reply, zero LLM involvement.
+ * Any other `texbrif:*` callback returns handled:false so existing agent
+ * flow is byte-for-byte unchanged.
  *
  * PUBLICATION SECRET (issue #90 fix): the publish credential NEVER comes
  * from inherited environment state. The manifest declares a managed
@@ -59,6 +62,11 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { definePluginEntry } = require("openclaw/plugin-sdk/plugin-entry");
 const { routeCallback, canonicalStringify } = require("./route");
+const {
+  routeApprovalCallback,
+  approvalReply,
+  createApprovalStore,
+} = require("./approval-route");
 
 const FRAME_MAGIC = Buffer.from("NP1", "utf8");
 const FRAME_VERSION = 1;
@@ -616,12 +624,80 @@ function outcomeText(reply) {
 }
 
 /**
+ * Deterministic first-stage approval handler (P0, issue #132).
+ *
+ * Consumes `texbrif:approve|reject|revise|back:<POST_ID>` with zero LLM
+ * involvement: the same auth + identity gating as the publish route,
+ * then a pure per-post state transition from the approval store, then one
+ * bounded deterministic reply. Unknown `texbrif:*` still falls through to
+ * existing agent behavior; malformed approval-shaped callbacks are
+ * swallowed safely. Never touches the daemon link, never authorizes
+ * publication, never calls Zernio.
+ *
+ * @returns {{handled: boolean}} always handled:true except fallthrough.
+ */
+async function handleApprovalFirstStage(handlerCtx, callback, data, store) {
+  const approval = routeApprovalCallback(data);
+  if (approval.decision === "fallthrough") {
+    return { handled: false };
+  }
+  if (approval.decision === "consume") {
+    return { handled: true };
+  }
+  const authed =
+    handlerCtx && handlerCtx.auth && handlerCtx.auth.isAuthorizedSender === true;
+  if (!authed) {
+    return { handled: true };
+  }
+  const messageId = callback.messageId;
+  const chatId = callback.chatId;
+  const accountId = handlerCtx.accountId;
+  const senderId = handlerCtx.senderId;
+  if (
+    !isPositiveMessageId(messageId) ||
+    !isNonEmptyId(typeof chatId === "number" ? String(chatId) : chatId) ||
+    !isNonEmptyId(typeof accountId === "number" ? String(accountId) : accountId) ||
+    !isNonEmptyId(typeof senderId === "number" ? String(senderId) : senderId)
+  ) {
+    return { handled: true };
+  }
+  const result = store.handle({
+    action: approval.decision,
+    postId: approval.postId,
+    authorized: true,
+    messageId,
+    chatId,
+    accountId,
+    senderId,
+  });
+  if (result.outcome === "REJECTED_UNAUTHORIZED") {
+    return { handled: true };
+  }
+  const reply = result.reply || approvalReply(approval.decision, approval.postId);
+  try {
+    if (reply && Array.isArray(reply.buttons) && reply.buttons.length > 0) {
+      await handlerCtx.respond.reply({ text: reply.text, buttons: reply.buttons });
+    } else {
+      await handlerCtx.respond.reply({ text: reply.text });
+    }
+  } catch {
+    // Respond path is best-effort; the control transition already stands.
+  }
+  // No submitText: zero LLM involvement after the human click.
+  return { handled: true };
+}
+
+/**
  * Build the interactive handler with an injected daemon link (production
  * constructs the real link; offline tests inject a fake). A null link
  * (failed registration) consumes every publish callback safely with zero
  * daemon contact and zero LLM fallback.
  */
 function buildHandler(link) {
+  // Per-handler deterministic first-stage approval store (issue #132):
+  // stage per post + replay keys, process-local, bounded. Fresh handler
+  // instances (including every offline test) start from DRAFT_READY.
+  const approvalStore = createApprovalStore();
   return async (handlerCtx) => {
     const callback =
       handlerCtx && typeof handlerCtx.callback === "object" && handlerCtx.callback !== null
@@ -630,7 +706,10 @@ function buildHandler(link) {
     const data = typeof callback.data === "string" ? callback.data : "";
     const routed = routeCallback(data);
     if (routed.decision === "fallthrough") {
-      return { handled: false };
+      // P0 deterministic first-stage: approve/reject/revise/back are
+      // consumed here with zero LLM involvement. Unknown texbrif:*
+      // subcommands still fall through to existing agent behavior.
+      return handleApprovalFirstStage(handlerCtx, callback, data, approvalStore);
     }
     if (routed.decision === "consume") {
       // Malformed publish-shaped callback: swallow safely, zero side effects.
@@ -789,6 +868,10 @@ const entry = definePluginEntry({
 
 Object.assign(entry, {
   routeCallback,
+  routeApprovalCallback,
+  approvalReply,
+  createApprovalStore,
+  handleApprovalFirstStage,
   canonicalStringify,
   buildFrame,
   buildStartupFrame,
