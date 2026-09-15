@@ -1,0 +1,10 @@
+{
+  "id": "nullone-acceptance",
+  "version": "1.0.0",
+  "name": "NullOne Acceptance Action",
+  "description": "Claims texbrif:accept callbacks on Telegram and routes them to the deterministic NullOne acceptance action core (#129). All other texbrif:* callbacks fall through to existing flows.",
+  "entry": "index.js",
+  "activation": {
+    "onStartup": true
+  }
+}

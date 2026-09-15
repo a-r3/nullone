@@ -1,0 +1,14 @@
+{
+  "name": "nullone-acceptance",
+  "version": "1.0.0",
+  "description": "Deterministic acceptance-action callback handoff for NullOne (#129). Repository source only; install/enable/restart happens at controlled #37 deployment, never by Git merge.",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}
