@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 COMMANDS = [
     [sys.executable, "tests/test_acceptance_contracts.py"],
+    [sys.executable, "tests/test_acceptance_entrypoint.py"],
+    [sys.executable, "tests/test_acceptance_action.py"],
+    [sys.executable, "tests/test_acceptance_plugin_routing.py"],
     [sys.executable, "tests/test_breaking_routing_contract.py"],
     [sys.executable, "tests/test_breaking_identity.py"],
     [sys.executable, "tests/test_cadence_contract_fixture.py"],
@@ -75,6 +78,16 @@ COMMANDS = [
     [sys.executable, "tests/test_offline_render_reproducibility.py"],
     [sys.executable, "tests/test_recovery_contract.py"],
     [sys.executable, "tests/test_restore_drill.py"],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_acceptance_run.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_acceptance_action.py",
+        "self-test",
+    ],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_breaking_identity.py",
