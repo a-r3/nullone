@@ -18,11 +18,13 @@ NODE_SUITES = [
     ROOT / "tests/js/test_plugin_route.js",
     ROOT / "tests/js/test_plugin_index.js",
     ROOT / "tests/js/test_plugin_link.js",
+    ROOT / "tests/js/test_approval_route.js",
 ]
 EXPECTED_PASSES = {
     "test_plugin_route.js": 9,
-    "test_plugin_index.js": 30,
+    "test_plugin_index.js": 34,
     "test_plugin_link.js": 16,
+    "test_approval_route.js": 15,
 }
 
 

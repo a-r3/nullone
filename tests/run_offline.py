@@ -63,6 +63,7 @@ COMMANDS = [
     [sys.executable, "tests/test_scheduled_wakeup_cli.py"],
     [sys.executable, "tests/test_story_wakeup_expected_gate.py"],
     [sys.executable, "tests/test_publish_ipc.py"],
+    [sys.executable, "tests/test_deterministic_approval.py"],
     [sys.executable, "tests/test_publish_receipt.py"],
     [sys.executable, "tests/test_final_publish_controller.py"],
     [sys.executable, "tests/test_zernio_publish_adapter.py"],
@@ -103,6 +104,11 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-draft-bridge.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_approval_controller.py",
         "self-test",
     ],
     [

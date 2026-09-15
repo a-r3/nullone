@@ -237,14 +237,115 @@ test("unauthorized sender fails closed with zero daemon request", async () => {
   assert.equal(ctx._replies.length, 0);
 });
 
-test("approve/reject/revise/back fall through to agent flow", async () => {
+test("approve/reject/revise/back are consumed deterministically (no agent flow)", async () => {
   const link = makeLink();
   const handler = registeredHandler(link);
+  const expectations = {
+    approve: /son təsdiqdən sonra/,
+    reject: /İmtina edildi/,
+    revise: /hansı dəyişikliyi/,
+    back: /ləğv edildi/,
+  };
+  const posts = {
+    approve: POST,
+    reject: "aaaaaaaaaaaaaaaaaaaaaaaa",
+    revise: "bbbbbbbbbbbbbbbbbbbbbbbb",
+    back: "cccccccccccccccccccccccc",
+  };
   for (const action of ["approve", "reject", "revise", "back"]) {
-    const result = await handler(
-      makeHandlerCtx({ callback: { data: `texbrif:${action}:${POST}` } })
-    );
-    assert.deepEqual(result, { handled: false }, action);
+    const post = posts[action];
+    const ctx = makeHandlerCtx({ callback: {
+      data: `texbrif:${action}:${post}`,
+      namespace: "texbrif",
+      payload: `${action}:${post}`,
+      messageId: 424242,
+      chatId: "770011",
+    }});
+    const result = await handler(ctx);
+    assert.deepEqual(result, { handled: true }, action);
+    assert.equal("submitText" in result, false, action);
+    assert.equal(ctx._replies.length, 1, action);
+    assert.match(ctx._replies[0], expectations[action], action);
+  }
+  // First-stage control never touches the publish daemon link.
+  assert.equal(link.calls.length, 0);
+});
+
+test("approve reply carries the second-confirmation button values", async () => {
+  const link = makeLink();
+  const handler = registeredHandler(link);
+  const sent = [];
+  const ctx = makeHandlerCtx({ callback: {
+    data: `texbrif:approve:${POST}`,
+    namespace: "texbrif",
+    payload: `approve:${POST}`,
+    messageId: 424242,
+    chatId: "770011",
+  }});
+  ctx.respond.reply = async (payload) => {
+    sent.push(payload);
+    return undefined;
+  };
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /son təsdiqdən sonra/);
+  assert.ok(Array.isArray(sent[0].buttons), "approve card must carry buttons");
+  const values = sent[0].buttons.map((b) => b.value).sort();
+  assert.deepEqual(values, [`texbrif:back:${POST}`, `texbrif:publish:${POST}`]);
+  assert.equal(link.calls.length, 0);
+});
+
+test("duplicate approve is idempotent with zero daemon contact", async () => {
+  const link = makeLink();
+  const handler = registeredHandler(link);
+  const base = { callback: {
+    data: `texbrif:approve:${POST}`,
+    namespace: "texbrif",
+    payload: `approve:${POST}`,
+    messageId: 424242,
+    chatId: "770011",
+  }};
+  const first = makeHandlerCtx(base);
+  const second = makeHandlerCtx(base);
+  assert.deepEqual(await handler(first), { handled: true });
+  assert.deepEqual(await handler(second), { handled: true });
+  assert.equal(first._replies.length, 1);
+  assert.equal(second._replies.length, 1);
+  assert.equal(first._replies[0], second._replies[0]);
+  assert.equal(link.calls.length, 0);
+});
+
+test("unauthorized first-stage callback is consumed silently", async () => {
+  const link = makeLink();
+  const handler = registeredHandler(link);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:approve:${POST}`,
+      namespace: "texbrif",
+      payload: `approve:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+    auth: { isAuthorizedSender: false },
+  });
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 0);
+  assert.equal(link.calls.length, 0);
+});
+
+test("malformed approval-shaped callbacks are consumed safely", async () => {
+  const link = makeLink();
+  const handler = registeredHandler(link);
+  for (const data of [
+    "texbrif:approve:",
+    "texbrif:reject:ZZZ",
+    "texbrif:revise:short",
+    `texbrif:back:${POST}:extra`,
+  ]) {
+    const result = await handler(makeHandlerCtx({ callback: { data } }));
+    assert.deepEqual(result, { handled: true }, data);
   }
   assert.equal(link.calls.length, 0);
 });
