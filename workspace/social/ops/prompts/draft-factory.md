@@ -411,12 +411,44 @@ Avoid duplicates by consulting:
 
 Repository reference (engineering-only; not present in this runtime
 workspace, do not attempt to read it): the exact deterministic rule
-source is `docs/contracts/editorial-packaging-contract-v1.md`. The rules
-below are that contract's operative content, self-contained here.
+source is `docs/contracts/editorial-packaging-contract-v1.md`. The
+taxonomy below explains that contract; the DECISION itself is made
+only by the deterministic evaluator, never by this cycle's judgment.
+
+AUTHORITY RULE: you ASSESSES packaging input signals; the deterministic
+`nullone-packaging-evaluator.py` DECIDES the format. After a receipt
+exists you must never override its FORMAT_DECISION, VISUAL_STYLE, or
+slide count. Evaluator failure, receipt mismatch, or a missing receipt
+means BLOCKED — never a self-chosen format.
+
+For every selected candidate, before any render or manifest work:
+
+1. Assess the raw signals the contract requires (CONTENT_SHAPE from
+   the taxonomy below, distinct_beat_count counted exactly as defined
+   below, verification mapped from the candidate's literal
+   `verification` field, source grounding, audience value, asset
+   availability). Write ONLY these signals — never a format decision —
+   to a request file under `social/drafts/production/`. Also write an
+   asset descriptor file (`*-packaging-asset.json`) naming the exact
+   visual evidence the receipt will require: `asset_kind` one of
+   REAL_PHOTO / SOURCE_SCREENSHOT / DATA_VISUALIZATION / NONE, with
+   official/source provenance and the local evidence file where one
+   exists (typography claims NONE and names no file).
+2. Run exactly once:
+   `python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate
+   --candidate-id <CANDIDATE_ID> --request-file <request>.json`
+   The receipt path is derived deterministically
+   (`social/drafts/production/<CANDIDATE_ID>-packaging-decision.json`);
+   the same candidate can never have two authoritative receipts.
+3. Read the receipt and conform: render ONLY through
+   `python3 social/ops/scripts/nullone-packaging-render.py render
+   --receipt <receipt> --asset-file <asset>.json ...`, build the manifest ONLY with
+   `--packaging-receipt <receipt> --render-record <record>`, create NOTHING when the receipt
+   says SKIP, and delegate (do not produce) when it says STORY.
 
 CAROUSEL IS NEVER THE DEFAULT. It requires an explicit, countable,
-multi-beat justification. Work through these steps in order for every
-candidate before picking a format.
+multi-beat justification. Assess CONTENT_SHAPE and count distinct beats
+exactly as follows; the evaluator enforces the gate.
 
 ### Step 1 — assess CONTENT_SHAPE and count distinct beats
 
@@ -467,13 +499,16 @@ could technically be padded onto extra slides.
   `COMPARISON` with only 1-2 real beats — do not force those into a
   padded carousel).
 - one primary message
-- renderer: social/tools/render_texbrif_v2.py
+- render ONLY via the deterministic dispatcher (never call the V2 feed
+  renderer directly)
 - exactly 1080x1350
 
 ### CAROUSEL
 
 - Only reachable when Step 3's gate passes.
-- renderer: social/tools/render_carousel_v2.py
+- render ONLY via the deterministic dispatcher with a spec whose slide
+  count exactly equals the receipt's recommendation (never call the V2
+  carousel renderer directly)
 - every slide exactly 1080x1350
 - slide count = `distinct_beat_count` (max 6, trim to the strongest
   beats rather than padding) + 2 (cover + final) — normally 5-8, never
@@ -781,20 +816,42 @@ social/drafts/production/YYYY-MM-DD-<slug>-caption.txt
 
 This file is immutable after manifest creation.
 
-2. Render the final media asset(s).
+2. Render the final media asset(s) ONLY through the deterministic
+   render dispatcher (it enforces the receipt's format; direct renderer
+   calls are not permitted in this runtime):
+
+   python3 social/ops/scripts/nullone-packaging-render.py render \
+     --receipt <RECEIPT_PATH> \
+     --asset-file <ASSET_DESCRIPTOR_PATH> \
+     --output <OUTPUT_FILE_OR_DIR> \
+     [--spec <CAROUSEL_SPEC> | --kicker ... --headline ... --stat ... --source-name ...]
+
+   The render source image always comes from the validated asset
+   descriptor (typography renders over a deterministic neutral canvas;
+   never pass --source yourself). Styles the V2 renderer cannot
+   faithfully support (generated illustration; photo evidence inside a
+   carousel) are refused deterministically — do not work around that.
 
 3. Validate dimensions locally.
 
-4. Build a production manifest using:
+4. Build a production manifest using (the receipt flag is mandatory;
+   without it, or on any format/candidate mismatch, the build is
+   deterministically refused):
 
 python3 social/ops/scripts/nullone-manifest.py build \
   --candidate-id "<CANDIDATE_ID>" \
   --topic "<TOPIC>" \
   --topic-cluster "<TOPIC_CLUSTER>" \
   --content-type "<CONTENT_TYPE>" \
-  --format "<FEED|CAROUSEL|STORY>" \
+  --format "<FEED|CAROUSEL>" \
   --caption-file "<CAPTION_FILE>" \
-  --media "<MEDIA_FILE>"
+  --media "<MEDIA_FILE>" \
+  --packaging-receipt "<RECEIPT_PATH>" \
+  --render-record "<RENDER_RECORD_PATH>"
+
+A STORY receipt never reaches manifest build from this cycle: it means
+DELEGATE_TO_STORY_WORKFLOW (produce nothing here). A SKIP receipt
+means stop with zero render/manifest/draft/Telegram effects.
 
 For CAROUSEL:
 repeat --media in exact slide order.

@@ -48,6 +48,10 @@ Transport note: this run executes with the workspace root as its
 working directory. Invoke helpers as
 `python3 social/ops/scripts/<name>.py ...` and
 `python3 social/tools/<name>.py ...` (workspace-relative).
+Packaging format authority is deterministic: assess signals, run
+`nullone-packaging-evaluator.py evaluate`, render ONLY through
+`nullone-packaging-render.py render --receipt`, build the manifest
+ONLY with `--packaging-receipt`, and never override the receipt.
 Telegram delivery happens ONLY through
 `python3 social/ops/scripts/nullone_telegram_review_delivery_adapter.py
 deliver --payload-file <validated-payload>.json`: never invoke
