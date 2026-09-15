@@ -105,6 +105,12 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         raise BridgeError("PACKAGING_INPUT_INVALID: asset file unreadable") from e
     asset = validate_asset_descriptor(asset_raw, receipt, root=root)
 
+    if receipt.get("visual_requirement") == "SOURCE_GROUNDED" and asset.get("asset_kind") == "NONE":
+        raise BridgeError(
+            "PACKAGING_VISUAL_GROUNDING_UNMET: receipt declares a visual block but"
+            " the validated asset claims no evidence; refusing to render a placeholder frame"
+        )
+
     candidate_id = receipt["candidate_id"]
     style = receipt.get("VISUAL_STYLE")
     if style == "GENERATED_ILLUSTRATION_ALLOWED":
@@ -246,7 +252,7 @@ def self_test() -> int:
         root = Path(td)
         skip = build_receipt_body(
             candidate_id="probe",
-            validated_request={"candidate": {"content_shape": "SINGLE_FACT"}, "assets": {}},
+            validated_request={"candidate": {"content_shape": "SINGLE_FACT", "visual_requirement": "NONE"}, "assets": {}},
             decision={
                 "POST_DECISION": "SKIP", "CONTENT_SHAPE": "SINGLE_FACT",
                 "REAL_PHOTO_AVAILABLE": "NO", "REAL_PHOTO_REQUIRED": "NO",
