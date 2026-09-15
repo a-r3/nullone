@@ -18,6 +18,55 @@ BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
+class CarouselSemanticError(ValueError):
+    """Typed failure for semantically empty meaningful blocks (issue #135)."""
+
+
+EMPTY_COMPARISON_CONTENT = "EMPTY_COMPARISON_CONTENT"
+
+
+def _meaningful_text(value):
+    """Non-blank normalized text, else None (rejects whitespace-only)."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def validate_comparison_slide(slide, index):
+    """Fail closed when a comparison slide lacks meaningful side content.
+
+    The comparison renderer always draws two cards; a side without a
+    meaningful value would render as a blank production placeholder.
+    Each side must be a mapping carrying a non-blank `value`.
+    """
+    for side in ("left", "right"):
+        item = slide.get(side)
+        if not isinstance(item, dict) or _meaningful_text(item.get("value")) is None:
+            raise CarouselSemanticError(
+                f"{EMPTY_COMPARISON_CONTENT}: slide {index} (type=comparison): "
+                f"side {side!r} has no meaningful content"
+            )
+
+
+def validate_slide_semantics(slides):
+    """Pre-render semantic gate: validate every slide BEFORE any output.
+
+    Runs before any PNG is written so an invalid spec renders no
+    production-ready slide set and can never report validation PASS.
+    Typography-only layouts (cover/stat/explainer/limitation/final)
+    carry no card-slot content blocks and are unaffected; comparison is
+    currently the only slide type declaring card-slot blocks.
+    """
+    for i, slide in enumerate(slides, start=1):
+        if not isinstance(slide, dict):
+            raise CarouselSemanticError(
+                f"{EMPTY_COMPARISON_CONTENT}: slide {i} is not a mapping"
+            )
+        if slide.get("type") == "comparison":
+            validate_comparison_slide(slide, i)
+
+
 def font(size, bold=False):
     return ImageFont.truetype(BOLD if bold else REGULAR, size)
 
@@ -363,6 +412,10 @@ def main():
 
     if not 2 <= len(slides) <= 10:
         raise RuntimeError("Carousel must contain 2–10 slides")
+
+    # Semantic gate first: an invalid spec must fail before any slide
+    # is rendered, so no partial production-ready set can exist.
+    validate_slide_semantics(slides)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

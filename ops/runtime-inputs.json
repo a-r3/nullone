@@ -41,8 +41,8 @@
       "sha256": "a4a42d2e6e90c3b12abfa7c73e1323fca5ae764b4fea5ef7f3ab0cd91b290eb9"
     },
     "workspace/social/tools/render_carousel_v2.py": {
-      "bytes": 9233,
-      "sha256": "ef79b46c25f747c4d7deec18abbbf5456e180ecc7fba79cb1019b3416378f507"
+      "bytes": 11261,
+      "sha256": "7db7a03723a481097eb99a91f2bf72e074ee0286baf2db9b949dfc66899887ad"
     },
     "workspace/social/tools/render_story_v2.py": {
       "bytes": 6052,
