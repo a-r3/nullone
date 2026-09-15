@@ -207,6 +207,65 @@ def make_manifest(tmp_path, fmt="FEED", media_count=1, content_type="NEWS"):
     }
 
     manifest_path = manifests_dir / f"test-{fmt.lower()}-001.json"
+    if fmt in ("FEED", "CAROUSEL"):
+        # Factory-format manifests carry deterministic packaging
+        # authority (see nullone_packaging_receipt): the Draft Bridge
+        # re-validates it on every execute. STORY manifests stay
+        # StoryWorkflow-owned and carry no packaging block.
+        import nullone_packaging_receipt as packaging_receipt
+
+        request = {
+            "candidate": {
+                "content_type": content_type,
+                "content_shape": "MULTI_STEP_EXPLAINER" if fmt == "CAROUSEL" else "SINGLE_FACT",
+                "timeliness": "TODAY",
+                "verification_status": "PASS",
+                "source_grounding": "STRONG_PRIMARY",
+                "audience_value": "HIGH",
+                "distinct_beat_count": 4 if fmt == "CAROUSEL" else 1,
+                "depicts_real_world_subject": False,
+                "still_developing": False,
+            },
+            "assets": {
+                "has_official_or_source_image": False,
+                "has_usable_screenshot": False,
+                "image_on_topic": False,
+                "image_quality_ok": False,
+                "data_visualization_possible": False,
+            },
+        }
+        receipt = packaging_receipt.evaluate_request("test-candidate", request)
+        prod_dir = tmp_path / "social" / "drafts" / "production"
+        prod_dir.mkdir(parents=True, exist_ok=True)
+        receipt_path = prod_dir / "test-candidate-packaging-decision.json"
+        receipt_path.write_text(
+            __import__("json").dumps(receipt), encoding="utf-8"
+        )
+        record = packaging_receipt.build_render_record(
+            candidate_id="test-candidate",
+            receipt_hash=receipt["receipt_hash"],
+            format_decision=receipt["FORMAT_DECISION"],
+            asset_kind="NONE",
+            outputs=[
+                {
+                    "path": item["local_path"],
+                    "sha256": item["sha256"],
+                }
+                for item in media
+            ],
+        )
+        record_path = prod_dir / "test-candidate-render-record.json"
+        record_path.write_text(
+            __import__("json").dumps(record), encoding="utf-8"
+        )
+        manifest["packaging"] = {
+            "receipt_path": "social/drafts/production/test-candidate-packaging-decision.json",
+            "receipt_hash": receipt["receipt_hash"],
+            "render_record_path": "social/drafts/production/test-candidate-render-record.json",
+            "record_hash": record["record_hash"],
+            "format_decision": receipt["FORMAT_DECISION"],
+            "asset_kind": "NONE",
+        }
     atomic_write_json(manifest_path, manifest)
     return manifest_path, manifest
 
