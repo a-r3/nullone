@@ -59,6 +59,8 @@ const TEXT_BACK_SAFE = "Yayım ləğv edildi. Draft dəyişmədən saxlanıldı.
 const TEXT_WRONG_STATE =
   "⛔ Bu sorğu cari mərhələ üçün keçərli deyil. Heç nə dəyişmədi.";
 const TEXT_MALFORMED = "⛔ Sorğu qəbul edilmədi. Heç nə dəyişmədi.";
+const TEXT_EXPIRED =
+  "⏳ Bu sorğunun redaksiya günü keçib. Heç nə yayımlanmadı.";
 
 // (stage, action) -> [toStage, converged]. Missing entries are
 // wrong-state rejections. `converged=true` affirms without moving state.
@@ -179,13 +181,27 @@ function createApprovalStore() {
     },
     _stages: stages,
     _seen: seen,
-    handle({ action, postId, authorized, messageId, chatId, accountId, senderId }) {
+    handle({ action, postId, authorized, messageId, chatId, accountId, senderId, reviewExpired }) {
       if (authorized !== true) {
         return {
           outcome: "REJECTED_UNAUTHORIZED",
           fromStage: this.stageFor(postId),
           toStage: this.stageFor(postId),
           reply: null, // unauthorized: silent, mirroring the publish route
+          publishAuthorized: false,
+          zernioCalls: 0,
+        };
+      }
+      if (reviewExpired === true) {
+        // P0 #140: stale card from a prior editorial date. Fail closed
+        // before duplicate tracking: no transition, no seen mutation,
+        // no second confirmation. Mirrors the Python controller.
+        const stage = this.stageFor(typeof postId === "string" ? postId.toLowerCase() : postId);
+        return {
+          outcome: "REJECTED_EXPIRED",
+          fromStage: stage,
+          toStage: stage,
+          reply: { text: TEXT_EXPIRED, buttons: null },
           publishAuthorized: false,
           zernioCalls: 0,
         };
@@ -278,4 +294,5 @@ module.exports = {
   TEXT_BACK_SAFE,
   TEXT_WRONG_STATE,
   TEXT_MALFORMED,
+  TEXT_EXPIRED,
 };

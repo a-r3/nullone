@@ -77,6 +77,7 @@ COMMANDS = [
     [sys.executable, "tests/test_runtime_inventory.py"],
     [sys.executable, "tests/test_offline_render_reproducibility.py"],
     [sys.executable, "tests/test_carousel_semantic_validation.py"],
+    [sys.executable, "tests/test_p0_orchestration_recovery.py"],
     [sys.executable, "tests/test_recovery_contract.py"],
     [sys.executable, "tests/test_restore_drill.py"],
     [
@@ -117,6 +118,16 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-packaging-render.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_review_lifecycle.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_draft_candidate_fallback.py",
         "self-test",
     ],
     [

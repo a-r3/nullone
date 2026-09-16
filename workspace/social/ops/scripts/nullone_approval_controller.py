@@ -70,6 +70,11 @@ OUTCOME_DUPLICATE = "DUPLICATE"
 OUTCOME_REJECTED_UNAUTHORIZED = "REJECTED_UNAUTHORIZED"
 OUTCOME_REJECTED_MALFORMED = "REJECTED_MALFORMED"
 OUTCOME_REJECTED_WRONG_STATE = "REJECTED_WRONG_STATE"
+# P0 #140: callback for a review object whose editorial date has elapsed
+# (caller-proven via nullone_review_lifecycle). Fail closed: no Zernio
+# mutation, no publication, no second confirmation, no model call, and
+# the stale card is never resurrected into a live approval flow.
+OUTCOME_REJECTED_EXPIRED = "REJECTED_EXPIRED"
 
 # Deterministic bounded reply texts (Azerbaijani, matching existing tone).
 TEXT_APPROVE_CARD = (
@@ -89,6 +94,10 @@ TEXT_MALFORMED = (
     "\u26d4 Sor\u011fu q\u0259bul edilm\u0259di. He\u00e7 n\u0259 d\u0259yi\u015fm\u0259di."
 )
 TEXT_UNAUTHORIZED = "\u26d4 \u0130caz\u0259siz sor\u011fu."
+TEXT_EXPIRED = (
+    "\u23f3 Bu sor\u011funun redaksiya g\u00fcn\u00fc ke\u00e7ib. "
+    "He\u00e7 n\u0259 yay\u0131mlanmad\u0131."
+)
 
 # (stage, action) -> (to_stage, converged_only). Missing entries are
 # wrong-state rejections. ``converged_only`` marks transitions that must
@@ -175,11 +184,19 @@ def handle_approval_callback(
     account_id: object,
     sender_id: object,
     seen_keys: set[str] | None = None,
+    review_expired: object = False,
 ) -> dict:
     """Handle one first-stage approval callback deterministically.
 
     ``seen_keys`` is caller-owned idempotency storage (mutated only on
-    accepted callbacks). Returns a result dict with ``outcome``,
+    accepted callbacks). ``review_expired`` is caller-proven staleness
+    (P0 #140: the review object's Asia/Baku editorial date elapsed
+    before the current date, per nullone_review_lifecycle): when True
+    the callback fails closed with REJECTED_EXPIRED -- no transition,
+    no seen_keys mutation, no second confirmation -- regardless of
+    action or stage. Defaults False, preserving all existing behavior.
+
+    Returns a result dict with ``outcome``,
     ``from_stage``/``to_stage``, ``reply`` (``{"text", "buttons"}``),
     ``receipt``, and invariant ``publish_authorized=False`` /
     ``zernio_calls=0``.
@@ -207,6 +224,14 @@ def handle_approval_callback(
     if authorized is not True:
         return rejected(
             OUTCOME_REJECTED_UNAUTHORIZED, TEXT_UNAUTHORIZED, current_stage
+        )
+    if review_expired is True:
+        # P0 #140: stale card from a prior editorial date. Fail closed
+        # before duplicate tracking so an expired callback can never
+        # converge into, or resurrect, a live approval flow. seen_keys
+        # is intentionally NOT mutated.
+        return rejected(
+            OUTCOME_REJECTED_EXPIRED, TEXT_EXPIRED, current_stage
         )
     if not isinstance(action, str) or action not in ACTIONS:
         return rejected(
@@ -409,6 +434,38 @@ def self_test() -> None:
             assert sweep["publish_authorized"] is False, (stage, action)
             assert sweep["zernio_calls"] == 0, (stage, action)
             assert sweep["receipt"]["publish_authorized"] is False
+
+    # P0 #140: expired review callbacks fail closed on every stage and
+    # action: no transition, no idempotency mutation, no publish, no
+    # Zernio, expired reply card.
+    for stage in STAGES:
+        for action in (
+            ACTION_APPROVE,
+            ACTION_REJECT,
+            ACTION_REVISE,
+            ACTION_BACK,
+        ):
+            seen_expired: set[str] = set()
+            stale = handle_approval_callback(
+                authorized=True,
+                action=action,
+                post_id=post,
+                current_stage=stage,
+                seen_keys=seen_expired,
+                review_expired=True,
+                **ids,
+            )
+            assert stale["outcome"] == OUTCOME_REJECTED_EXPIRED, (
+                stage,
+                action,
+                stale,
+            )
+            assert stale["to_stage"] == stage, (stage, action, stale)
+            assert stale["publish_authorized"] is False, (stage, action)
+            assert stale["zernio_calls"] == 0, (stage, action)
+            assert stale["receipt"]["publish_authorized"] is False
+            assert stale["reply"]["buttons"] is None, (stage, action)
+            assert seen_expired == set(), (stage, action)
 
     print("APPROVAL_CONTROLLER_SELF_TEST=PASS")
 
