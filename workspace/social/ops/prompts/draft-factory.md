@@ -934,9 +934,11 @@ If manifest review.create_attempts == 1 and state is:
 never create another review draft automatically.
 
 Post-cycle deterministic backstop (#142): after this cycle the wrapper
-invokes the credentialed draft-bridge action for at most one same-day
-pending factory manifest. You still bridge first — the backstop only
-completes what this cycle left pending (attempts == 0, NOT_CREATED).
+invokes the credentialed draft-bridge action for at most one manifest
+bound to THIS cycle (built at or after cycle start; same-day
+FEED/CAROUSEL only; attempts == 0, NOT_CREATED). You still bridge
+first — the backstop only completes what this cycle left pending, and
+a BLOCKED backstop fails the wrapper (never silent COMPLETED).
 
 ## Telegram delivery
 

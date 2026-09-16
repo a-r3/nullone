@@ -9,7 +9,10 @@ This module is the action core. In production it runs as a Gateway-spawned
 child (fixed argv, inherited Gateway process environment -- the only runtime
 that carries the Zernio drafts credential), invoked through the
 `plugins/nullone-draft-bridge/` handler after the existing ingress sender
-authorization. There is deliberately no other entry surface: no cron job,
+authorization, and automatically by the real Draft Factory wrapper
+(`nullone-draft-factory-run.py execute`) after each editorial cycle via
+`ensure_pending_bridge` (same-cycle binding, at most one completion).
+There is deliberately no other entry surface: no cron job of its own,
 no agent turn, no model routing, no HTTP/RPC endpoint, no general exec.
 
 Caller contract (strict, exact):
@@ -524,16 +527,19 @@ def handle_request(
 
 
 def _eligible_factory_manifests(
-    root: Path, today: Any
+    root: Path, today: Any, since: Any
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Same-day pending factory manifests, sorted, read-only scan.
+    """Current-cycle pending factory manifests, sorted, read-only scan.
 
     Eligibility (all required): file under the canonical manifests dir,
     loads and validates, stem binds to `manifest_id`, format is a
     factory-main format (FEED/CAROUSEL -- never STORY), Baku editorial
-    date equals `today`, review permits creation (attempts == 0,
-    NOT_CREATED, no draft id). Unreadable/invalid files are reported in
-    `skipped` and never stop the scan. Returns (eligible_ids, skipped).
+    date equals `today`, authoritative build instant (`created_at`) at
+    or after the current cycle start `since` (never alphabetical
+    accident: unrelated older pending manifests are excluded),
+    review permits creation (attempts == 0, NOT_CREATED, no draft id).
+    Unreadable/invalid/unbound files are reported in `skipped` and never
+    stop the scan. Returns (eligible_ids, skipped).
     """
     manifest_dir = root.resolve() / MANIFESTS_RELATIVE_DIR
     try:
@@ -559,6 +565,12 @@ def _eligible_factory_manifests(
             continue
         if manifest_baku_date(m) != today:
             continue
+        created = _created_at_instant(m)
+        if created is None:
+            skipped.append({"manifest_id": stem, "reason": "unproven-created-at"})
+            continue
+        if created < since:
+            continue
         review = m.get("review")
         if not isinstance(review, dict):
             skipped.append({"manifest_id": stem, "reason": "unreadable-or-invalid"})
@@ -573,21 +585,57 @@ def _eligible_factory_manifests(
     return (eligible, skipped)
 
 
+def _created_at_instant(manifest: Any) -> Any:
+    """Authoritative build instant or None if unproven.
+
+    Top-level `created_at` only (the pipeline-written build timestamp):
+    must be a string, ISO-8601, timezone-aware. Anything else proves
+    nothing and excludes the manifest from automatic completion.
+    """
+    from datetime import datetime as _datetime
+
+    if not isinstance(manifest, dict):
+        return None
+    value = manifest.get("created_at")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = _datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed
+
+
 def ensure_pending_bridge(
     *,
     workspace_root: Path | str | None = None,
     today: Any = None,
+    since: Any = None,
     max_creations: int = 1,
 ) -> dict[str, Any]:
     """Deterministic Draft Factory completion pass (issue #142 wiring).
 
+    Bound to the CURRENT cycle via `since` (required): only manifests
+    whose authoritative build instant is at or after the cycle start
+    are eligible. This replaces any filename-order guessing: an older
+    pending manifest from another cycle is never consumed here.
+
     Invoked by the real Draft Factory flow after the editorial cycle:
     completes at most `max_creations` (default 1, the single-selection
-    rule) same-day pending factory manifests through `handle_request`
+    rule) eligible factory manifests through `handle_request`
     (single-flight, audit, replay-safe). Never creates for STORY,
-    prior-day, consumed, or invalid manifests. Never raises for domain
-    outcomes; returns a machine-shaped summary with no Telegram,
-    approval, scheduling, or publication keys.
+    prior-day, pre-cycle, consumed, or invalid manifests.
+
+    Status taxonomy (Issue A):
+    - COMPLETED: an eligible manifest reached DRAFT_CREATED;
+    - NOOP: no eligible pending manifest exists (legitimate no-action);
+    - BLOCKED: eligible manifest(s) attempted but none created;
+    - ERROR: unexpected internal exception (fail-closed stop).
+    Never raises for domain outcomes; ERROR is returned, not thrown.
+    The summary carries no Telegram, approval, scheduling, or
+    publication keys.
     """
     from datetime import datetime
 
@@ -596,13 +644,31 @@ def ensure_pending_bridge(
         from zoneinfo import ZoneInfo
 
         today = datetime.now(ZoneInfo("Asia/Baku")).date()
+    if since is None or not isinstance(since, datetime):
+        raise ActionError(REASON_MALFORMED_REQUEST)
+    if since.tzinfo is None or since.tzinfo.utcoffset(since) is None:
+        raise ActionError(REASON_MALFORMED_REQUEST)
     if not isinstance(max_creations, int) or max_creations < 1:
         raise ActionError(REASON_MALFORMED_REQUEST)
-    eligible, skipped = _eligible_factory_manifests(root, today)
+    eligible, skipped = _eligible_factory_manifests(root, today, since)
     attempted: list[dict[str, Any]] = []
     created: dict[str, Any] | None = None
     for manifest_id in eligible[:max_creations]:
-        result = handle_request({"manifest_id": manifest_id}, workspace_root=root)
+        try:
+            result = handle_request({"manifest_id": manifest_id}, workspace_root=root)
+        except Exception:
+            # Unexpected internal failure (never a domain outcome, which
+            # handle_request returns): fail closed and STOP, no further
+            # manifest attempted.
+            attempted.append(
+                {"manifest_id": manifest_id, "status": "ERROR", "reason_code": "ACTION_INTERNAL_ERROR"}
+            )
+            return {
+                "status": "ERROR",
+                "created": None,
+                "attempted": attempted,
+                "skipped": skipped,
+            }
         attempted.append(
             {
                 "manifest_id": manifest_id,
@@ -616,8 +682,14 @@ def ensure_pending_bridge(
                 "draft_id": result["zernio"]["draft_id"],
             }
             break
+    if created is not None:
+        status = "COMPLETED"
+    elif attempted:
+        status = "BLOCKED"
+    else:
+        status = "NOOP"
     return {
-        "status": "COMPLETED" if created else "NOOP",
+        "status": status,
         "created": created,
         "attempted": attempted,
         "skipped": skipped,

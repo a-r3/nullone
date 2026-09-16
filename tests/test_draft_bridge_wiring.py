@@ -25,7 +25,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -106,13 +106,16 @@ def write_manifest(root: Path, manifest_id: str, *, created_at: str,
 
 
 class FakeBridge:
-    def __init__(self):
+    def __init__(self, mode: str = "create"):
+        self.mode = mode
         self.calls: list[str] = []
         self.lock = threading.Lock()
 
     def execute(self, manifest_arg: str) -> int:
         with self.lock:
             self.calls.append(manifest_arg)
+        if self.mode != "create":
+            return 2
         root = Path(bridge_common.WORKSPACE)
         path = root / manifest_arg
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -137,18 +140,28 @@ class EnsurePendingBridgeTest(unittest.TestCase):
             with mock.patch.object(bridge_common, "WORKSPACE", root):
                 try:
                     write_manifest(root, MID, created_at=today_iso())
-                    first = action.ensure_pending_bridge(workspace_root=root)
+                    since = datetime.now(BAKU) - timedelta(hours=1)
+                    first = action.ensure_pending_bridge(
+                        workspace_root=root, since=since
+                    )
                     self.assertEqual(first["status"], "COMPLETED")
                     self.assertEqual(
                         first["created"]["draft_id"], "6aa965709ec9a893c0ffee99"
                     )
                     self.assertEqual(len(fake.calls), 1)
                     self.assertNotIn("telegram", json.dumps(first).lower())
-                    second = action.ensure_pending_bridge(workspace_root=root)
+                    second = action.ensure_pending_bridge(
+                        workspace_root=root, since=since
+                    )
                     self.assertEqual(second["status"], "NOOP")
                     self.assertEqual(len(fake.calls), 1)
                 finally:
                     action._BRIDGE_OVERRIDE = old
+
+    def test_missing_since_is_contract_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(Exception):
+                action.ensure_pending_bridge(workspace_root=Path(tmp))
 
     def test_prior_day_story_consumed_untouched(self):
         fake = FakeBridge()
@@ -170,16 +183,64 @@ class EnsurePendingBridgeTest(unittest.TestCase):
                         root, "2026-09-16-used-2026-09-16",
                         created_at=today_iso(), create_attempts=1,
                     )
-                    summary = action.ensure_pending_bridge(workspace_root=root)
+                    since = datetime.now(BAKU) - timedelta(hours=1)
+                    summary = action.ensure_pending_bridge(
+                        workspace_root=root, since=since
+                    )
                     self.assertEqual(summary["status"], "NOOP")
                     self.assertEqual(fake.calls, [])
                     self.assertEqual(summary["attempted"], [])
                 finally:
                     action._BRIDGE_OVERRIDE = old
 
+    def test_pre_cycle_pending_excluded_only_cycle_bound_completed(self):
+        """Issue B/E: alphabetically-first older manifest never consumed."""
+        fake = FakeBridge()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = action._BRIDGE_OVERRIDE
+            action._BRIDGE_OVERRIDE = fake
+            with mock.patch.object(bridge_common, "WORKSPACE", root):
+                try:
+                    since = datetime.now(BAKU) - timedelta(minutes=30)
+                    old_created = (since - timedelta(hours=2)).isoformat()
+                    new_created = since.isoformat()
+                    write_manifest(
+                        root, "2026-09-16-aaa-older-2026-09-16",
+                        created_at=old_created,
+                    )
+                    write_manifest(
+                        root, "2026-09-16-zzz-current-2026-09-16",
+                        created_at=new_created,
+                    )
+                    summary = action.ensure_pending_bridge(
+                        workspace_root=root, since=since
+                    )
+                    self.assertEqual(summary["status"], "COMPLETED")
+                    self.assertEqual(len(fake.calls), 1)
+                    self.assertIn("zzz-current", fake.calls[0])
+                    self.assertNotIn("aaa-older", fake.calls[0])
+                    self.assertEqual(
+                        summary["created"]["manifest_id"],
+                        "2026-09-16-zzz-current-2026-09-16",
+                    )
+                    older = json.loads(
+                        (
+                            root / "social" / "ops" / "manifests"
+                            / "2026-09-16-aaa-older-2026-09-16.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(older["review"]["create_attempts"], 0)
+                    self.assertEqual(older["review"]["state"], "NOT_CREATED")
+                finally:
+                    action._BRIDGE_OVERRIDE = old
+
     def test_missing_manifests_dir_is_clean_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
-            summary = action.ensure_pending_bridge(workspace_root=Path(tmp))
+            since = datetime.now(BAKU) - timedelta(hours=1)
+            summary = action.ensure_pending_bridge(
+                workspace_root=Path(tmp), since=since
+            )
             self.assertEqual(summary["status"], "NOOP")
             self.assertEqual(summary["attempted"], [])
 
@@ -187,14 +248,23 @@ class EnsurePendingBridgeTest(unittest.TestCase):
 class WrapperWiringIntegrationTest(unittest.TestCase):
     """The real wrapper entrypoint reaches the action with zero model calls."""
 
-    def run_wrapper(self, tmp: str, cycle_effect=None):
-        from nullone_bridge_common import BridgeError
+    @staticmethod
+    def fixed_start() -> datetime:
+        """Pinned cycle start on the real current Baku date."""
+        return datetime.now(BAKU).replace(
+            hour=10, minute=40, second=0, microsecond=0
+        )
 
+    def run_wrapper(self, tmp: str, fake=None, cycle_effect=None,
+                    fixture_created_at: str | None = None,
+                    extra_fixtures: list | None = None):
         root = Path(tmp)
         wrapper = load_wrapper()
-        fake = FakeBridge()
+        if fake is None:
+            fake = FakeBridge()
         old = action._BRIDGE_OVERRIDE
         action._BRIDGE_OVERRIDE = fake
+        start = self.fixed_start()
         cycle_calls: list[str] = []
         if cycle_effect is None:
             def cycle_effect(cmd, **kwargs):
@@ -207,9 +277,15 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             mock.patch.object(
                 wrapper, "resolve_opencode_binary", return_value="opencode"
             ),
+            mock.patch.object(wrapper, "_utcnow", return_value=start),
         ):
             try:
-                write_manifest(root, MID, created_at=today_iso())
+                write_manifest(
+                    root, MID,
+                    created_at=fixture_created_at or start.isoformat(),
+                )
+                for spec in extra_fixtures or []:
+                    write_manifest(root, **spec)
                 code = wrapper.execute()
             finally:
                 action._BRIDGE_OVERRIDE = old
@@ -238,6 +314,7 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             fake = FakeBridge()
             old = action._BRIDGE_OVERRIDE
             action._BRIDGE_OVERRIDE = fake
+            start = self.fixed_start()
             with (
                 mock.patch.object(bridge_common, "WORKSPACE", root),
                 mock.patch.object(
@@ -246,9 +323,10 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
                 mock.patch.object(
                     wrapper, "resolve_opencode_binary", return_value="opencode"
                 ),
+                mock.patch.object(wrapper, "_utcnow", return_value=start),
             ):
                 try:
-                    write_manifest(root, MID, created_at=today_iso())
+                    write_manifest(root, MID, created_at=start.isoformat())
                     self.assertEqual(wrapper.execute(), 0)
                     self.assertEqual(len(fake.calls), 1)
                     self.assertEqual(wrapper.execute(), 0)
@@ -265,6 +343,7 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             fake = FakeBridge()
             old = action._BRIDGE_OVERRIDE
             action._BRIDGE_OVERRIDE = fake
+            start = self.fixed_start()
 
             def boom(cmd, **kwargs):
                 raise BridgeError("transport down")
@@ -275,13 +354,95 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
                 mock.patch.object(
                     wrapper, "resolve_opencode_binary", return_value="opencode"
                 ),
+                mock.patch.object(wrapper, "_utcnow", return_value=start),
             ):
                 try:
-                    write_manifest(root, MID, created_at=today_iso())
+                    write_manifest(root, MID, created_at=start.isoformat())
                     self.assertEqual(wrapper.execute(), 1)
                     self.assertEqual(len(fake.calls), 1)
                 finally:
                     action._BRIDGE_OVERRIDE = old
+
+    def test_wrapper_true_noop_stays_exit_zero(self):
+        """Issue A/B: no eligible manifest is a successful exit 0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            code, fake, _ = self.run_wrapper(
+                tmp,
+                fixture_created_at="2026-09-15T09:30:54+00:00",
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(fake.calls, [])
+
+    def test_wrapper_blocked_bridge_fails_nonzero_retry_safe(self):
+        """Issue A/C: eligible + BLOCKED bridge => exit 1, no duplicate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            code, fake, _ = self.run_wrapper(tmp, fake=FakeBridge(mode="blocked"))
+            self.assertEqual(code, 1)
+            self.assertEqual(len(fake.calls), 1)
+            data = json.loads(
+                (
+                    Path(tmp) / "social" / "ops" / "manifests" / f"{MID}.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(data["review"]["create_attempts"], 0)
+            self.assertEqual(data["review"]["state"], "NOT_CREATED")
+            self.assertIsNone(data["review"]["zernio_draft_id"])
+
+    def test_wrapper_unexpected_bridge_error_fails_nonzero(self):
+        """Issue A/D: unexpected internal error => exit 1, fail closed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wrapper = load_wrapper()
+            fake = FakeBridge()
+            old = action._BRIDGE_OVERRIDE
+            action._BRIDGE_OVERRIDE = fake
+            start = self.fixed_start()
+            with (
+                mock.patch.object(bridge_common, "WORKSPACE", root),
+                mock.patch.object(
+                    wrapper, "run_opencode_cycle", return_value=None
+                ),
+                mock.patch.object(
+                    wrapper, "resolve_opencode_binary", return_value="opencode"
+                ),
+                mock.patch.object(wrapper, "_utcnow", return_value=start),
+                mock.patch.object(
+                    action, "handle_request",
+                    side_effect=RuntimeError("simulated internal failure"),
+                ),
+            ):
+                try:
+                    write_manifest(root, MID, created_at=start.isoformat())
+                    self.assertEqual(wrapper.execute(), 1)
+                    self.assertEqual(fake.calls, [])
+                finally:
+                    action._BRIDGE_OVERRIDE = old
+
+    def test_wrapper_binds_current_cycle_not_alphabetical(self):
+        """Issue B/E: pre-cycle pending manifest never consumed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            start = self.fixed_start()
+            old_created = (start - timedelta(hours=2)).isoformat()
+            code, fake, _ = self.run_wrapper(
+                tmp,
+                fixture_created_at=start.isoformat(),
+                extra_fixtures=[
+                    {
+                        "manifest_id": "2026-09-16-aaa-older-2026-09-16",
+                        "created_at": old_created,
+                    }
+                ],
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(len(fake.calls), 1)
+            self.assertIn(MID, fake.calls[0])
+            older = json.loads(
+                (
+                    Path(tmp) / "social" / "ops" / "manifests"
+                    / "2026-09-16-aaa-older-2026-09-16.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(older["review"]["create_attempts"], 0)
 
     def test_summary_has_no_telegram_or_publication_keys(self):
         fake = FakeBridge()
@@ -291,8 +452,11 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             action._BRIDGE_OVERRIDE = fake
             with mock.patch.object(bridge_common, "WORKSPACE", root):
                 try:
+                    since = datetime.now(BAKU) - timedelta(hours=1)
                     write_manifest(root, MID, created_at=today_iso())
-                    summary = action.ensure_pending_bridge(workspace_root=root)
+                    summary = action.ensure_pending_bridge(
+                        workspace_root=root, since=since
+                    )
                 finally:
                     action._BRIDGE_OVERRIDE = old
         blob = json.dumps(summary).lower()
