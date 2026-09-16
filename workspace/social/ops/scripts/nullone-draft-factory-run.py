@@ -21,10 +21,12 @@ draft + Telegram delivery in one cycle.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
+from nullone_draft_bridge_action import ensure_pending_bridge
 from nullone_opencode_binary import resolve_opencode_binary
 from nullone_opencode_role import (
     build_opencode_command,
@@ -83,15 +85,56 @@ def execute() -> int:
     model = resolve_role_model()
     print(describe_cycle(role=ROLE, agent=AGENT, model=model))
     cmd: Sequence[str] = build_command(model=model, binary=resolve_opencode_binary())
+    cycle_start = _utcnow()
     try:
         run_opencode_cycle(
             cmd, cwd=WORKSPACE, timeout=DRAFT_FACTORY_TIMEOUT_SECONDS, role=ROLE
         )
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        _run_bridge_backstop(cycle_start)
+        return 1
+    backstop_failed = _run_bridge_backstop(cycle_start)
+    if backstop_failed:
+        # An eligible authoritative pending manifest existed but bridge
+        # completion did not reach DRAFT_CREATED: this is a failed
+        # production cycle, never a silent COMPLETED (issue #142-A).
+        print("ROLE_OUTCOME=BLOCKED reason=BRIDGE_BACKSTOP")
         return 1
     print("ROLE_OUTCOME=COMPLETED")
     return 0
+
+
+def _utcnow() -> datetime:
+    """Cycle-start clock (module seam: offline tests pin this)."""
+    return datetime.now(timezone.utc)
+
+
+def _run_bridge_backstop(cycle_start: datetime) -> bool:
+    """Deterministic completion pass (issue #142 wiring).
+
+    After the editorial cycle, completes at most one manifest bound to
+    THIS cycle (built at or after `cycle_start`) through the
+    credentialed draft-bridge action (single-flight, audit,
+    replay-safe). Runs in this process, so in the Gateway cron context
+    it carries the drafts credential; elsewhere it fails closed with
+    zero calls. Returns True when bridge completion failed/blocked
+    (caller turns the wrapper non-zero); never raises.
+    """
+    try:
+        summary = ensure_pending_bridge(max_creations=1, since=cycle_start)
+    except Exception as e:
+        print(f"BRIDGE_BACKSTOP=ERROR reason={type(e).__name__}")
+        return True
+    created = summary.get("created") or {}
+    status = summary.get("status")
+    print(
+        "BRIDGE_BACKSTOP="
+        f"{status} "
+        f"attempted={len(summary.get('attempted', []))} "
+        f"draft={created.get('draft_id') or ''}"
+    )
+    return status in ("BLOCKED", "ERROR")
 
 
 def self_test() -> int:
