@@ -104,11 +104,21 @@ class InitializedEmptyStateTests(unittest.TestCase):
 
             self.assertEqual(
                 result["main_load"],
-                {"published_today": 0, "pending": 0, "last_published_at": None},
+                {
+                    "published_today": 0,
+                    "pending": 0,
+                    "expired_suppressed": 0,
+                    "last_published_at": None,
+                },
             )
             self.assertEqual(
                 result["story_load"],
-                {"published_today": 0, "pending": 0, "last_published_at": None},
+                {
+                    "published_today": 0,
+                    "pending": 0,
+                    "expired_suppressed": 0,
+                    "last_published_at": None,
+                },
             )
 
     def test_root_with_no_manifest_dir_and_no_ledger_is_still_zero(self):

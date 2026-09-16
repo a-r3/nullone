@@ -443,8 +443,9 @@ For every selected candidate, before any render or manifest work:
 3. Read the receipt and conform: render ONLY through
    `python3 social/ops/scripts/nullone-packaging-render.py render
    --receipt <receipt> --asset-file <asset>.json ...`, build the manifest ONLY with
-   `--packaging-receipt <receipt> --render-record <record>`, create NOTHING when the receipt
-   says SKIP, and delegate (do not produce) when it says STORY.
+   `--packaging-receipt <receipt> --render-record <record>`, create NOTHING for a
+   SKIP candidate (then BOUNDED CANDIDATE FALLBACK to the next ranked
+   candidate), and delegate (do not produce) when it says STORY.
 
 CAROUSEL IS NEVER THE DEFAULT. It requires an explicit, countable,
 multi-beat justification. Assess CONTENT_SHAPE and count distinct beats
@@ -534,7 +535,8 @@ is_draft = true
 
 ### SKIP
 
-Do not produce a draft at all (write BLOCKED/SKIP and stop) when any of:
+Do not produce a draft at all for THAT CANDIDATE (record BLOCKED/SKIP
+for it, then follow BOUNDED CANDIDATE FALLBACK) when any of:
 - `VERIFICATION: BLOCKED` (existing rule, unconditional);
 - overall source grounding for the story is weak/unconfirmed even if the
   claims actually used pass narrow verification;
@@ -546,6 +548,48 @@ Do not produce a draft at all (write BLOCKED/SKIP and stop) when any of:
 "No suitable READY candidate at all" is a separate, pre-existing case
 (see "Production efficiency rules" / NO_REPLY above) — it is not a
 per-candidate SKIP decision.
+
+### BOUNDED CANDIDATE FALLBACK (P0 #140)
+
+A per-candidate SKIP receipt (POST_DECISION=SKIP, FORMAT_DECISION=SKIP
+with a typed FORMAT_REASON) ends THAT CANDIDATE ONLY — never the whole
+cycle. Exactly one accepted candidate maximum per run; at most ONE new
+Zernio draft per run (unchanged).
+
+Procedure (deterministic ledger `social/drafts/production/<YYYY-MM-DD>-draft-fallback-ledger.json`):
+
+1. Before starting, list the ranked READY candidates for this cycle in
+   fixed editorial order (strongest first). This order is FROZEN for
+   the run: never reshuffle, never inject a candidate mid-cycle.
+2. `python3 social/ops/scripts/nullone_draft_candidate_fallback.py next
+   --ledger <ledger>.json --editorial-date <YYYY-MM-DD>
+   --ranked <id1,id2,...>` gives the next candidate to attempt.
+3. Run the normal per-candidate pipeline for that candidate ONLY
+   (provider operation, packaging evaluator, and — only on a POST
+   receipt — render/manifest/bridge/Telegram exactly as below).
+4. On a SKIP receipt: classify it with the typed contract only
+   (POST_DECISION=SKIP + FORMAT_DECISION=SKIP + known FORMAT_REASON).
+   Record it —
+   `... fallback.py record-skip --ledger <ledger>.json
+   --candidate <CANDIDATE_ID> --reason <FORMAT_REASON>` —
+   then return to step 2 for the next ranked candidate. The skipped
+   candidate produces NO render, NO manifest, NO Zernio draft, NO
+   Telegram preview.
+5. On a POST receipt: proceed normally, then record —
+   `... fallback.py record-accept --ledger <ledger>.json
+   --candidate <CANDIDATE_ID>` — and STOP (cycle complete).
+6. STOP IMMEDIATELY (fail closed, no further candidate) on any SYSTEM
+   failure: evaluator exception, malformed/mismatched/missing receipt,
+   receipt hash/integrity failure, provider execution failure,
+   renderer or manifest authority failure, ledger refusal
+   (reshuffle/injection/double-attempt). Those are BLOCKED, never
+   "try next".
+7. If the ledger reports ALL_SKIPPED: end the cycle as a legitimate
+   NO_ACTION with the aggregate reason (every candidate id + exact
+   SKIP reason recorded). Zero consequential side effects.
+
+Never retry the same candidate. Never attempt candidates in parallel.
+No automatic provider retries. Model/provider policy unchanged.
 
 ## Visual hierarchy
 
@@ -851,7 +895,9 @@ python3 social/ops/scripts/nullone-manifest.py build \
 
 A STORY receipt never reaches manifest build from this cycle: it means
 DELEGATE_TO_STORY_WORKFLOW (produce nothing here). A SKIP receipt
-means stop with zero render/manifest/draft/Telegram effects.
+means stop THIS CANDIDATE with zero render/manifest/draft/Telegram
+effects for it, then follow BOUNDED CANDIDATE FALLBACK above
+(record the SKIP, continue to the next ranked candidate).
 
 For CAROUSEL:
 repeat --media in exact slide order.

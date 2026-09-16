@@ -101,6 +101,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nullone_cadence_controller import DEFAULT_CONFIG as _CONTROLLER_DEFAULT_CONFIG
+from nullone_review_lifecycle import effective_blocking_state
 
 MANIFEST_SUBPATH = Path("ops/manifests")
 PUBLISH_LEDGER_SUBPATH = Path("state/publish-ledger.jsonl")
@@ -531,6 +532,14 @@ def _index_published_ids(classified_rows: list[dict[str, Any]]) -> frozenset[str
 
 
 def _is_manifest_pending(manifest: dict[str, Any]) -> bool:
+    """Stored-state predicate: does this manifest occupy a review slot?
+
+    Timeless by design. Cross-day expiry for cadence *blocking* is a
+    derived read applied in `_format_load` via
+    `nullone_review_lifecycle.effective_blocking_state` (P0 #140): the
+    stored object is never mutated, only its blocking effect lapses
+    when an earlier Asia/Baku editorial date is proven.
+    """
     pub_state = manifest["publication"]["state"]
 
     if pub_state == "FAILED":
@@ -580,6 +589,7 @@ def _format_load(
             published_today += 1
 
     pending = 0
+    expired_suppressed = 0
 
     for manifest in manifests:
         if manifest["format"] not in formats:
@@ -597,12 +607,27 @@ def _format_load(
         if manifest_id in published_ids or (live_id and live_id in published_ids):
             continue
 
-        if _is_manifest_pending(manifest):
+        stored_pending = _is_manifest_pending(manifest)
+        effective = effective_blocking_state(
+            stored_pending=stored_pending,
+            manifest=manifest,
+            today=today_local,
+        )
+        if stored_pending and not effective["blocking"]:
+            # P0 #140: unapproved review object from an earlier Asia/Baku
+            # editorial date. Preserved byte-identical as audit evidence;
+            # only its cadence-blocking effect lapses
+            # (effective_state=EXPIRED, EDITORIAL_DATE_ELAPSED).
+            # Same-day pending still blocks; unproven dates stay blocking.
+            expired_suppressed += 1
+            continue
+        if effective["blocking"]:
             pending += 1
 
     return {
         "published_today": published_today,
         "pending": pending,
+        "expired_suppressed": expired_suppressed,
         "last_published_at": (
             last_published_at.isoformat() if last_published_at is not None else None
         ),
@@ -646,7 +671,11 @@ def collect_format_loads(
     `workspace/social` directory, or an equivalent temp fixture root in
     tests). Returns
     `{"main_load": {...}, "story_load": {...}}` matching the
-    `nullone.cadence-contract.v1` input shape for those two fields.
+    `nullone.cadence-contract.v1` input shape for those two fields
+    (each load additionally carries `expired_suppressed`, the count of
+    stored-pending manifests whose blocking effect lapsed under P0
+    #140 cross-day expiry -- informational only, never fed back as
+    pending).
 
     Raises CadenceStateError if the state root itself is missing (not
     merely empty) or if any manifest/ledger content present is malformed.
