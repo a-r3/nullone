@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
+from nullone_draft_bridge_action import ensure_pending_bridge
 from nullone_opencode_binary import resolve_opencode_binary
 from nullone_opencode_role import (
     build_opencode_command,
@@ -89,9 +90,35 @@ def execute() -> int:
         )
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        _run_bridge_backstop()
         return 1
+    _run_bridge_backstop()
     print("ROLE_OUTCOME=COMPLETED")
     return 0
+
+
+def _run_bridge_backstop() -> None:
+    """Deterministic completion pass (issue #142 wiring).
+
+    After the editorial cycle, completes at most one same-day pending
+    factory manifest through the credentialed draft-bridge action
+    (single-flight, audit, replay-safe). Runs in this process, so in the
+    Gateway cron context it carries the drafts credential; elsewhere it
+    fails closed with zero calls. Never raises: a backstop failure must
+    neither mask the cycle outcome nor crash the wrapper.
+    """
+    try:
+        summary = ensure_pending_bridge(max_creations=1)
+    except Exception as e:
+        print(f"BRIDGE_BACKSTOP=ERROR reason={type(e).__name__}")
+        return
+    created = summary.get("created") or {}
+    print(
+        "BRIDGE_BACKSTOP="
+        f"{summary.get('status')} "
+        f"attempted={len(summary.get('attempted', []))} "
+        f"draft={created.get('draft_id') or ''}"
+    )
 
 
 def self_test() -> int:

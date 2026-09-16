@@ -75,6 +75,7 @@ from typing import Any
 
 import nullone_bridge_common as bridge_common
 from nullone_bridge_common import BridgeError, now_iso
+from nullone_review_lifecycle import manifest_baku_date
 
 ACTION_NAME = "nullone.draft-bridge.run"
 ACTION_SCHEMA = "nullone.draft-bridge-action.v1"
@@ -84,6 +85,11 @@ LOCKS_RELATIVE_DIR = "social/ops/draft-bridge-action-locks"
 AUDIT_RELATIVE_FILE = "social/ops/draft-bridge-action-audit.jsonl"
 LOCK_SCHEMA = "nullone.draft-bridge-action-lock.v1"
 AUDIT_SCHEMA = "nullone.draft-bridge-action-audit.v1"
+
+# Factory-main formats the Draft Factory completion pass may complete.
+# STORY manifests are owned exclusively by StoryWorkflow and are never
+# touched here (the bridge itself also skips STORY authority).
+FACTORY_FORMATS = frozenset({"FEED", "CAROUSEL"})
 
 BRIDGE_FILENAME = "nullone-draft-bridge.py"
 
@@ -515,6 +521,107 @@ def handle_request(
             return result
         finally:
             _release_lock(lock_path)
+
+
+def _eligible_factory_manifests(
+    root: Path, today: Any
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Same-day pending factory manifests, sorted, read-only scan.
+
+    Eligibility (all required): file under the canonical manifests dir,
+    loads and validates, stem binds to `manifest_id`, format is a
+    factory-main format (FEED/CAROUSEL -- never STORY), Baku editorial
+    date equals `today`, review permits creation (attempts == 0,
+    NOT_CREATED, no draft id). Unreadable/invalid files are reported in
+    `skipped` and never stop the scan. Returns (eligible_ids, skipped).
+    """
+    manifest_dir = root.resolve() / MANIFESTS_RELATIVE_DIR
+    try:
+        names = sorted(p.name for p in manifest_dir.glob("*.json"))
+    except OSError:
+        return ([], [])
+    eligible: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for name in names:
+        stem = name[:-5]
+        if not MANIFEST_ID_RE.fullmatch(stem):
+            skipped.append({"manifest_id": None, "reason": "non-canonical-name"})
+            continue
+        try:
+            _, m = bridge_common.load_manifest(manifest_dir / name)
+        except (BridgeError, OSError, ValueError):
+            skipped.append({"manifest_id": stem, "reason": "unreadable-or-invalid"})
+            continue
+        if not isinstance(m, dict) or m.get("manifest_id") != stem:
+            skipped.append({"manifest_id": stem, "reason": "stem-mismatch"})
+            continue
+        if m.get("format") not in FACTORY_FORMATS:
+            continue
+        if manifest_baku_date(m) != today:
+            continue
+        review = m.get("review")
+        if not isinstance(review, dict):
+            skipped.append({"manifest_id": stem, "reason": "unreadable-or-invalid"})
+            continue
+        if (
+            review.get("create_attempts") != 0
+            or review.get("state") != "NOT_CREATED"
+            or review.get("zernio_draft_id")
+        ):
+            continue
+        eligible.append(stem)
+    return (eligible, skipped)
+
+
+def ensure_pending_bridge(
+    *,
+    workspace_root: Path | str | None = None,
+    today: Any = None,
+    max_creations: int = 1,
+) -> dict[str, Any]:
+    """Deterministic Draft Factory completion pass (issue #142 wiring).
+
+    Invoked by the real Draft Factory flow after the editorial cycle:
+    completes at most `max_creations` (default 1, the single-selection
+    rule) same-day pending factory manifests through `handle_request`
+    (single-flight, audit, replay-safe). Never creates for STORY,
+    prior-day, consumed, or invalid manifests. Never raises for domain
+    outcomes; returns a machine-shaped summary with no Telegram,
+    approval, scheduling, or publication keys.
+    """
+    from datetime import datetime
+
+    root = _workspace_root(workspace_root).resolve()
+    if today is None:
+        from zoneinfo import ZoneInfo
+
+        today = datetime.now(ZoneInfo("Asia/Baku")).date()
+    if not isinstance(max_creations, int) or max_creations < 1:
+        raise ActionError(REASON_MALFORMED_REQUEST)
+    eligible, skipped = _eligible_factory_manifests(root, today)
+    attempted: list[dict[str, Any]] = []
+    created: dict[str, Any] | None = None
+    for manifest_id in eligible[:max_creations]:
+        result = handle_request({"manifest_id": manifest_id}, workspace_root=root)
+        attempted.append(
+            {
+                "manifest_id": manifest_id,
+                "status": result["status"],
+                "reason_code": result["reason_code"],
+            }
+        )
+        if result["status"] == "COMPLETED":
+            created = {
+                "manifest_id": manifest_id,
+                "draft_id": result["zernio"]["draft_id"],
+            }
+            break
+    return {
+        "status": "COMPLETED" if created else "NOOP",
+        "created": created,
+        "attempted": attempted,
+        "skipped": skipped,
+    }
 
 
 def self_test() -> None:

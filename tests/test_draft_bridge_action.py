@@ -490,8 +490,8 @@ class CapabilityNegativeTest(unittest.TestCase):
         allowed = {
             "argparse", "contextlib", "errno", "importlib", "io", "json",
             "os", "re", "threading", "time", "pathlib", "typing",
-            "hashlib", "tempfile", "PIL",
-            "nullone_bridge_common",
+            "hashlib", "tempfile", "PIL", "datetime", "zoneinfo",
+            "nullone_bridge_common", "nullone_review_lifecycle",
             "__future__",
         }
         self.assertEqual(imported - allowed, set(), f"unexpected imports: {imported - allowed}")

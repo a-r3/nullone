@@ -2,6 +2,20 @@
 
 Repository source only. Nothing here takes effect by Git merge.
 
+## Triggers (both deterministic, both audited)
+
+1. **Automatic (reachability wiring):** the Draft Factory wrapper
+   (`nullone-draft-factory-run.py execute`) runs
+   `ensure_pending_bridge(max_creations=1)` after every editorial
+   cycle: at most one same-day pending FEED/CAROUSEL manifest is
+   completed through the action core (single-flight, audit,
+   replay-safe). STORY, prior-day, consumed, and invalid manifests are
+   never touched. In the Gateway cron context this carries the drafts
+   credential; elsewhere it fails closed with zero calls.
+2. **Operator-initiated:** `texbrif:draft:<MANIFEST_ID>` via the
+   `plugins/nullone-draft-bridge/` handler (existing ingress
+   authorization; enablement under #37).
+
 ## What this change adds
 
 - `workspace/social/ops/scripts/nullone_draft_bridge_action.py` — the
