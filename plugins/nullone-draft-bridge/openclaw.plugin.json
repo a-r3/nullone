@@ -1,0 +1,10 @@
+{
+  "id": "nullone-draft-bridge",
+  "version": "1.0.0",
+  "name": "NullOne Draft Bridge Action",
+  "description": "Claims texbrif:draft callbacks on Telegram and routes them to the deterministic NullOne draft-bridge action core (#142). All other texbrif:* callbacks fall through to existing flows.",
+  "entry": "index.js",
+  "activation": {
+    "onStartup": true
+  }
+}
