@@ -81,6 +81,7 @@ COMMANDS = [
     [sys.executable, "tests/test_draft_bridge_action.py"],
     [sys.executable, "tests/test_draft_bridge_wiring.py"],
     [sys.executable, "tests/test_draft_bridge_plugin_routing.py"],
+    [sys.executable, "tests/test_draft_bridge_manifest.py"],
     [sys.executable, "tests/test_recovery_contract.py"],
     [sys.executable, "tests/test_restore_drill.py"],
     [
