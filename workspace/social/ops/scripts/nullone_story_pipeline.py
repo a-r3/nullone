@@ -100,7 +100,12 @@ REQUIRED_CANDIDATE_FIELDS = (
 # Fields that may be sent to the Haiku writer. Deliberately excludes
 # cadence arithmetic, publication state, hashes, filesystem paths, render
 # dimensions, manifest fields and Zernio/Telegram mechanics (issue #33,
-# "Haiku boundary").
+# "Haiku boundary"). Candidate `source_attribution` is intentionally NOT
+# listed here: it is mapped to the input-only `source_name_hint` key in
+# build_writer_context() so the writer never sees the `source_attribution`
+# key name and cannot echo it back as an output field (production
+# WRITER_OUTPUT_INVALID, issue #146). The canonical writer-output
+# provenance field is `source_name`.
 WRITER_CONTEXT_CANDIDATE_FIELDS = (
     "topic",
     "topic_cluster",
@@ -108,7 +113,6 @@ WRITER_CONTEXT_CANDIDATE_FIELDS = (
     "claims",
     "limitations",
     "product_version_region",
-    "source_attribution",
     "evidence_refs",
     "factual_inputs",
     "operator_revision_instruction",
@@ -330,6 +334,14 @@ def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
         for field_name in WRITER_CONTEXT_CANDIDATE_FIELDS
         if candidate.get(field_name) is not None
     }
+    # Candidate provenance reaches the writer ONLY under this input-only
+    # key. It must never collide with the writer-output namespace
+    # (_WRITER_SPEC_FIELDS): the model previously echoed the
+    # `source_attribution` context key back as an output field and the
+    # strict shape check fail-closed the whole cycle (issue #146).
+    source_attribution = candidate.get("source_attribution")
+    if source_attribution is not None:
+        context["source_name_hint"] = source_attribution
     context["source_image_available"] = _candidate_source_image(candidate) is not None
     context["allowed_layouts"] = sorted(ALLOWED_LAYOUTS)
     context["scope_rule"] = (
@@ -466,12 +478,19 @@ comparison beyond what is given.
 
 {json.dumps(editorial_context, ensure_ascii=False, indent=2)}
 
-Leave any field that does not apply to the chosen layout as an empty
-string. Set use_source_image to true only when source_image_available is
-true and the official image materially improves this Story. You never
-receive or invent a filesystem path. You do not decide verification -- a
-separate process verifies your exact wording afterward.
-"""
+ Leave any field that does not apply to the chosen layout as an empty
+ string. Set use_source_image to true only when source_image_available is
+ true and the official image materially improves this Story. You never
+ receive or invent a filesystem path. You do not decide verification -- a
+ separate process verifies your exact wording afterward.
+
+ Output contract: reply with exactly the schema fields (layout,
+ headline, body, stat, source_name, use_source_image, cta, left_stat,
+ right_stat, left_label, right_label) and nothing else. Write the source
+ display text (given as source_name_hint) into `source_name`.
+ source_name_hint is input-only context: never emit it, never emit
+ `source_attribution`, never emit any other field.
+ """
 
 
 class HaikuStoryWriter:

@@ -20,6 +20,7 @@ COMMANDS = [
     [sys.executable, "tests/test_packaging_policy.py"],
     [sys.executable, "tests/test_packaging_wiring.py"],
     [sys.executable, "tests/test_story_pipeline.py"],
+    [sys.executable, "tests/test_story_writer_output_contract.py"],
     [sys.executable, "tests/test_story_supersession.py"],
     [sys.executable, "tests/test_review_delivery.py"],
     [sys.executable, "tests/test_story_workflow.py"],
