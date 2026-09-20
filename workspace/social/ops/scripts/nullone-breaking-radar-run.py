@@ -1,43 +1,34 @@
 #!/usr/bin/env python3
-"""Breaking Radar OpenCode role wrapper (issue #112).
+"""Breaking Radar role runner behind the provider adapter (issue #111).
 
-Future command-payload entrypoint replacing the legacy agentTurn
-Breaking Radar job WITHOUT changing schedules here:
+Command-payload entrypoint:
 
     python3 social/ops/scripts/nullone-breaking-radar-run.py execute
 
 reads the reviewed `breaking-radar.md` prompt and runs exactly one
-DELTA_MONITORING_ONLY cycle through the `nullone-breaking-radar`
-OpenCode agent (Muse Spark). Discovery/research reasoning happens in
+DELTA_MONITORING_ONLY cycle for the `breaking_radar` logical role.
+Transport, model, agent, and timeout arrive from the role router's
+ProviderProfile and execute through the provider adapter registry:
+this module imports NO vendor transport module and never chooses
+OpenCode or Claude itself. Discovery/research reasoning happens in
 the agent; handoff commits happen only through the deterministic
 `nullone-breaking-scan.py` helper in the agent's allowlist. Radar
 stops at human review preview: no drafts, no Telegram, no
 publication path.
 
-Transport budget (new, transport-only, not domain policy):
-`RADAR_TIMEOUT_SECONDS = 600`, sized for discovery plus primary-
-source verification in one cycle.
+Transport budget (reviewed, transport-only, not domain policy):
+600s, mirrored in the router (`ROLE_TIMEOUTS`); the two must stay
+equal (proven offline).
 """
 from __future__ import annotations
 
 import argparse
 import time
 from pathlib import Path
-from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
-from nullone_opencode_binary import resolve_opencode_binary
-from nullone_opencode_role import (
-    build_opencode_command,
-    describe_cycle,
-    resolve_role_model,
-    run_opencode_cycle,
-)
-from nullone_provider_router import (
-    ROLE_BREAKING_RADAR,
-    format_routing_metadata,
-    resolve_provider_profile,
-)
+import nullone_provider_adapter as provider_adapter
+import nullone_provider_router as provider_router
 
 ROLE = "breaking-radar"
 AGENT = "nullone-breaking-radar"
@@ -65,16 +56,27 @@ def build_command(
     model: str | None = None,
     binary: str = "opencode",
 ) -> list[str]:
-    """Build the deterministic Radar argv (pure, no I/O)."""
+    """Build the deterministic Radar argv (pure, no I/O).
+
+    Delegates to the provider adapter so the reviewed argv shape is
+    owned in exactly one place; `model=None` resolves through the
+    role router (never a vendor default).
+    """
 
     resolved_workspace = Path(workspace) if workspace is not None else WORKSPACE
     prompt = PROMPT_PATH.read_text(encoding="utf-8") + TRANSPORT_APPENDIX
-    return build_opencode_command(
-        prompt=prompt,
-        workspace=resolved_workspace,
-        agent=AGENT,
-        model=model if model is not None else resolve_role_model(),
-        binary=binary,
+    profile = provider_router.resolve_provider_profile(provider_router.ROLE_BREAKING_RADAR)
+    if model is not None:
+        profile = provider_router.ProviderProfile(
+            role=profile.role,
+            transport=profile.transport,
+            model=model,
+            capabilities=profile.capabilities,
+            timeout_seconds=profile.timeout_seconds,
+            fallback_policy=profile.fallback_policy,
+        )
+    return provider_adapter.build_adapter_command(
+        profile, prompt=prompt, workspace=resolved_workspace, binary=binary
     )
 
 
@@ -101,38 +103,40 @@ def find_fresh_reports(*, workspace: Path, since_epoch: float) -> list[Path]:
 
 
 def execute() -> int:
-    # Issue #111: model and timeout arrive from the role router.
-    # Values equal today's reviewed constants, so production
+    # Issue #111: the profile (transport/model/timeout) arrives from
+    # the role router and executes through the adapter registry.
+    # Reviewed values equal today's constants, so production
     # behavior is unchanged.
     try:
-        profile = resolve_provider_profile(ROLE_BREAKING_RADAR)
+        profile = provider_router.resolve_provider_profile(provider_router.ROLE_BREAKING_RADAR)
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
         return 1
-    print(describe_cycle(role=ROLE, agent=AGENT, model=profile.model))
-    print(format_routing_metadata(profile, "STARTED"))
-    cmd: Sequence[str] = build_command(model=profile.model, binary=resolve_opencode_binary())
+    print(provider_router.describe_profile(profile))
+    print(provider_router.format_routing_metadata(profile, "STARTED"))
+    prompt = PROMPT_PATH.read_text(encoding="utf-8") + TRANSPORT_APPENDIX
     started = time.time()
     try:
-        run_opencode_cycle(cmd, cwd=WORKSPACE, timeout=profile.timeout_seconds, role=ROLE)
+        outcome = provider_adapter.invoke_role_cycle(profile, prompt, WORKSPACE)
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
-        print(format_routing_metadata(profile, "BLOCKED"))
+        print(provider_router.format_routing_metadata(profile, "BLOCKED"))
         return 1
+    print(provider_router.format_routing_metadata(profile, outcome.outcome))
     if not find_fresh_reports(workspace=WORKSPACE, since_epoch=started):
         print("ROLE_OUTCOME=BLOCKED reason=MissingRadarReport")
-        print(format_routing_metadata(profile, "BLOCKED"))
+        print(provider_router.format_routing_metadata(profile, "BLOCKED"))
         return 1
     print("ROLE_OUTCOME=COMPLETED")
-    print(format_routing_metadata(profile, "COMPLETED"))
     return 0
 
 
 def self_test() -> int:
     argv = build_command(workspace=Path("/tmp/nullone-radar-self-test"))
+    profile = provider_router.resolve_provider_profile(provider_router.ROLE_BREAKING_RADAR)
     assert argv[0:2] == ["opencode", "run"]
     assert argv[argv.index("--agent") + 1] == AGENT
-    assert argv[argv.index("--model") + 1] == resolve_role_model()
+    assert argv[argv.index("--model") + 1] == profile.model
     assert argv[argv.index("--dir") + 1] == "/tmp/nullone-radar-self-test"
     assert "--auto" not in argv
     assert PROMPT_PATH.name == "breaking-radar.md"

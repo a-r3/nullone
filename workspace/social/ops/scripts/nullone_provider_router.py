@@ -100,6 +100,20 @@ FALLBACK_NONE = "none"
 # long-reviewed `claude -p --model sonnet` command byte-for-byte.
 CLAUDE_DEFAULT_MODEL = "sonnet"
 
+# Exact model the Claude Story writer executes when the operator
+# selects transport=claude for story_writer without pinning a model:
+# `HaikuStoryWriter` passes its model verbatim to
+# `nullone_claude.run_structured` (whose own default is "haiku").
+# The profile reports exactly this value (Blocker C observability
+# truth: reported == executed, never faked).
+HAIKU_DEFAULT_MODEL = "haiku"
+
+# Bare (slash-less) model values are transport-local legacy
+# identifiers, valid ONLY for the Claude transport, which passes
+# them verbatim to the Claude CLI. OpenCode transport models must
+# always be `provider/model` endpoints.
+TRANSPORT_LOCAL_MODELS = (CLAUDE_DEFAULT_MODEL, HAIKU_DEFAULT_MODEL)
+
 # Model identifiers are `provider/model` endpoints (non-secret).
 # The shape check rejects blanks and vendor-less values without
 # executing anything.
@@ -172,6 +186,30 @@ def _fail(reason: str) -> ProviderRoutingError:
     return ProviderRoutingError(f"Provider routing misconfigured: {reason}")
 
 
+def _model_is_valid(model: str, transport: str) -> bool:
+    if MODEL_PATTERN.match(model):
+        return True
+    # Bare legacy identifiers are valid only for the Claude
+    # transport, which executes them verbatim.
+    return transport == TRANSPORT_CLAUDE and model in TRANSPORT_LOCAL_MODELS
+
+
+def _transport_default_model(transport: str, role: str) -> str | None:
+    """Truthful model default when a transport is selected unpinned.
+
+    Returns None when the transport has no safe default (OpenCode:
+    the model MUST come from explicit configuration). Claude
+    defaults are the exact values the Claude adapters execute
+    (sonnet cycle / haiku writer) so reported == executed.
+    """
+
+    if transport == TRANSPORT_CLAUDE:
+        if role == ROLE_STORY_WRITER:
+            return HAIKU_DEFAULT_MODEL
+        return CLAUDE_DEFAULT_MODEL
+    return None
+
+
 def _validate_mapping(mapping: Mapping[str, Any]) -> dict[str, dict[str, str]]:
     """Validate a role mapping (checked-in file or injected)."""
 
@@ -188,7 +226,7 @@ def _validate_mapping(mapping: Mapping[str, Any]) -> dict[str, dict[str, str]]:
         if not isinstance(model, str):
             raise _fail("model")
         model = model.strip()
-        if not (model == CLAUDE_DEFAULT_MODEL or MODEL_PATTERN.match(model)):
+        if not _model_is_valid(model, transport):
             raise _fail("model")
         validated[role] = {"transport": transport, "model": model}
     missing = [role for role in LOGICAL_ROLES if role not in validated]
@@ -256,7 +294,7 @@ def resolve_provider_profile(
             raise _fail("transport")
     if model_override is not None:
         model_override = model_override.strip()
-        if not (model_override == CLAUDE_DEFAULT_MODEL or MODEL_PATTERN.match(model_override)):
+        if not model_override:
             raise _fail("model")
     transport = transport_override
     model = model_override
@@ -282,14 +320,15 @@ def resolve_provider_profile(
     if model is None:
         if transport == json_transport:
             model = json_model
-        elif transport == TRANSPORT_CLAUDE:
-            # Rollback default preserves the reviewed `claude -p
-            # --model sonnet` command when the operator selects the
-            # Claude transport without pinning a model.
-            model = CLAUDE_DEFAULT_MODEL
         else:
-            model = json_model
-    if not (model == CLAUDE_DEFAULT_MODEL or MODEL_PATTERN.match(model)):
+            default = _transport_default_model(transport, role)
+            if default is None:
+                raise _fail("model")
+            # Truthful transport default: the exact value the
+            # transport's adapter executes when unpinned (Claude
+            # sonnet cycle / haiku writer), so reported == executed.
+            model = default
+    if not _model_is_valid(model, transport):
         raise _fail("model")
 
     if transport == TRANSPORT_CLAUDE and role not in CLAUDE_SUPPORTED_ROLES:

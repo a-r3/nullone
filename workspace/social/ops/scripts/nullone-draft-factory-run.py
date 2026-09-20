@@ -1,44 +1,35 @@
 #!/usr/bin/env python3
-"""Draft Factory OpenCode role wrapper (issue #112).
+"""Draft Factory role runner behind the provider adapter (issue #111).
 
-Future command-payload entrypoint replacing the legacy agentTurn
-Draft Factory job WITHOUT changing schedules here:
+Command-payload entrypoint:
 
     python3 social/ops/scripts/nullone-draft-factory-run.py execute
 
 reads the reviewed `draft-factory.md` prompt and runs exactly one
-DRAFT_FIRST production cycle through the `nullone-draft-factory`
-OpenCode agent (Muse Spark). Editorial reasoning happens in the
+DRAFT_FIRST production cycle for the `draft_factory` logical role.
+Transport, model, agent, and timeout arrive from the role router's
+ProviderProfile and execute through the provider adapter registry:
+this module imports NO vendor transport module and never chooses
+OpenCode or Claude itself. Editorial reasoning happens in the
 agent; all consequential side effects (rendering, manifest build,
 review-draft creation, Telegram preview) happen only through the
 exact reviewed commands in the agent's allowlist. Final publication
 is never reachable from this path.
 
-Transport budget (new, transport-only, not domain policy):
-`DRAFT_FACTORY_TIMEOUT_SECONDS = 900`, sized for render + upload +
-draft + Telegram delivery in one cycle.
+Transport budget (reviewed, transport-only, not domain policy):
+900s, mirrored in the router (`ROLE_TIMEOUTS`); the two must stay
+equal (proven offline).
 """
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_draft_bridge_action import ensure_pending_bridge
-from nullone_opencode_binary import resolve_opencode_binary
-from nullone_opencode_role import (
-    build_opencode_command,
-    describe_cycle,
-    resolve_role_model,
-    run_opencode_cycle,
-)
-from nullone_provider_router import (
-    ROLE_DRAFT_FACTORY,
-    format_routing_metadata,
-    resolve_provider_profile,
-)
+import nullone_provider_adapter as provider_adapter
+import nullone_provider_router as provider_router
 
 ROLE = "draft-factory"
 AGENT = "nullone-draft-factory"
@@ -73,51 +64,65 @@ def build_command(
     model: str | None = None,
     binary: str = "opencode",
 ) -> list[str]:
-    """Build the deterministic Draft Factory argv (pure, no I/O)."""
+    """Build the deterministic Draft Factory argv (pure, no I/O).
+
+    Delegates to the provider adapter so the reviewed argv shape is
+    owned in exactly one place; `model=None` resolves through the
+    role router (never a vendor default).
+    """
 
     resolved_workspace = Path(workspace) if workspace is not None else WORKSPACE
     prompt = PROMPT_PATH.read_text(encoding="utf-8") + TRANSPORT_APPENDIX
-    return build_opencode_command(
-        prompt=prompt,
-        workspace=resolved_workspace,
-        agent=AGENT,
-        model=model if model is not None else resolve_role_model(),
-        binary=binary,
+    profile = provider_router.resolve_provider_profile(
+        provider_router.ROLE_DRAFT_FACTORY
+    )
+    if model is not None:
+        profile = provider_router.ProviderProfile(
+            role=profile.role,
+            transport=profile.transport,
+            model=model,
+            capabilities=profile.capabilities,
+            timeout_seconds=profile.timeout_seconds,
+            fallback_policy=profile.fallback_policy,
+        )
+    return provider_adapter.build_adapter_command(
+        profile, prompt=prompt, workspace=resolved_workspace, binary=binary
     )
 
 
 def execute() -> int:
-    # Issue #111: transport (opencode) is fixed for this role wrapper;
-    # the model and timeout arrive from the role router. Values equal
-    # today's reviewed constants, so production behavior is unchanged.
+    # Issue #111: the profile (transport/model/timeout) arrives from
+    # the role router and executes through the adapter registry.
+    # Reviewed values equal today's constants, so production
+    # behavior is unchanged.
     try:
-        profile = resolve_provider_profile(ROLE_DRAFT_FACTORY)
-    except BridgeError as e:
-        print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
-        return 1
-    print(describe_cycle(role=ROLE, agent=AGENT, model=profile.model))
-    print(format_routing_metadata(profile, "STARTED"))
-    cmd: Sequence[str] = build_command(model=profile.model, binary=resolve_opencode_binary())
-    cycle_start = _utcnow()
-    try:
-        run_opencode_cycle(
-            cmd, cwd=WORKSPACE, timeout=profile.timeout_seconds, role=ROLE
+        profile = provider_router.resolve_provider_profile(
+            provider_router.ROLE_DRAFT_FACTORY
         )
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
-        print(format_routing_metadata(profile, "BLOCKED"))
+        return 1
+    print(provider_router.describe_profile(profile))
+    print(provider_router.format_routing_metadata(profile, "STARTED"))
+    prompt = PROMPT_PATH.read_text(encoding="utf-8") + TRANSPORT_APPENDIX
+    cycle_start = _utcnow()
+    try:
+        outcome = provider_adapter.invoke_role_cycle(profile, prompt, WORKSPACE)
+    except BridgeError as e:
+        print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        print(provider_router.format_routing_metadata(profile, "BLOCKED"))
         _run_bridge_backstop(cycle_start)
         return 1
+    print(provider_router.format_routing_metadata(profile, outcome.outcome))
     backstop_failed = _run_bridge_backstop(cycle_start)
     if backstop_failed:
         # An eligible authoritative pending manifest existed but bridge
         # completion did not reach DRAFT_CREATED: this is a failed
         # production cycle, never a silent COMPLETED (issue #142-A).
         print("ROLE_OUTCOME=BLOCKED reason=BRIDGE_BACKSTOP")
-        print(format_routing_metadata(profile, "BLOCKED"))
+        print(provider_router.format_routing_metadata(profile, "BLOCKED"))
         return 1
     print("ROLE_OUTCOME=COMPLETED")
-    print(format_routing_metadata(profile, "COMPLETED"))
     return 0
 
 
@@ -155,9 +160,12 @@ def _run_bridge_backstop(cycle_start: datetime) -> bool:
 
 def self_test() -> int:
     argv = build_command(workspace=Path("/tmp/nullone-factory-self-test"))
+    profile = provider_router.resolve_provider_profile(
+        provider_router.ROLE_DRAFT_FACTORY
+    )
     assert argv[0:2] == ["opencode", "run"]
     assert argv[argv.index("--agent") + 1] == AGENT
-    assert argv[argv.index("--model") + 1] == resolve_role_model()
+    assert argv[argv.index("--model") + 1] == profile.model
     assert argv[argv.index("--dir") + 1] == "/tmp/nullone-factory-self-test"
     assert "--auto" not in argv
     assert PROMPT_PATH.name == "draft-factory.md"

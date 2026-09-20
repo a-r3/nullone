@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
-"""Provider-neutral Story writer selection (issue #112).
+"""Story writer binding behind the role router (issue #111).
 
 `run_story_trigger` depends only on an injected `writer` callable
 matching the `StoryWriter` protocol
-(`(editorial_context) -> spec dict`). This module is the single place
-that writer is chosen, so switching transports never requires
-rewriting workflow code:
+(`(editorial_context) -> spec dict`). This module binds that writer
+from the role router's ProviderProfile for `story_writer` -- it
+imports NO vendor transport module: vendor imports terminate behind
+`nullone_provider_adapter.make_story_writer`.
 
-    NULLONE_STORY_PROVIDER=opencode | claude
+Deprecated compatibility: `NULLONE_STORY_PROVIDER=opencode | claude`
+remains an explicit transport override (honored inside the router);
+anything else fails closed via the router. There is deliberately no
+silent fallback from one transport to the other inside a run.
 
-- `opencode` -> `OpenCodeStoryWriter` (intended primary transport,
-  Muse Spark);
-- `claude` -> `HaikuStoryWriter` (preserved fallback/rollback
-  writer);
-- unset or blank -> `claude` (safe compatibility: deploying this
-  module alone changes nothing live);
-- anything else -> `UnknownStoryProviderError`, fail closed. There
-  is deliberately no silent fallback from one transport to the other
-  inside a run.
-
-This is the minimal immediate seam, not the #111 role router: it
-covers the Story writer role only. Per-role model routing belongs to
-issue #111.
+Per-role model routing lives in the router: the OpenCode writer
+executes exactly the profile model, and the Claude writer executes
+exactly the profile model (router default "haiku" -- reported ==
+executed, never faked).
 """
 from __future__ import annotations
 
@@ -29,14 +24,8 @@ import os
 from typing import Any, Callable
 
 from nullone_bridge_common import BridgeError
-from nullone_opencode_story_provider import OpenCodeStoryWriter
-from nullone_provider_router import (
-    ROLE_ENV_PREFIX,
-    ROLE_STORY_WRITER,
-    ProviderProfile,
-    resolve_provider_profile,
-)
-from nullone_story_pipeline import HaikuStoryWriter
+import nullone_provider_adapter as provider_adapter
+import nullone_provider_router as provider_router
 
 STORY_PROVIDER_ENV_VAR = "NULLONE_STORY_PROVIDER"
 
@@ -76,13 +65,16 @@ def resolve_story_provider_name(raw: str | None = None) -> str:
     )
 
 
-def _resolve_profile(name: str | None) -> ProviderProfile:
+def _resolve_profile(name: str | None) -> provider_router.ProviderProfile:
     overlay = dict(os.environ)
     if name is not None:
-        overlay[f"{ROLE_ENV_PREFIX}{ROLE_STORY_WRITER.upper()}_TRANSPORT"] = (
-            resolve_story_provider_name(name)
-        )
-    return resolve_provider_profile(ROLE_STORY_WRITER, env=overlay)
+        overlay[
+            f"{provider_router.ROLE_ENV_PREFIX}"
+            f"{provider_router.ROLE_STORY_WRITER.upper()}_TRANSPORT"
+        ] = resolve_story_provider_name(name)
+    return provider_router.resolve_provider_profile(
+        provider_router.ROLE_STORY_WRITER, env=overlay
+    )
 
 
 def get_story_writer(
@@ -90,21 +82,18 @@ def get_story_writer(
 ) -> tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]:
     """Return `(transport_name, writer)` for the Story writer role.
 
-    Issue #111: the role router is the sole authority. The OpenCode
-    writer receives the profile's model; the Claude fallback writer
-    is unchanged. Unknown transports fail closed via the router; no
-    silent fallback ever occurs.
+    Issue #111: the role router is the sole authority and the
+    provider adapter builds the writer. The writer executes exactly
+    the profile's model (OpenCode writer via --model, Claude writer
+    via run_structured model). Unknown transports fail closed via
+    the router; no silent fallback ever occurs.
     """
 
     profile = _resolve_profile(name)
-    if profile.transport == PROVIDER_OPENCODE:
-        return profile.transport, OpenCodeStoryWriter(
-            model=profile.model, timeout=profile.timeout_seconds
-        )
-    return profile.transport, HaikuStoryWriter()
+    return profile.transport, provider_adapter.make_story_writer(profile)
 
 
-def get_story_profile(name: str | None = None) -> ProviderProfile:
+def get_story_profile(name: str | None = None) -> provider_router.ProviderProfile:
     """Return the resolved ProviderProfile (observability helper)."""
 
     return _resolve_profile(name)

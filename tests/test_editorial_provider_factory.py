@@ -85,11 +85,12 @@ class FactorySelectionTests(unittest.TestCase):
         # The bound invoker drives the OpenCode adapter with the
         # profile model (no real subprocess; binary resolution
         # mocked because CI runners carry no opencode install).
-        with mock.patch.object(
-            opencode_adapter, "resolve_opencode_binary",
+        # Mocks sit at the adapter's lookup namespaces.
+        with mock.patch(
+            "nullone_opencode_binary.resolve_opencode_binary",
             return_value="/tmp/fake-opencode",
-        ), mock.patch.object(
-            opencode_adapter, "run_tree_command"
+        ), mock.patch(
+            "nullone_opencode_role.run_tree_command"
         ) as run_tree:
             run_tree.return_value = subprocess.CompletedProcess(
                 ["opencode"], 0, stdout="", stderr=""

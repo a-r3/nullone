@@ -42,6 +42,30 @@ PROMPT_PATH = WORKSPACE / "social/ops/prompts/morning-editorial.md"
 CLAUDE_DEFAULT_MODEL = "sonnet"
 
 
+def build_claude_command(*, prompt: str, model: str | None = None) -> list[str]:
+    """Build the deterministic `claude -p` argv for one editorial cycle.
+
+    Pure function (no I/O, no subprocess) so offline tests can pin
+    the exact argv shape. `model` arrives from the role router's
+    ProviderProfile; None preserves the reviewed `sonnet` default.
+    Tool allowlist and permission mode are pinned: routing a model
+    never widens capability.
+    """
+
+    resolved_model = (model or "").strip() or CLAUDE_DEFAULT_MODEL
+    return [
+        "claude",
+        "-p",
+        prompt,
+        "--model",
+        resolved_model,
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read,Write,WebSearch,WebFetch",
+    ]
+
+
 def default_invoke_provider(model: str | None = None) -> None:
     """Invoke the real Morning Editorial planning cycle via the Claude CLI.
 
@@ -54,17 +78,7 @@ def default_invoke_provider(model: str | None = None) -> None:
 
     try:
         cp = run_tree_command(
-            [
-                "claude",
-                "-p",
-                prompt,
-                "--model",
-                resolved_model,
-                "--permission-mode",
-                "dontAsk",
-                "--allowedTools",
-                "Read,Write,WebSearch,WebFetch",
-            ],
+            build_claude_command(prompt=prompt, model=resolved_model),
             cwd=WORKSPACE,
             timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
         )

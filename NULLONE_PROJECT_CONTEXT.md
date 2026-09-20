@@ -1863,3 +1863,26 @@ unchanged):
   production NOT changed by this PR; live mapping unchanged until
   separately deployed. Do NOT treat this merge as a provider/model
   switch. #37 OPEN; #111 closes on merge + review.
+
+### Amendment (final review, same branch, NOT merged/deployed)
+
+Review hardens the #111 wiring without changing the architecture:
+
+- The adapter registry (`nullone_provider_adapter.py`) is the SOLE
+  execution path: covered wrappers and both factories import no
+  vendor transport module and execute only via
+  `invoke_role_cycle` / `make_story_writer`. Transport switches
+  route through the registry with zero workflow changes.
+- `AdapterCall` carries ONLY role/prompt/workspace: agent derives
+  from `role_agent`, timeout from the profile; callers cannot
+  override either (proven by construction + test).
+- Story Claude truth: `HaikuStoryWriter` executes exactly the
+  profile model (router default "haiku" when unpinned); reported ==
+  executed. Story OpenCode timeout/reachability normalize through
+  the shared contract; Story domain behavior unchanged.
+- Coverage incident during amendment testing: one offline test
+  invocation reached the real `opencode run` path (killed in ~20s,
+  no artifacts, repo verified clean). Cause was test patching a
+  from-imported name instead of the adapter registry entry; fixed
+  by module-attribute access at all execution seams. No production
+  touched at any point.
