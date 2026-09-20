@@ -295,7 +295,12 @@ class NoSilentFallbackTests(unittest.TestCase):
         def boom(*args, **kwargs):
             raise BridgeError("OpenCode draft-factory run failed (exit=3)")
 
-        with mock.patch.object(role_transport, "run_tree_command", side_effect=boom):
+        # Binary resolution mocked: CI runners carry no opencode
+        # install; resolution itself is covered by dedicated tests.
+        with mock.patch(
+            "nullone_opencode_binary.resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
+        ), mock.patch.object(role_transport, "run_tree_command", side_effect=boom):
             with mock.patch.object(
                 claude_adapter, "run_tree_command",
                 side_effect=AssertionError("silent fallback attempted"),

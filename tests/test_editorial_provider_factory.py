@@ -83,8 +83,12 @@ class FactorySelectionTests(unittest.TestCase):
             profile.model, "opencode/muse-spark-1.3-contributor-free"
         )
         # The bound invoker drives the OpenCode adapter with the
-        # profile model (no real subprocess).
+        # profile model (no real subprocess; binary resolution
+        # mocked because CI runners carry no opencode install).
         with mock.patch.object(
+            opencode_adapter, "resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
+        ), mock.patch.object(
             opencode_adapter, "run_tree_command"
         ) as run_tree:
             run_tree.return_value = subprocess.CompletedProcess(
@@ -275,6 +279,9 @@ class OpenCodeCommandConstructionTests(unittest.TestCase):
 
         workspace = Path(tempfile.mkdtemp(prefix="nullone-opencode-cwd-"))
         with mock.patch.object(
+            opencode_adapter, "resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
+        ), mock.patch.object(
             opencode_adapter, "run_tree_command", side_effect=fake_run
         ):
             opencode_adapter.default_invoke_provider(
