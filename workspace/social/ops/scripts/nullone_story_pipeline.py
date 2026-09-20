@@ -499,9 +499,16 @@ class HaikuStoryWriter:
     Not exercised in offline tests (it shells out to the `claude` CLI,
     mirroring every other Haiku call in this repository) -- offline tests
     inject a fake writer instead.
+
+    `model` arrives from the role router's ProviderProfile (issue
+    #111) and is executed verbatim via `run_structured`; None keeps
+    the reviewed `haiku` default. Reported == executed, never faked.
     """
 
     model = "haiku"
+
+    def __init__(self, *, model: str | None = None) -> None:
+        self.model = (model or "").strip() or "haiku"
 
     def __call__(
         self, editorial_context: dict[str, Any]

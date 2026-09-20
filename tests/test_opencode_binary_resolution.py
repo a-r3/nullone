@@ -212,7 +212,13 @@ class SchedulerRegressionTests(unittest.TestCase):
             self.assertNotEqual(argv[0], "opencode")
 
     def test_role_execute_resolves_before_subprocess(self):
+        # Issue #111 amendment: binary resolution moved behind the
+        # provider adapter boundary; the PR116 invariant (absolute
+        # HOME-derived binary reaches subprocess) is proven at that
+        # boundary instead of on the wrapper module.
         import importlib.util
+
+        import nullone_opencode_binary as binary_module
 
         spec = importlib.util.spec_from_file_location(
             "draft_factory_run_binary_test", SCRIPTS / "nullone-draft-factory-run.py"
@@ -225,7 +231,7 @@ class SchedulerRegressionTests(unittest.TestCase):
             expected = str(home / ".opencode/bin/opencode")
             captured: dict = {}
 
-            def fake_resolve():
+            def fake_resolve(*args, **kwargs):
                 return expected
 
             def fake_run(cmd, **kwargs):
@@ -234,7 +240,9 @@ class SchedulerRegressionTests(unittest.TestCase):
 
                 return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-            with mock.patch.object(module, "resolve_opencode_binary", side_effect=fake_resolve):
+            with mock.patch.object(
+                binary_module, "resolve_opencode_binary", side_effect=fake_resolve
+            ):
                 with mock.patch.object(role_mod, "run_tree_command", side_effect=fake_run):
                     self.assertEqual(module.execute(), 0)
             self.assertEqual(captured["cmd"][0], expected)

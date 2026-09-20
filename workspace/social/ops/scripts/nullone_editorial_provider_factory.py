@@ -1,28 +1,17 @@
 #!/usr/bin/env python3
-"""Provider-neutral editorial transport selection for Morning Editorial.
+"""Morning Editorial provider binding behind the role router (issue #111).
 
 `run_morning_editorial` / `run_morning_workflow` depend only on an
-injected zero-argument `invoke_provider` callable. This module is the
-single place that callable is chosen, so switching transports never
-requires rewriting workflow code:
+injected zero-argument `invoke_provider` callable. This module binds
+that callable from the role router's ProviderProfile for
+`morning_editorial` -- it imports NO vendor transport module: vendor
+imports terminate behind `nullone_provider_adapter`.
 
-    NULLONE_EDITORIAL_PROVIDER=opencode | claude
-
-- `opencode` -> `nullone_opencode_editorial_provider`
-  (intended primary transport);
-- `claude` -> `nullone_claude_editorial_provider`
-  (preserved fallback/rollback transport);
-- unset or blank -> `claude` (safe compatibility: no live switch
-  happens by merely deploying this module);
-- anything else -> `UnknownEditorialProviderError`, fail closed.
-  There is deliberately no silent fallback from one transport to the
-  other inside a run: a misconfigured name surfaces loudly instead
-  of running on an unintended transport.
-
-Callers log the resolved name (`EDITORIAL_PROVIDER=<name>` in the
-Morning CLI; `context["editorial_provider"]` on the scheduled path)
-so the choice is always visible in run metadata. Names are fixed
-identifiers, never credential material.
+Deprecated compatibility: `NULLONE_EDITORIAL_PROVIDER=opencode |
+claude` remains an explicit transport override (honored inside the
+router); anything else fails closed via the router. There is
+deliberately no silent fallback from one transport to the other
+inside a run.
 """
 from __future__ import annotations
 
@@ -30,12 +19,8 @@ import os
 from typing import Callable
 
 from nullone_bridge_common import BridgeError
-from nullone_claude_editorial_provider import (
-    default_invoke_provider as claude_invoke_provider,
-)
-from nullone_opencode_editorial_provider import (
-    default_invoke_provider as opencode_invoke_provider,
-)
+import nullone_provider_adapter as provider_adapter
+import nullone_provider_router as provider_router
 
 EDITORIAL_PROVIDER_ENV_VAR = "NULLONE_EDITORIAL_PROVIDER"
 
@@ -76,17 +61,48 @@ def resolve_editorial_provider_name(raw: str | None = None) -> str:
     )
 
 
-def get_editorial_provider(name: str | None = None) -> tuple[str, Callable[[], None]]:
-    """Return `(provider_name, invoke_provider)` for the selected transport.
+def _resolve_profile(name: str | None) -> provider_router.ProviderProfile:
+    overlay = dict(os.environ)
+    if name is not None:
+        overlay[
+            f"{provider_router.ROLE_ENV_PREFIX}"
+            f"{provider_router.ROLE_MORNING_EDITORIAL.upper()}_TRANSPORT"
+        ] = resolve_editorial_provider_name(name)
+    return provider_router.resolve_provider_profile(
+        provider_router.ROLE_MORNING_EDITORIAL, env=overlay
+    )
 
-    The callable is zero-argument compatible with
-    `run_morning_editorial` / `run_morning_workflow`.
+
+def get_editorial_provider(name: str | None = None) -> tuple[str, Callable[[], None]]:
+    """Return `(transport_name, invoke_provider)` for Morning Editorial.
+
+    Issue #111: the role router is the sole authority and the
+    provider adapter is the sole execution path. The returned
+    zero-arg callable runs the profile's transport through the
+    adapter registry with the profile's model; workflows never
+    choose transports or models. The deprecated `name` argument
+    (and `NULLONE_EDITORIAL_PROVIDER` inside the router) remains an
+    explicit transport override only. Unknown transports fail
+    closed via the router; no silent fallback ever occurs.
     """
 
-    resolved = resolve_editorial_provider_name(name)
-    if resolved == PROVIDER_OPENCODE:
-        return resolved, opencode_invoke_provider
-    return resolved, claude_invoke_provider
+    from nullone_bridge_common import WORKSPACE
+
+    profile = _resolve_profile(name)
+
+    def invoke() -> None:
+        prompt = (WORKSPACE / "social/ops/prompts/morning-editorial.md").read_text(
+            encoding="utf-8"
+        )
+        provider_adapter.invoke_role_cycle(profile, prompt, WORKSPACE)
+
+    return profile.transport, invoke
+
+
+def get_editorial_profile(name: str | None = None) -> provider_router.ProviderProfile:
+    """Return the resolved ProviderProfile (observability helper)."""
+
+    return _resolve_profile(name)
 
 
 def self_test() -> int:

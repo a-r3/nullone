@@ -53,6 +53,7 @@ from nullone_editorial_runtime import (  # noqa: E402
 import nullone_claude_editorial_provider as claude_adapter  # noqa: E402
 import nullone_editorial_provider_factory as factory  # noqa: E402
 import nullone_opencode_editorial_provider as opencode_adapter  # noqa: E402
+from nullone_provider_router import ProviderRoutingError  # noqa: E402
 from support.morning_artifacts import (  # noqa: E402
     write_board_only,
     write_morning_artifacts,
@@ -75,21 +76,72 @@ class FactorySelectionTests(unittest.TestCase):
             os.environ, {factory.EDITORIAL_PROVIDER_ENV_VAR: "opencode"}
         ):
             name, invoke = factory.get_editorial_provider()
+            profile = factory.get_editorial_profile()
         self.assertEqual(name, "opencode")
-        self.assertIs(invoke, opencode_adapter.default_invoke_provider)
+        self.assertEqual(profile.transport, "opencode")
+        self.assertEqual(
+            profile.model, "opencode/muse-spark-1.3-contributor-free"
+        )
+        # The bound invoker drives the OpenCode adapter with the
+        # profile model (no real subprocess; binary resolution
+        # mocked because CI runners carry no opencode install).
+        # Mocks sit at the adapter's lookup namespaces.
+        with mock.patch(
+            "nullone_opencode_binary.resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
+        ), mock.patch(
+            "nullone_opencode_role.run_tree_command"
+        ) as run_tree:
+            run_tree.return_value = subprocess.CompletedProcess(
+                ["opencode"], 0, stdout="", stderr=""
+            )
+            invoke()
+        argv = run_tree.call_args[0][0]
+        self.assertIn("--model", argv)
+        self.assertEqual(
+            argv[argv.index("--model") + 1],
+            "opencode/muse-spark-1.3-contributor-free",
+        )
 
     def test_selects_claude_when_configured(self):
         with mock.patch.dict(
             os.environ, {factory.EDITORIAL_PROVIDER_ENV_VAR: "claude"}
         ):
             name, invoke = factory.get_editorial_provider()
+            profile = factory.get_editorial_profile()
         self.assertEqual(name, "claude")
-        self.assertIs(invoke, claude_adapter.default_invoke_provider)
+        self.assertEqual(profile.transport, "claude")
+        # Rollback default preserves the reviewed `sonnet` command.
+        self.assertEqual(profile.model, "sonnet")
+        with mock.patch.object(
+            claude_adapter, "run_tree_command"
+        ) as run_tree:
+            run_tree.return_value = subprocess.CompletedProcess(
+                ["claude"], 0, stdout="", stderr=""
+            )
+            invoke()
+        argv = run_tree.call_args[0][0]
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
 
-    def test_repo_default_preserves_claude_compatibility(self):
-        self.assertEqual(_resolve_with_env(None), "claude")
-        self.assertEqual(_resolve_with_env(""), "claude")
-        self.assertEqual(_resolve_with_env("   "), "claude")
+    def test_repo_default_is_router_checked_in_mapping(self):
+        # Issue #111 migration M1: the no-env default moved from the
+        # legacy factory shim (claude) to the checked-in role-router
+        # mapping (opencode + Muse Spark), matching live production.
+        # The legacy validator below keeps its claude default as a
+        # deprecated compatibility shim.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(factory.EDITORIAL_PROVIDER_ENV_VAR, None)
+            os.environ.pop("NULLONE_OPENCODE_MODEL", None)
+            for key in list(os.environ):
+                if key.startswith("NULLONE_ROLE_"):
+                    del os.environ[key]
+            name, _ = factory.get_editorial_provider()
+            profile = factory.get_editorial_profile()
+        self.assertEqual(name, "opencode")
+        self.assertEqual(profile.transport, "opencode")
+        self.assertEqual(
+            profile.model, "opencode/muse-spark-1.3-contributor-free"
+        )
 
     def test_selection_is_case_and_whitespace_insensitive(self):
         self.assertEqual(_resolve_with_env("OpEnCoDe"), "opencode")
@@ -102,8 +154,14 @@ class FactorySelectionTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ, {factory.EDITORIAL_PROVIDER_ENV_VAR: bad}
             ):
-                with self.assertRaises(factory.UnknownEditorialProviderError):
+                # Router-backed selection fails closed as a BridgeError
+                # (dispatch maps it to FAILED orchestration; nothing
+                # is invoked, no fallback).
+                with self.assertRaises(ProviderRoutingError):
                     factory.get_editorial_provider()
+        from nullone_bridge_common import BridgeError
+
+        self.assertTrue(issubclass(ProviderRoutingError, BridgeError))
 
     def test_unknown_provider_error_text_is_fixed(self):
         marker = "should-never-appear-in-error-text-123"
@@ -222,6 +280,9 @@ class OpenCodeCommandConstructionTests(unittest.TestCase):
 
         workspace = Path(tempfile.mkdtemp(prefix="nullone-opencode-cwd-"))
         with mock.patch.object(
+            opencode_adapter, "resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
+        ), mock.patch.object(
             opencode_adapter, "run_tree_command", side_effect=fake_run
         ):
             opencode_adapter.default_invoke_provider(

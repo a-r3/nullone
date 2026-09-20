@@ -40,6 +40,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from nullone_bridge_common import BridgeError  # noqa: E402
 import nullone_opencode_story_provider as story_adapter  # noqa: E402
+from nullone_provider_router import ProviderRoutingError  # noqa: E402
 import nullone_story_provider_factory as story_factory  # noqa: E402
 from nullone_story_pipeline import (  # noqa: E402
     HaikuStoryWriter,
@@ -325,20 +326,33 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(name, "claude")
         self.assertIsInstance(writer, HaikuStoryWriter)
 
-    def test_repo_default_preserves_current_behavior(self):
+    def test_repo_default_is_router_checked_in_mapping(self):
+        # Issue #111 migration M1: the no-env default moved from the
+        # legacy factory shim (claude) to the checked-in role-router
+        # mapping (opencode + Muse Spark), matching live production.
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(story_factory.STORY_PROVIDER_ENV_VAR, None)
+            os.environ.pop("NULLONE_OPENCODE_MODEL", None)
+            for key in list(os.environ):
+                if key.startswith("NULLONE_ROLE_"):
+                    del os.environ[key]
             self.assertEqual(story_factory.resolve_story_provider_name(), "claude")
             name, writer = story_factory.get_story_writer()
-            self.assertEqual(name, "claude")
-            self.assertIsInstance(writer, HaikuStoryWriter)
+            profile = story_factory.get_story_profile()
+        self.assertEqual(name, "opencode")
+        self.assertEqual(profile.transport, "opencode")
+        self.assertIsInstance(writer, story_adapter.OpenCodeStoryWriter)
+        self.assertEqual(writer.model, "opencode/muse-spark-1.3-contributor-free")
 
     def test_unknown_provider_fails_closed_without_fallback(self):
         for bad in ("auto", "haiku", "openclaw", "both"):
             with self.assertRaises(story_factory.UnknownStoryProviderError):
                 story_factory.resolve_story_provider_name(bad)
             with mock.patch.dict(os.environ, {story_factory.STORY_PROVIDER_ENV_VAR: bad}):
-                with self.assertRaises(story_factory.UnknownStoryProviderError):
+                # Router-backed selection fails closed as a
+                # BridgeError; the Claude writer is never silently
+                # substituted.
+                with self.assertRaises(ProviderRoutingError):
                     story_factory.get_story_writer()
 
     def test_dispatch_misconfigured_provider_fails_closed_offline(self):
@@ -361,15 +375,23 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(result.context.get("story_provider"), "claude")
 
     def test_dispatch_default_opencode_context_shows_muse_spark(self):
+        # Issue #111 migration M1: clean-env default is the router
+        # mapping (opencode + Muse Spark), not the legacy claude shim.
         import nullone_scheduled_run_dispatch as dispatch
 
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(story_factory.STORY_PROVIDER_ENV_VAR, None)
             os.environ.pop(story_adapter.OPENCODE_MODEL_ENV_VAR, None)
+            for key in list(os.environ):
+                if key.startswith("NULLONE_ROLE_"):
+                    del os.environ[key]
             result = dispatch.run_story_trigger({"workflow_id": "story"})
         self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
-        self.assertEqual(result.context.get("story_provider"), "claude")
-        self.assertEqual(result.context.get("story_model"), "haiku")
+        self.assertEqual(result.context.get("story_provider"), "opencode")
+        self.assertEqual(
+            result.context.get("story_model"),
+            "opencode/muse-spark-1.3-contributor-free",
+        )
 
     def test_dispatch_opencode_override_context_is_accurate(self):
         import nullone_scheduled_run_dispatch as dispatch

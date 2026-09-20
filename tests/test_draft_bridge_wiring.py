@@ -258,6 +258,8 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
     def run_wrapper(self, tmp: str, fake=None, cycle_effect=None,
                     fixture_created_at: str | None = None,
                     extra_fixtures: list | None = None):
+        import nullone_provider_adapter as provider_adapter
+
         root = Path(tmp)
         wrapper = load_wrapper()
         if fake is None:
@@ -267,15 +269,18 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
         start = self.fixed_start()
         cycle_calls: list[str] = []
         if cycle_effect is None:
-            def cycle_effect(cmd, **kwargs):
+            def cycle_effect(profile, prompt, workspace):
                 cycle_calls.append("cycle")
+                return provider_adapter.AdapterOutcome(
+                    role=profile.role,
+                    transport=profile.transport,
+                    model=profile.model,
+                    outcome="COMPLETED",
+                )
         with (
             mock.patch.object(bridge_common, "WORKSPACE", root),
             mock.patch.object(
-                wrapper, "run_opencode_cycle", side_effect=cycle_effect
-            ),
-            mock.patch.object(
-                wrapper, "resolve_opencode_binary", return_value="opencode"
+                provider_adapter, "invoke_role_cycle", side_effect=cycle_effect
             ),
             mock.patch.object(wrapper, "_utcnow", return_value=start),
         ):
@@ -309,6 +314,16 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
 
     def test_wrapper_second_run_replays_zero_new(self):
         with tempfile.TemporaryDirectory() as tmp:
+            import nullone_provider_adapter as provider_adapter
+
+            def completed_cycle(profile, prompt, workspace):
+                return provider_adapter.AdapterOutcome(
+                    role=profile.role,
+                    transport=profile.transport,
+                    model=profile.model,
+                    outcome="COMPLETED",
+                )
+
             root = Path(tmp)
             wrapper = load_wrapper()
             fake = FakeBridge()
@@ -318,10 +333,7 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             with (
                 mock.patch.object(bridge_common, "WORKSPACE", root),
                 mock.patch.object(
-                    wrapper, "run_opencode_cycle", return_value=None
-                ),
-                mock.patch.object(
-                    wrapper, "resolve_opencode_binary", return_value="opencode"
+                    provider_adapter, "invoke_role_cycle", side_effect=completed_cycle
                 ),
                 mock.patch.object(wrapper, "_utcnow", return_value=start),
             ):
@@ -338,6 +350,8 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
         from nullone_bridge_common import BridgeError
 
         with tempfile.TemporaryDirectory() as tmp:
+            import nullone_provider_adapter as provider_adapter
+
             root = Path(tmp)
             wrapper = load_wrapper()
             fake = FakeBridge()
@@ -345,14 +359,13 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             action._BRIDGE_OVERRIDE = fake
             start = self.fixed_start()
 
-            def boom(cmd, **kwargs):
+            def boom(profile, prompt, workspace):
                 raise BridgeError("transport down")
 
             with (
                 mock.patch.object(bridge_common, "WORKSPACE", root),
-                mock.patch.object(wrapper, "run_opencode_cycle", side_effect=boom),
                 mock.patch.object(
-                    wrapper, "resolve_opencode_binary", return_value="opencode"
+                    provider_adapter, "invoke_role_cycle", side_effect=boom
                 ),
                 mock.patch.object(wrapper, "_utcnow", return_value=start),
             ):
@@ -391,6 +404,16 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
     def test_wrapper_unexpected_bridge_error_fails_nonzero(self):
         """Issue A/D: unexpected internal error => exit 1, fail closed."""
         with tempfile.TemporaryDirectory() as tmp:
+            import nullone_provider_adapter as provider_adapter
+
+            def completed_cycle(profile, prompt, workspace):
+                return provider_adapter.AdapterOutcome(
+                    role=profile.role,
+                    transport=profile.transport,
+                    model=profile.model,
+                    outcome="COMPLETED",
+                )
+
             root = Path(tmp)
             wrapper = load_wrapper()
             fake = FakeBridge()
@@ -400,10 +423,7 @@ class WrapperWiringIntegrationTest(unittest.TestCase):
             with (
                 mock.patch.object(bridge_common, "WORKSPACE", root),
                 mock.patch.object(
-                    wrapper, "run_opencode_cycle", return_value=None
-                ),
-                mock.patch.object(
-                    wrapper, "resolve_opencode_binary", return_value="opencode"
+                    provider_adapter, "invoke_role_cycle", side_effect=completed_cycle
                 ),
                 mock.patch.object(wrapper, "_utcnow", return_value=start),
                 mock.patch.object(

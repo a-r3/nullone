@@ -173,12 +173,14 @@ class SharedTransportTests(unittest.TestCase):
 
 class RoleWrapperTests(unittest.TestCase):
     def setUp(self):
-        for module in (draft_wrapper, radar_wrapper, weekly_wrapper):
-            patcher = mock.patch.object(
-                module, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
-            )
-            self.addCleanup(patcher.stop)
-            patcher.start()
+        # Issue #111 amendment: wrappers resolve the binary through
+        # the provider adapter boundary, never directly.
+        patcher = mock.patch(
+            "nullone_opencode_binary.resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
 
     def test_command_shape_per_role(self):
         for role, agent, module, timeout in WRAPPERS:
@@ -580,8 +582,9 @@ class RoleFilesystemContractTests(unittest.TestCase):
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        with mock.patch.object(
-            draft_wrapper, "resolve_opencode_binary", return_value="/tmp/fake-opencode"
+        with mock.patch(
+            "nullone_opencode_binary.resolve_opencode_binary",
+            return_value="/tmp/fake-opencode",
         ):
             with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
                 workspace = Path("/tmp/nullone-retry-check")
@@ -639,13 +642,26 @@ class RoleArtifactValidationTests(unittest.TestCase):
             self.assertEqual(found, [fresh])
 
     def _run_execute(self, module, *, fresh: bool) -> int:
-        with mock.patch.object(module, "resolve_opencode_binary", return_value="/tmp/fake-opencode"), \
-            mock.patch.object(module, "run_opencode_cycle", return_value=None), \
-            mock.patch.object(
-                module,
-                "find_fresh_reports",
-                return_value=[Path("/tmp/fake-report.md")] if fresh else [],
-            ):
+        # Issue #111 amendment: execution flows through the provider
+        # adapter registry; the fake stands in for the selected
+        # transport at that boundary (no vendor attr on the wrapper).
+        import nullone_provider_adapter as provider_adapter
+
+        def fake_cycle(profile, prompt, workspace):
+            return provider_adapter.AdapterOutcome(
+                role=profile.role,
+                transport=profile.transport,
+                model=profile.model,
+                outcome="COMPLETED",
+            )
+
+        with mock.patch.object(
+            provider_adapter, "invoke_role_cycle", side_effect=fake_cycle
+        ), mock.patch.object(
+            module,
+            "find_fresh_reports",
+            return_value=[Path("/tmp/fake-report.md")] if fresh else [],
+        ):
             return module.execute()
 
     def test_hollow_radar_run_is_blocked(self):

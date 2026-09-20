@@ -35,25 +35,50 @@ from nullone_process_tree import run_tree_command
 
 PROMPT_PATH = WORKSPACE / "social/ops/prompts/morning-editorial.md"
 
+# Reviewed rollback default: the `claude -p --model sonnet` command is
+# preserved byte-for-byte when the role router selects the Claude
+# transport without pinning a model (issue #111: the model travels in
+# the ProviderProfile; this default is the transport-local fallback).
+CLAUDE_DEFAULT_MODEL = "sonnet"
 
-def default_invoke_provider() -> None:
-    """Invoke the real Morning Editorial planning cycle via the Claude CLI."""
 
+def build_claude_command(*, prompt: str, model: str | None = None) -> list[str]:
+    """Build the deterministic `claude -p` argv for one editorial cycle.
+
+    Pure function (no I/O, no subprocess) so offline tests can pin
+    the exact argv shape. `model` arrives from the role router's
+    ProviderProfile; None preserves the reviewed `sonnet` default.
+    Tool allowlist and permission mode are pinned: routing a model
+    never widens capability.
+    """
+
+    resolved_model = (model or "").strip() or CLAUDE_DEFAULT_MODEL
+    return [
+        "claude",
+        "-p",
+        prompt,
+        "--model",
+        resolved_model,
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read,Write,WebSearch,WebFetch",
+    ]
+
+
+def default_invoke_provider(model: str | None = None) -> None:
+    """Invoke the real Morning Editorial planning cycle via the Claude CLI.
+
+    `model` arrives from the role router's ProviderProfile; None
+    preserves the reviewed `sonnet` default.
+    """
+
+    resolved_model = (model or "").strip() or CLAUDE_DEFAULT_MODEL
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     try:
         cp = run_tree_command(
-            [
-                "claude",
-                "-p",
-                prompt,
-                "--model",
-                "sonnet",
-                "--permission-mode",
-                "dontAsk",
-                "--allowedTools",
-                "Read,Write,WebSearch,WebFetch",
-            ],
+            build_claude_command(prompt=prompt, model=resolved_model),
             cwd=WORKSPACE,
             timeout=PROVIDER_CALL_TIMEOUT_SECONDS,
         )

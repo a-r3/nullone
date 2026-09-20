@@ -7,11 +7,15 @@ import tempfile
 from pathlib import Path
 
 from nullone_bridge_common import BridgeError
-from nullone_editorial_provider_factory import get_editorial_provider
+from nullone_editorial_provider_factory import (
+    get_editorial_profile,
+    get_editorial_provider,
+)
 from nullone_editorial_runtime import (
     ProviderUnreachableError,
     run_morning_editorial,
 )
+from nullone_provider_router import format_routing_metadata
 
 HERE = Path(__file__).resolve().parent
 
@@ -20,6 +24,7 @@ def execute(occurrence_id: str, board_date: str | None) -> int:
     resolved_board_date = board_date or occurrence_id[:10]
 
     provider_name, invoke_provider = get_editorial_provider()
+    profile = get_editorial_profile()
 
     result = run_morning_editorial(
         occurrence_id=occurrence_id,
@@ -28,6 +33,7 @@ def execute(occurrence_id: str, board_date: str | None) -> int:
     )
 
     print(f"EDITORIAL_PROVIDER={provider_name}")
+    print(format_routing_metadata(profile, result["domain_outcome"]))
     print(f"RUN_ID={result['run_id']}")
     print(f"DOMAIN_OUTCOME={result['domain_outcome']}")
 

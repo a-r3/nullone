@@ -162,13 +162,16 @@ def default_invoke_provider(
     prompt: str | None = None,
     workspace: Path | str | None = None,
     timeout: float | int | None = None,
+    model: str | None = None,
 ) -> None:
     """Invoke one real Morning Editorial planning cycle via OpenCode.
 
     Zero-argument compatible with `run_morning_editorial`'s
     `invoke_provider` contract: every parameter defaults to the
     production wiring (prompt file, `WORKSPACE`,
-    `PROVIDER_CALL_TIMEOUT_SECONDS`).
+    `PROVIDER_CALL_TIMEOUT_SECONDS`). `model` arrives from the role
+    router's ProviderProfile (issue #111); None keeps the existing
+    `NULLONE_OPENCODE_MODEL`-or-default resolution.
     """
 
     resolved_prompt = (
@@ -178,9 +181,11 @@ def default_invoke_provider(
     resolved_timeout = (
         PROVIDER_CALL_TIMEOUT_SECONDS if timeout is None else timeout
     )
+    resolved_model = model if model is not None else resolve_opencode_model()
     cmd: Sequence[str] = build_opencode_command(
         prompt=resolved_prompt,
         workspace=resolved_workspace,
+        model=resolved_model,
         binary=resolve_opencode_binary(),
     )
 
