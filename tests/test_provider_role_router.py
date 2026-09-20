@@ -46,6 +46,11 @@ import nullone_provider_router as router  # noqa: E402
 
 MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
 
+# Role-only free-model route for Morning (morning entitlement fix):
+# ONLY morning_editorial resolves here; every other role stays on
+# the reviewed default.
+MORNING_FREE_MODEL = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+
 # Covered execution layers: these files must execute through the
 # adapter registry and import NO vendor transport module.
 COVERED_EXECUTION_FILES = (
@@ -128,6 +133,48 @@ class RouterFailClosedTests(unittest.TestCase):
             )
         print("ROUTER_BLANK_MODEL_FAILS_CLOSED=PASS")
 
+    def test_provider_defined_model_suffix_matrix(self):
+        # Compatibility: provider-defined `:suffix` IDs (OpenRouter
+        # `:free` variants) are routable; blanks, vendor-less,
+        # malformed, and whitespace/control variants still fail
+        # closed. No model call, no network.
+        mapping = checked_in_mapping()
+        for good in (
+            "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+            "openrouter/qwen/qwen3.8-27b:free",
+            MUSE_SPARK,
+            "openrouter/nvidia/nemotron-3-ultra-550b-a55b",
+        ):
+            profile = router.resolve_provider_profile(
+                router.ROLE_MORNING_EDITORIAL,
+                config=mapping,
+                env={"NULLONE_ROLE_MORNING_EDITORIAL_MODEL": good},
+            )
+            self.assertEqual(profile.transport, "opencode")
+            self.assertEqual(profile.model, good)
+            self.assertEqual(profile.fallback_policy, "none")
+        for bad in (
+            "",
+            "   ",
+            "sonnet",
+            "openrouter/",
+            "/model",
+            "openrouter/model:",
+            "openrouter/model:free:extra",
+            "openrouter/model with space",
+            "open:code/model",
+            "openrouter/mod$l",
+            "openrouter/model:fr ee",
+            "model\nwithnewline",
+        ):
+            with self.assertRaises(router.ProviderRoutingError):
+                router.resolve_provider_profile(
+                    router.ROLE_MORNING_EDITORIAL,
+                    config=mapping,
+                    env={"NULLONE_ROLE_MORNING_EDITORIAL_MODEL": bad},
+                )
+        print("ROUTER_MODEL_SUFFIX_MATRIX=PASS")
+
     def test_unknown_role_key_in_config_fails_closed(self):
         bad = {
             "morning_editorial": {"transport": "opencode", "model": MUSE_SPARK},
@@ -162,7 +209,10 @@ class PerRoleRoutingTests(unittest.TestCase):
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
             self.assertEqual(profile.transport, "opencode")
-            self.assertEqual(profile.model, MUSE_SPARK)
+            if role == router.ROLE_MORNING_EDITORIAL:
+                self.assertEqual(profile.model, MORNING_FREE_MODEL)
+            else:
+                self.assertEqual(profile.model, MUSE_SPARK)
             self.assertEqual(profile.fallback_policy, "none")
             self.assertEqual(profile.timeout_seconds, router.ROLE_TIMEOUTS[role])
             self.assertEqual(profile.capabilities, router.ROLE_CAPABILITIES[role])
@@ -171,6 +221,29 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("STORY_PROFILE_ROUTING=PASS")
         print("RADAR_PROFILE_ROUTING=PASS")
         print("WEEKLY_PROFILE_ROUTING=PASS")
+
+    def test_checked_in_morning_free_model_route_is_role_only(self):
+        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        roles = raw["roles"]
+        self.assertEqual(
+            roles["morning_editorial"],
+            {"transport": "opencode", "model": MORNING_FREE_MODEL},
+        )
+        for role in (
+            "draft_factory",
+            "story_writer",
+            "breaking_radar",
+            "weekly_strategy",
+        ):
+            self.assertEqual(
+                roles[role], {"transport": "opencode", "model": MUSE_SPARK}
+            )
+        print("MORNING_MODEL_RESOLVES_TO_TARGET=PASS")
+        print("MORNING_TRANSPORT_REMAINS_OPENCODE=PASS")
+        print("DRAFT_FACTORY_ROUTE_UNCHANGED=PASS")
+        print("STORY_WRITER_ROUTE_UNCHANGED=PASS")
+        print("BREAKING_RADAR_ROUTE_UNCHANGED=PASS")
+        print("WEEKLY_STRATEGY_ROUTE_UNCHANGED=PASS")
 
     def test_role_timeouts_equal_reviewed_wrapper_constants(self):
         def load_dashed(name: str, filename: str):
