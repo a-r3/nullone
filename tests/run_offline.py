@@ -85,6 +85,17 @@ COMMANDS = [
     [sys.executable, "tests/test_draft_bridge_manifest.py"],
     [sys.executable, "tests/test_recovery_contract.py"],
     [sys.executable, "tests/test_restore_drill.py"],
+    [sys.executable, "tests/test_provider_role_router.py"],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_provider_router.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_provider_adapter.py",
+        "self-test",
+    ],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_breaking_identity.py",

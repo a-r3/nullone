@@ -1819,3 +1819,47 @@ stabilization state unchanged.
 Verified production facts: OpenCode migration production activation occurred (Morning + Story + Draft/Radar/Weekly automation conversions); the Zen credential issue was repaired (`opencode` entry present in the user credential store; a manual headless Muse Spark probe passed). Natural scheduled OpenCode runs then revealed a SEPARATE executable-resolution failure: the live Gateway/scheduler PATH does not contain `~/.opencode/bin` while all OpenCode adapters invoked bare `opencode`, producing instant `FileNotFoundError: [Errno 2]` before any OpenCode session existed (143–300ms failures, no sessions, no logs). Interactive probes worked only because the interactive PATH resolves the binary.
 
 Fix (repo-only, this branch): shared deterministic resolver `nullone_opencode_binary.py` (`NULLONE_OPENCODE_BINARY` explicit override, else HOME-derived `~/.opencode/bin/opencode`, else `shutil.which` compatibility fallback; fail closed with typed `OpenCodeBinaryResolutionError` / `OPENCODE_BINARY_NOT_FOUND`, secret-free). All three transports (shared role helper for Draft/Radar/Weekly, Morning adapter, Story adapter) build production argv from the resolved absolute binary; pure builders keep a bare default so unit tests stay filesystem-independent. No provider/model/prompt/agent/schedule/permission changes. Do not claim production recovered before deployment + natural proof. #37 OPEN; #111 OPEN; #112 OPEN.
+
+### Provider-neutral role router — issue #111 (repo-level, NOT DEPLOYED)
+
+Branch `feature/provider-role-router` implements the #111 FINAL
+provider-neutral role router architecture (repo-only PR, production
+unchanged):
+
+- Workflows depend on LOGICAL ROLES (`morning_editorial`,
+  `draft_factory`, `story_writer`, `breaking_radar`,
+  `weekly_strategy`), never vendor names. Analytics/heartbeat stay
+  deterministic, not LLM-routed.
+- `nullone_provider_router.py` is the SOLE authority:
+  `resolve_provider_profile(role) -> ProviderProfile(role,
+  transport, model, capabilities, timeout, fallback_policy="none")`.
+  Unknown role/transport, blank/invalid model, and unsupported
+  role x transport fail closed. No hidden vendor switching.
+- One authoritative mapping:
+  `workspace/social/ops/provider-routing.json` (schema
+  `nullone.provider-routing.v1`, no secrets). Explicit per-role env
+  override `NULLONE_ROLE_<ROLE>_TRANSPORT/_MODEL`; precedence
+  per-role env > legacy env > JSON. Legacy
+  `NULLONE_EDITORIAL_PROVIDER` / `NULLONE_STORY_PROVIDER` /
+  `NULLONE_OPENCODE_MODEL` remain as documented deprecated
+  compatibility (migration M1: no-env default moved from the legacy
+  `claude` shim to the checked-in `opencode` + Muse Spark mapping,
+  matching live; live sets explicit env so live behavior is
+  unchanged).
+- OpenCode is a TRANSPORT accepting the profile model for every
+  role (binary resolver, isolated session, explicit agent/model,
+  `--format json`, exact `--dir`, no `--auto`/continuation,
+  reviewed agents, timeouts, secret-safe failures all preserved).
+  Claude remains the explicit rollback adapter (Morning cycle +
+  Story writer; other roles x claude fail closed). No silent
+  fallback anywhere (proven offline).
+- Every model-backed run prints secret-free
+  `ROLE/TRANSPORT/PROVIDER_MODEL/OUTCOME`; profiles stamped into
+  scheduled result contexts.
+- Full offline suite PASS including the #111 matrix
+  (router/adapters/mixed-config/semantics/permission regressions).
+- Full spec: `docs/architecture/provider-role-routing.md`.
+- Provider changes remain controlled activation under Issue #37;
+  production NOT changed by this PR; live mapping unchanged until
+  separately deployed. Do NOT treat this merge as a provider/model
+  switch. #37 OPEN; #111 closes on merge + review.

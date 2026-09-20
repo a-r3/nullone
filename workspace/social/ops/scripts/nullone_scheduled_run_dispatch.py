@@ -36,16 +36,19 @@ from nullone_analytics_provider_factory import build_production_analytics_provid
 from nullone_analytics_workflow import AnalyticsWorkflowResult, run_analytics_workflow
 from nullone_editorial_provider_factory import (
     UnknownEditorialProviderError,
+    get_editorial_profile,
     get_editorial_provider,
 )
 from nullone_failure_notify import OpenClawTelegramTransport, notify_if_required
 from nullone_morning_workflow import MorningWorkflowResult, run_morning_workflow
+from nullone_provider_router import ProviderRoutingError
 from nullone_story_pipeline import (
     NulloneDraftBridgeConnector,
     numeric_scope_verifier,
 )
 from nullone_story_provider_factory import (
     UnknownStoryProviderError,
+    get_story_profile,
     get_story_writer,
 )
 from nullone_story_scheduled_workflow import (
@@ -85,7 +88,8 @@ def run_morning_trigger(trigger: dict[str, Any]) -> MorningWorkflowResult:
 
     try:
         provider_name, invoke_provider = get_editorial_provider()
-    except UnknownEditorialProviderError:
+        profile = get_editorial_profile()
+    except (UnknownEditorialProviderError, ProviderRoutingError):
         occurrence_id = trigger.get("occurrence_id") if isinstance(trigger, dict) else None
         return MorningWorkflowResult(
             application_execution="FAILED",
@@ -107,6 +111,9 @@ def run_morning_trigger(trigger: dict[str, Any]) -> MorningWorkflowResult:
         notifier=production_notifier,
     )
     result.context["editorial_provider"] = provider_name
+    result.context["provider_profile"] = (
+        f"{profile.role}/{profile.transport}/{profile.model}"
+    )
     return result
 
 
@@ -145,7 +152,8 @@ def run_story_trigger(trigger: dict[str, Any]) -> StoryScheduledResult:
 
     try:
         story_provider_name, writer = get_story_writer()
-    except UnknownStoryProviderError:
+        story_profile = get_story_profile()
+    except (UnknownStoryProviderError, ProviderRoutingError):
         occurrence_id = trigger.get("occurrence_id") if isinstance(trigger, dict) else None
         return StoryScheduledResult(
             application_execution="FAILED",
@@ -169,4 +177,7 @@ def run_story_trigger(trigger: dict[str, Any]) -> StoryScheduledResult:
     )
     result.context["story_provider"] = story_provider_name
     result.context["story_model"] = getattr(writer, "model", "unknown")
+    result.context["provider_profile"] = (
+        f"{story_profile.role}/{story_profile.transport}/{story_profile.model}"
+    )
     return result

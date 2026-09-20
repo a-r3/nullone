@@ -36,6 +36,11 @@ from nullone_claude_editorial_provider import (
 from nullone_opencode_editorial_provider import (
     default_invoke_provider as opencode_invoke_provider,
 )
+from nullone_provider_router import (
+    ROLE_MORNING_EDITORIAL,
+    ProviderProfile,
+    resolve_provider_profile,
+)
 
 EDITORIAL_PROVIDER_ENV_VAR = "NULLONE_EDITORIAL_PROVIDER"
 
@@ -76,17 +81,49 @@ def resolve_editorial_provider_name(raw: str | None = None) -> str:
     )
 
 
-def get_editorial_provider(name: str | None = None) -> tuple[str, Callable[[], None]]:
-    """Return `(provider_name, invoke_provider)` for the selected transport.
+def _resolve_profile(name: str | None) -> ProviderProfile:
+    from nullone_provider_router import ROLE_ENV_PREFIX
 
-    The callable is zero-argument compatible with
-    `run_morning_editorial` / `run_morning_workflow`.
+    overlay = dict(os.environ)
+    if name is not None:
+        overlay[f"{ROLE_ENV_PREFIX}{ROLE_MORNING_EDITORIAL.upper()}_TRANSPORT"] = (
+            resolve_editorial_provider_name(name)
+        )
+    return resolve_provider_profile(ROLE_MORNING_EDITORIAL, env=overlay)
+
+
+def get_editorial_provider(name: str | None = None) -> tuple[str, Callable[[], None]]:
+    """Return `(transport_name, invoke_provider)` for Morning Editorial.
+
+    Issue #111: the role router (`resolve_provider_profile`) is the
+    sole authority. The returned zero-arg callable is bound to the
+    profile's model; workflows never choose transports or models.
+    The deprecated `name` argument (and `NULLONE_EDITORIAL_PROVIDER`
+    inside the router) remains an explicit transport override only.
+    Unknown transports fail closed via the router; no silent
+    fallback ever occurs.
     """
 
-    resolved = resolve_editorial_provider_name(name)
-    if resolved == PROVIDER_OPENCODE:
-        return resolved, opencode_invoke_provider
-    return resolved, claude_invoke_provider
+    profile = _resolve_profile(name)
+    return profile.transport, _bind_invoker(profile)
+
+
+def get_editorial_profile(name: str | None = None) -> ProviderProfile:
+    """Return the resolved ProviderProfile (observability helper)."""
+
+    return _resolve_profile(name)
+
+
+def _bind_invoker(profile: ProviderProfile) -> Callable[[], None]:
+    if profile.transport == PROVIDER_OPENCODE:
+        def invoke_opencode() -> None:
+            opencode_invoke_provider(model=profile.model)
+
+        return invoke_opencode
+    def invoke_claude() -> None:
+        claude_invoke_provider(model=profile.model)
+
+    return invoke_claude
 
 
 def self_test() -> int:

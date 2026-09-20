@@ -33,6 +33,11 @@ from nullone_opencode_role import (
     resolve_role_model,
     run_opencode_cycle,
 )
+from nullone_provider_router import (
+    ROLE_BREAKING_RADAR,
+    format_routing_metadata,
+    resolve_provider_profile,
+)
 
 ROLE = "breaking-radar"
 AGENT = "nullone-breaking-radar"
@@ -96,19 +101,30 @@ def find_fresh_reports(*, workspace: Path, since_epoch: float) -> list[Path]:
 
 
 def execute() -> int:
-    model = resolve_role_model()
-    print(describe_cycle(role=ROLE, agent=AGENT, model=model))
-    cmd: Sequence[str] = build_command(model=model, binary=resolve_opencode_binary())
-    started = time.time()
+    # Issue #111: model and timeout arrive from the role router.
+    # Values equal today's reviewed constants, so production
+    # behavior is unchanged.
     try:
-        run_opencode_cycle(cmd, cwd=WORKSPACE, timeout=RADAR_TIMEOUT_SECONDS, role=ROLE)
+        profile = resolve_provider_profile(ROLE_BREAKING_RADAR)
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
         return 1
+    print(describe_cycle(role=ROLE, agent=AGENT, model=profile.model))
+    print(format_routing_metadata(profile, "STARTED"))
+    cmd: Sequence[str] = build_command(model=profile.model, binary=resolve_opencode_binary())
+    started = time.time()
+    try:
+        run_opencode_cycle(cmd, cwd=WORKSPACE, timeout=profile.timeout_seconds, role=ROLE)
+    except BridgeError as e:
+        print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        print(format_routing_metadata(profile, "BLOCKED"))
+        return 1
     if not find_fresh_reports(workspace=WORKSPACE, since_epoch=started):
         print("ROLE_OUTCOME=BLOCKED reason=MissingRadarReport")
+        print(format_routing_metadata(profile, "BLOCKED"))
         return 1
     print("ROLE_OUTCOME=COMPLETED")
+    print(format_routing_metadata(profile, "COMPLETED"))
     return 0
 
 

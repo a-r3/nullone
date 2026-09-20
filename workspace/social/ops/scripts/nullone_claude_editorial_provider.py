@@ -35,10 +35,21 @@ from nullone_process_tree import run_tree_command
 
 PROMPT_PATH = WORKSPACE / "social/ops/prompts/morning-editorial.md"
 
+# Reviewed rollback default: the `claude -p --model sonnet` command is
+# preserved byte-for-byte when the role router selects the Claude
+# transport without pinning a model (issue #111: the model travels in
+# the ProviderProfile; this default is the transport-local fallback).
+CLAUDE_DEFAULT_MODEL = "sonnet"
 
-def default_invoke_provider() -> None:
-    """Invoke the real Morning Editorial planning cycle via the Claude CLI."""
 
+def default_invoke_provider(model: str | None = None) -> None:
+    """Invoke the real Morning Editorial planning cycle via the Claude CLI.
+
+    `model` arrives from the role router's ProviderProfile; None
+    preserves the reviewed `sonnet` default.
+    """
+
+    resolved_model = (model or "").strip() or CLAUDE_DEFAULT_MODEL
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
 
     try:
@@ -48,7 +59,7 @@ def default_invoke_provider() -> None:
                 "-p",
                 prompt,
                 "--model",
-                "sonnet",
+                resolved_model,
                 "--permission-mode",
                 "dontAsk",
                 "--allowedTools",

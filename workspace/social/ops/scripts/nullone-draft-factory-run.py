@@ -34,6 +34,11 @@ from nullone_opencode_role import (
     resolve_role_model,
     run_opencode_cycle,
 )
+from nullone_provider_router import (
+    ROLE_DRAFT_FACTORY,
+    format_routing_metadata,
+    resolve_provider_profile,
+)
 
 ROLE = "draft-factory"
 AGENT = "nullone-draft-factory"
@@ -82,16 +87,25 @@ def build_command(
 
 
 def execute() -> int:
-    model = resolve_role_model()
-    print(describe_cycle(role=ROLE, agent=AGENT, model=model))
-    cmd: Sequence[str] = build_command(model=model, binary=resolve_opencode_binary())
+    # Issue #111: transport (opencode) is fixed for this role wrapper;
+    # the model and timeout arrive from the role router. Values equal
+    # today's reviewed constants, so production behavior is unchanged.
+    try:
+        profile = resolve_provider_profile(ROLE_DRAFT_FACTORY)
+    except BridgeError as e:
+        print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        return 1
+    print(describe_cycle(role=ROLE, agent=AGENT, model=profile.model))
+    print(format_routing_metadata(profile, "STARTED"))
+    cmd: Sequence[str] = build_command(model=profile.model, binary=resolve_opencode_binary())
     cycle_start = _utcnow()
     try:
         run_opencode_cycle(
-            cmd, cwd=WORKSPACE, timeout=DRAFT_FACTORY_TIMEOUT_SECONDS, role=ROLE
+            cmd, cwd=WORKSPACE, timeout=profile.timeout_seconds, role=ROLE
         )
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
+        print(format_routing_metadata(profile, "BLOCKED"))
         _run_bridge_backstop(cycle_start)
         return 1
     backstop_failed = _run_bridge_backstop(cycle_start)
@@ -100,8 +114,10 @@ def execute() -> int:
         # completion did not reach DRAFT_CREATED: this is a failed
         # production cycle, never a silent COMPLETED (issue #142-A).
         print("ROLE_OUTCOME=BLOCKED reason=BRIDGE_BACKSTOP")
+        print(format_routing_metadata(profile, "BLOCKED"))
         return 1
     print("ROLE_OUTCOME=COMPLETED")
+    print(format_routing_metadata(profile, "COMPLETED"))
     return 0
 
 

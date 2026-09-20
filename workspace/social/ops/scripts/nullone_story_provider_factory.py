@@ -30,6 +30,12 @@ from typing import Any, Callable
 
 from nullone_bridge_common import BridgeError
 from nullone_opencode_story_provider import OpenCodeStoryWriter
+from nullone_provider_router import (
+    ROLE_ENV_PREFIX,
+    ROLE_STORY_WRITER,
+    ProviderProfile,
+    resolve_provider_profile,
+)
 from nullone_story_pipeline import HaikuStoryWriter
 
 STORY_PROVIDER_ENV_VAR = "NULLONE_STORY_PROVIDER"
@@ -70,15 +76,38 @@ def resolve_story_provider_name(raw: str | None = None) -> str:
     )
 
 
+def _resolve_profile(name: str | None) -> ProviderProfile:
+    overlay = dict(os.environ)
+    if name is not None:
+        overlay[f"{ROLE_ENV_PREFIX}{ROLE_STORY_WRITER.upper()}_TRANSPORT"] = (
+            resolve_story_provider_name(name)
+        )
+    return resolve_provider_profile(ROLE_STORY_WRITER, env=overlay)
+
+
 def get_story_writer(
     name: str | None = None,
 ) -> tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]:
-    """Return `(provider_name, writer)` for the selected transport."""
+    """Return `(transport_name, writer)` for the Story writer role.
 
-    resolved = resolve_story_provider_name(name)
-    if resolved == PROVIDER_OPENCODE:
-        return resolved, OpenCodeStoryWriter()
-    return resolved, HaikuStoryWriter()
+    Issue #111: the role router is the sole authority. The OpenCode
+    writer receives the profile's model; the Claude fallback writer
+    is unchanged. Unknown transports fail closed via the router; no
+    silent fallback ever occurs.
+    """
+
+    profile = _resolve_profile(name)
+    if profile.transport == PROVIDER_OPENCODE:
+        return profile.transport, OpenCodeStoryWriter(
+            model=profile.model, timeout=profile.timeout_seconds
+        )
+    return profile.transport, HaikuStoryWriter()
+
+
+def get_story_profile(name: str | None = None) -> ProviderProfile:
+    """Return the resolved ProviderProfile (observability helper)."""
+
+    return _resolve_profile(name)
 
 
 def self_test() -> int:
