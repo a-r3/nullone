@@ -116,8 +116,10 @@ TRANSPORT_LOCAL_MODELS = (CLAUDE_DEFAULT_MODEL, HAIKU_DEFAULT_MODEL)
 
 # Model identifiers are `provider/model` endpoints (non-secret).
 # The shape check rejects blanks and vendor-less values without
-# executing anything.
-MODEL_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*/[A-Za-z0-9_./\-]+$")
+# executing anything. A single provider-defined `:suffix` (e.g.
+# OpenRouter `:free` variants) is accepted after the model path;
+# the provider segment itself never contains `:`.
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*/[A-Za-z0-9_./\-]+(?::[A-Za-z0-9_\-]+)?$")
 
 # Least-privilege capability labels per role. Frozen: routing a new
 # model never adds shell/Git/Zernio/Telegram/publish/approval/secret

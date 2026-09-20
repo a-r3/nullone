@@ -54,6 +54,7 @@ import nullone_claude_editorial_provider as claude_adapter  # noqa: E402
 import nullone_editorial_provider_factory as factory  # noqa: E402
 import nullone_opencode_editorial_provider as opencode_adapter  # noqa: E402
 from nullone_provider_router import ProviderRoutingError  # noqa: E402
+import nullone_provider_router as router
 from support.morning_artifacts import (  # noqa: E402
     write_board_only,
     write_morning_artifacts,
@@ -80,7 +81,7 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(name, "opencode")
         self.assertEqual(profile.transport, "opencode")
         self.assertEqual(
-            profile.model, "opencode/muse-spark-1.3-contributor-free"
+            profile.model, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
         )
         # The bound invoker drives the OpenCode adapter with the
         # profile model (no real subprocess; binary resolution
@@ -100,7 +101,7 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertIn("--model", argv)
         self.assertEqual(
             argv[argv.index("--model") + 1],
-            "opencode/muse-spark-1.3-contributor-free",
+            "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         )
 
     def test_selects_claude_when_configured(self):
@@ -140,8 +141,21 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(name, "opencode")
         self.assertEqual(profile.transport, "opencode")
         self.assertEqual(
-            profile.model, "opencode/muse-spark-1.3-contributor-free"
+            profile.model, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
         )
+        # Check other roles unchanged via router
+        for role, expected_model in [
+            (router.ROLE_DRAFT_FACTORY, "opencode/muse-spark-1.3-contributor-free"),
+            (router.ROLE_STORY_WRITER, "opencode/muse-spark-1.3-contributor-free"),
+            (router.ROLE_BREAKING_RADAR, "opencode/muse-spark-1.3-contributor-free"),
+            (router.ROLE_WEEKLY_STRATEGY, "opencode/muse-spark-1.3-contributor-free"),
+        ]:
+            p = router.resolve_provider_profile(role)
+            self.assertEqual(p.transport, "opencode")
+            self.assertEqual(p.model, expected_model)
+            self.assertEqual(p.fallback_policy, router.FALLBACK_NONE)
+            self.assertEqual(p.timeout_seconds, router.ROLE_TIMEOUTS[role])
+            self.assertEqual(p.capabilities, router.ROLE_CAPABILITIES[role])
 
     def test_selection_is_case_and_whitespace_insensitive(self):
         self.assertEqual(_resolve_with_env("OpEnCoDe"), "opencode")
