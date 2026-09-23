@@ -663,11 +663,12 @@ class AgentWriteScopeTests(unittest.TestCase):
     # Absolute tool-call paths, as the model layer passes them.
     WS = "/home/oem/.openclaw/workspace"
 
+    # Issue #153: queue/ledger state is runtime-owned (deterministic
+    # persistence from the validated handoff) -- the model writes board +
+    # handoff only, then STOPS.
     REQUIRED_WRITE_PATHS = (
         f"{WS}/social/research/daily/2026-09-13-editorial-board.md",
         f"{WS}/social/research/daily/2026-09-13-editorial-candidates.json",
-        f"{WS}/social/state/candidate-queue.md",
-        f"{WS}/social/state/topic-ledger.jsonl",
     )
 
     # Worktree-relative forms, as the live engine matches them inside a
@@ -675,11 +676,11 @@ class AgentWriteScopeTests(unittest.TestCase):
     REQUIRED_RELATIVE_PATHS = (
         "social/research/daily/2026-09-13-editorial-board.md",
         "social/research/daily/2026-09-13-editorial-candidates.json",
-        "social/state/candidate-queue.md",
-        "social/state/topic-ledger.jsonl",
     )
 
     DENIED_WRITE_PATHS = (
+        f"{WS}/social/state/candidate-queue.md",
+        f"{WS}/social/state/topic-ledger.jsonl",
         f"{WS}/social/ops/scripts/nullone_bridge_common.py",
         f"{WS}/social/ops/prompts/morning-editorial.md",
         f"{WS}/AGENTS.md",
@@ -695,12 +696,8 @@ class AgentWriteScopeTests(unittest.TestCase):
     EXPECTED_DUAL_FORM_ALLOWS = {
         "**/social/research/daily/*-editorial-board.md",
         "**/social/research/daily/*-editorial-candidates.json",
-        "**/social/state/candidate-queue.md",
-        "**/social/state/topic-ledger.jsonl",
         "social/research/daily/*-editorial-board.md",
         "social/research/daily/*-editorial-candidates.json",
-        "social/state/candidate-queue.md",
-        "social/state/topic-ledger.jsonl",
     }
 
     def test_muse_spark_is_the_current_default_model(self):
@@ -743,8 +740,6 @@ class AgentWriteScopeTests(unittest.TestCase):
             for relative in (
                 "social/research/daily/*-editorial-board.md",
                 "social/research/daily/*-editorial-candidates.json",
-                "social/state/candidate-queue.md",
-                "social/state/topic-ledger.jsonl",
             ):
                 self.assertIn(
                     relative,

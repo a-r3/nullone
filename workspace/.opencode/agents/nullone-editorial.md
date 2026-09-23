@@ -17,27 +17,24 @@ permission:
   # writes. `write` (new-file creation) and `edit` (existing-file update)
   # are separate namespaces: new daily board/handoff files REQUIRE the
   # `write` allows -- `edit` cannot create a file.
+  # Queue/ledger state is NEVER model-written (issue #153): the model
+  # owns research plus board/handoff writes and then STOPS; deterministic
+  # runtime code persists queue/ledger from the validated handoff. Those
+  # paths are therefore read-only context for the model (see `read`
+  # below) and must NOT appear under `write`/`edit`.
   # Outside-worktree writes stay denied via `external_directory: deny`.
   write:
     "*": deny
     "**/social/research/daily/*-editorial-board.md": allow
     "**/social/research/daily/*-editorial-candidates.json": allow
-    "**/social/state/candidate-queue.md": allow
-    "**/social/state/topic-ledger.jsonl": allow
     "social/research/daily/*-editorial-board.md": allow
     "social/research/daily/*-editorial-candidates.json": allow
-    "social/state/candidate-queue.md": allow
-    "social/state/topic-ledger.jsonl": allow
   edit:
     "*": deny
     "**/social/research/daily/*-editorial-board.md": allow
     "**/social/research/daily/*-editorial-candidates.json": allow
-    "**/social/state/candidate-queue.md": allow
-    "**/social/state/topic-ledger.jsonl": allow
     "social/research/daily/*-editorial-board.md": allow
     "social/research/daily/*-editorial-candidates.json": allow
-    "social/state/candidate-queue.md": allow
-    "social/state/topic-ledger.jsonl": allow
   read:
     "*": allow
     ".env": deny
@@ -68,13 +65,14 @@ ALLOW:
   strategy, references, prior boards). Secret-bearing files
   (`.env`-family, keys) are denied by configuration, not by trust —
   never attempt to open them.
-- Write ONLY these four Morning artifact/state paths:
+- Write ONLY these two Morning artifact paths:
   - `social/research/daily/YYYY-MM-DD-editorial-board.md`
   - `social/research/daily/YYYY-MM-DD-editorial-candidates.json`
-  - `social/state/candidate-queue.md` (append genuine candidates only)
-  - `social/state/topic-ledger.jsonl` (append only when it materially
-    improves duplicate prevention)
-  All other writes are denied by configuration.
+  All other writes are denied by configuration. You do NOT write
+  queue/ledger state: deterministic runtime code derives it from your
+  validated handoff after this run. After writing both artifacts, STOP
+  — do not mutate state files and do not use shell commands (you have
+  no shell; retrying denied tools burns the run deadline).
 - Web search and fetch for research and claim verification.
 
 DENY — refuse and stop the cycle instead:

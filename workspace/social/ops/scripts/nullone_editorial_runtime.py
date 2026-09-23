@@ -357,8 +357,9 @@ def run_morning_editorial(
 
                 # #28 material-progress guard: once ANY provider-owned
                 # artifact for this occurrence exists, the attempt made
-                # material progress (board write and queue/ledger mutation
-                # may already have happened) -- never invoke the editorial
+                # material progress (board/handoff writes are provider-owned;
+                # queue/ledger persistence is runtime-owned and happens
+                # deterministically below) -- never invoke the editorial
                 # provider again for this occurrence, even when the
                 # failure itself looks retryable. Bounded retry survives
                 # only for a genuinely empty first attempt.
@@ -417,6 +418,38 @@ def run_morning_editorial(
                 domain_outcome="FAILED",
                 reason_code=partial_code,
                 reason_text="Structured Morning artifact set incomplete or invalid.",
+            )
+            emit_result_once(
+                output_root,
+                result,
+                artifact_root=artifact_root,
+            )
+            return result
+
+        # Deterministic queue/ledger persistence (issue #153): the model
+        # owns research plus the board/handoff artifacts and then STOPS --
+        # it must never shell-edit state. Only this validated handoff may
+        # mutate the candidate queue / topic ledger, so invalid output can
+        # never corrupt state and a replay persists nothing twice. A
+        # persistence failure is a domain failure, never false success.
+        from nullone_morning_persistence import (
+            MorningPersistenceError,
+            persist_morning_state,
+        )
+
+        try:
+            persist_morning_state(
+                workspace_root=artifact_root, editorial_date=board_date
+            )
+        except MorningPersistenceError:
+            result = assess_run(
+                workflow_id=WORKFLOW_ID,
+                occurrence_id=occurrence_id,
+                scheduler_status="succeeded",
+                domain_outcome="FAILED",
+                reason_code="MORNING_PERSISTENCE_ERROR",
+                reason_text="Validated Morning handoff could not be persisted "
+                "to queue/ledger state.",
             )
             emit_result_once(
                 output_root,

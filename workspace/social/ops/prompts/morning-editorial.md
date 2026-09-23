@@ -201,11 +201,16 @@ COMPARISON
 AZ_CONTEXT
 EVERGREEN
 
-7. Add only genuinely useful candidates to:
+7. Do NOT edit social/state/candidate-queue.md yourself.
 
-social/state/candidate-queue.md
+Deterministic code appends the queued candidates from your validated
+handoff after this run completes. You have no shell: never attempt
+Bash/sed/shell edits of queue or ledger state — those tools are denied
+and retrying them will burn the run deadline instead of completing it.
 
-New queue entries must include the Content Strategy V1 metadata fields.
+New queue entries are derived from your handoff candidates, so keep
+topic, topic_cluster, angle, verification, evidence_refs, and
+source_attribution/source_urls precise and complete.
 
 8. Candidates may become READY only when:
 - their score passes the relevant threshold
@@ -238,10 +243,21 @@ Default:
 maximum 2 main pieces from one topic cluster in 7 days unless a material
 new development exists.
 
-11. Append considered/rejected material to topic-ledger.jsonl only when it
-will materially improve duplicate prevention.
+11. Do NOT edit social/state/topic-ledger.jsonl yourself.
+
+Deterministic code records one ledger row per handoff candidate (queued
+or not) from your validated handoff after this run completes. Considered
+or rejected material is preserved through your handoff candidates and
+board — never through manual ledger shell edits.
 
 No publication or Zernio creation.
+
+## Terminal contract
+
+After writing today's board and handoff files, STOP and return success.
+Do not mutate queue/ledger state files. Do not use shell commands.
+The run is complete when both artifacts exist and validate — further
+tool calls after that point only risk the deadline.
 
 Quality overrides quota.
 
