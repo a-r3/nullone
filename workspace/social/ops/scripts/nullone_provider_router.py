@@ -376,16 +376,30 @@ def describe_profile(profile: ProviderProfile) -> str:
 
 def self_test() -> int:
     mapping = load_routing_config()
+    # Reviewed per-role transports (issue #155): Morning runs the
+    # validated Claude/Sonnet route; every other role stays on OpenCode.
+    expected_transports = {
+        ROLE_MORNING_EDITORIAL: TRANSPORT_CLAUDE,
+        ROLE_DRAFT_FACTORY: TRANSPORT_OPENCODE,
+        ROLE_STORY_WRITER: TRANSPORT_OPENCODE,
+        ROLE_BREAKING_RADAR: TRANSPORT_OPENCODE,
+        ROLE_WEEKLY_STRATEGY: TRANSPORT_OPENCODE,
+    }
     for role in LOGICAL_ROLES:
         profile = resolve_provider_profile(role, config=mapping, env={})
-        assert profile.transport == TRANSPORT_OPENCODE, profile
+        assert profile.transport == expected_transports[role], profile
         assert profile.model, profile
         assert profile.fallback_policy == FALLBACK_NONE, profile
         assert profile.timeout_seconds == ROLE_TIMEOUTS[role], profile
         assert profile.capabilities == ROLE_CAPABILITIES[role], profile
         line = format_routing_metadata(profile, "SELFTEST")
-        assert f"ROLE={role}" in line and "TRANSPORT=opencode" in line
+        assert f"ROLE={role}" in line
+        assert f"TRANSPORT={expected_transports[role]}" in line
         assert "OUTCOME=SELFTEST" in line
+    morning = resolve_provider_profile(
+        ROLE_MORNING_EDITORIAL, config=mapping, env={}
+    )
+    assert morning.model == CLAUDE_DEFAULT_MODEL, morning
 
     for bad_role in ("morning", "analytics", "", "MORNING_EDITORIAL"):
         try:
