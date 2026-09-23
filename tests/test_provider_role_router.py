@@ -46,10 +46,11 @@ import nullone_provider_router as router  # noqa: E402
 
 MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
 
-# Role-only free-model route for Morning (morning entitlement fix):
-# ONLY morning_editorial resolves here; every other role stays on
-# the reviewed default.
-MORNING_FREE_MODEL = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+# Reviewed Morning route (issue #155, benchmark-validated): Claude
+# transport with the transport-local `sonnet` selector (resolves to
+# claude-sonnet-5 at the CLI). ONLY morning_editorial resolves here;
+# every other role stays on the reviewed OpenCode default.
+MORNING_CLAUDE_MODEL = "sonnet"
 
 # Covered execution layers: these files must execute through the
 # adapter registry and import NO vendor transport module.
@@ -135,9 +136,11 @@ class RouterFailClosedTests(unittest.TestCase):
 
     def test_provider_defined_model_suffix_matrix(self):
         # Compatibility: provider-defined `:suffix` IDs (OpenRouter
-        # `:free` variants) are routable; blanks, vendor-less,
-        # malformed, and whitespace/control variants still fail
-        # closed. No model call, no network.
+        # `:free` variants) are routable on the OpenCode transport;
+        # blanks, vendor-less, malformed, and whitespace/control
+        # variants still fail closed. Uses draft_factory (still
+        # OpenCode after the Morning Claude route change, issue #155).
+        # No model call, no network.
         mapping = checked_in_mapping()
         for good in (
             "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -146,9 +149,9 @@ class RouterFailClosedTests(unittest.TestCase):
             "openrouter/nvidia/nemotron-3-ultra-550b-a55b",
         ):
             profile = router.resolve_provider_profile(
-                router.ROLE_MORNING_EDITORIAL,
+                router.ROLE_DRAFT_FACTORY,
                 config=mapping,
-                env={"NULLONE_ROLE_MORNING_EDITORIAL_MODEL": good},
+                env={"NULLONE_ROLE_DRAFT_FACTORY_MODEL": good},
             )
             self.assertEqual(profile.transport, "opencode")
             self.assertEqual(profile.model, good)
@@ -169,9 +172,9 @@ class RouterFailClosedTests(unittest.TestCase):
         ):
             with self.assertRaises(router.ProviderRoutingError):
                 router.resolve_provider_profile(
-                    router.ROLE_MORNING_EDITORIAL,
+                    router.ROLE_DRAFT_FACTORY,
                     config=mapping,
-                    env={"NULLONE_ROLE_MORNING_EDITORIAL_MODEL": bad},
+                    env={"NULLONE_ROLE_DRAFT_FACTORY_MODEL": bad},
                 )
         print("ROUTER_MODEL_SUFFIX_MATRIX=PASS")
 
@@ -208,10 +211,11 @@ class PerRoleRoutingTests(unittest.TestCase):
         mapping = checked_in_mapping()
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
-            self.assertEqual(profile.transport, "opencode")
             if role == router.ROLE_MORNING_EDITORIAL:
-                self.assertEqual(profile.model, MORNING_FREE_MODEL)
+                self.assertEqual(profile.transport, "claude")
+                self.assertEqual(profile.model, MORNING_CLAUDE_MODEL)
             else:
+                self.assertEqual(profile.transport, "opencode")
                 self.assertEqual(profile.model, MUSE_SPARK)
             self.assertEqual(profile.fallback_policy, "none")
             self.assertEqual(profile.timeout_seconds, router.ROLE_TIMEOUTS[role])
@@ -222,12 +226,12 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("RADAR_PROFILE_ROUTING=PASS")
         print("WEEKLY_PROFILE_ROUTING=PASS")
 
-    def test_checked_in_morning_free_model_route_is_role_only(self):
+    def test_checked_in_morning_claude_route_is_role_only(self):
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         roles = raw["roles"]
         self.assertEqual(
             roles["morning_editorial"],
-            {"transport": "opencode", "model": MORNING_FREE_MODEL},
+            {"transport": "claude", "model": MORNING_CLAUDE_MODEL},
         )
         for role in (
             "draft_factory",
@@ -239,7 +243,7 @@ class PerRoleRoutingTests(unittest.TestCase):
                 roles[role], {"transport": "opencode", "model": MUSE_SPARK}
             )
         print("MORNING_MODEL_RESOLVES_TO_TARGET=PASS")
-        print("MORNING_TRANSPORT_REMAINS_OPENCODE=PASS")
+        print("MORNING_TRANSPORT_IS_CLAUDE=PASS")
         print("DRAFT_FACTORY_ROUTE_UNCHANGED=PASS")
         print("STORY_WRITER_ROUTE_UNCHANGED=PASS")
         print("BREAKING_RADAR_ROUTE_UNCHANGED=PASS")

@@ -73,8 +73,18 @@ def _resolve_with_env(value: str | None) -> str:
 
 class FactorySelectionTests(unittest.TestCase):
     def test_selects_opencode_when_configured(self):
+        # Issue #155: the checked-in Morning route is Claude, so an
+        # explicit opencode transport override must also pin a model
+        # (legacy NULLONE_OPENCODE_MODEL) -- an unpinned cross-transport
+        # override fails closed instead of guessing a model.
         with mock.patch.dict(
-            os.environ, {factory.EDITORIAL_PROVIDER_ENV_VAR: "opencode"}
+            os.environ,
+            {
+                factory.EDITORIAL_PROVIDER_ENV_VAR: "opencode",
+                "NULLONE_OPENCODE_MODEL": (
+                    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
+                ),
+            },
         ):
             name, invoke = factory.get_editorial_provider()
             profile = factory.get_editorial_profile()
@@ -125,11 +135,9 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
 
     def test_repo_default_is_router_checked_in_mapping(self):
-        # Issue #111 migration M1: the no-env default moved from the
-        # legacy factory shim (claude) to the checked-in role-router
-        # mapping (opencode + Muse Spark), matching live production.
-        # The legacy validator below keeps its claude default as a
-        # deprecated compatibility shim.
+        # Issue #155: the no-env default follows the checked-in
+        # role-router mapping, now the validated Claude/Sonnet Morning
+        # route (transport claude, model sonnet, no fallback).
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(factory.EDITORIAL_PROVIDER_ENV_VAR, None)
             os.environ.pop("NULLONE_OPENCODE_MODEL", None)
@@ -138,11 +146,11 @@ class FactorySelectionTests(unittest.TestCase):
                     del os.environ[key]
             name, _ = factory.get_editorial_provider()
             profile = factory.get_editorial_profile()
-        self.assertEqual(name, "opencode")
-        self.assertEqual(profile.transport, "opencode")
-        self.assertEqual(
-            profile.model, "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
-        )
+        self.assertEqual(name, "claude")
+        self.assertEqual(profile.transport, "claude")
+        self.assertEqual(profile.model, "sonnet")
+        self.assertEqual(profile.fallback_policy, router.FALLBACK_NONE)
+        self.assertEqual(profile.timeout_seconds, 600)
         # Check other roles unchanged via router
         for role, expected_model in [
             (router.ROLE_DRAFT_FACTORY, "opencode/muse-spark-1.3-contributor-free"),
