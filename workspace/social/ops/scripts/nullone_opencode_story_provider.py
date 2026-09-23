@@ -26,7 +26,9 @@ Domain parity with the Claude writer is exact:
 - same failure taxonomy: transport timeout/startup/exit failures
   raise `BridgeError` subclasses (the pipeline maps any writer
   exception to `WRITER_FAILED`, identical to the Claude writer's
-  `BridgeError` path); unparseable stdout raises `BridgeError`
+  `BridgeError` path); auth/rate-limit/policy output signatures raise
+  their own subclasses (same mapping, precise diagnostics);
+  unparseable stdout raises `BridgeError`
   (identical to the Claude "non-JSON output" path); a parsed dict
   with the wrong shape is RETURNED so the pipeline's own validation
   still reports `WRITER_OUTPUT_INVALID` (identical to the Claude
@@ -69,6 +71,25 @@ from typing import Any, Sequence
 
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_editorial_runtime import REACHABILITY_PATTERN
+import re as _re
+
+# Conservative provider-signal patterns over captured CLI output.
+# Same contract as REACHABILITY_PATTERN: fixed raise strings only, raw
+# output never persisted. Order matters: reachability is checked first
+# (preserving existing classification), then auth/rate-limit/policy.
+_AUTH_PATTERN = _re.compile(
+    r"\b401\b|unauthorized|invalid[-_ ]?api[-_ ]?key|"
+    r"authentication (failed|error|required)",
+    _re.IGNORECASE,
+)
+_RATE_LIMIT_PATTERN = _re.compile(
+    r"\b429\b|rate[-_ ]?limit|too many requests|quota exceeded",
+    _re.IGNORECASE,
+)
+_POLICY_PATTERN = _re.compile(
+    r"\b403\b|policy violation|content policy|blocked by.+policy|moderation blocked",
+    _re.IGNORECASE,
+)
 from nullone_opencode_binary import (
     OpenCodeBinaryResolutionError,
     resolve_opencode_binary,
@@ -98,6 +119,18 @@ class StoryWriterTimeoutError(BridgeError):
 
 class StoryWriterUnreachableError(BridgeError):
     """The OpenCode Story writer run failed with a reachability signature."""
+
+
+class StoryWriterAuthError(BridgeError):
+    """The OpenCode Story writer run failed with an auth signature (401 etc.)."""
+
+
+class StoryWriterRateLimitedError(BridgeError):
+    """The OpenCode Story writer run failed with a rate-limit signature (429 etc.)."""
+
+
+class StoryWriterPolicyBlockedError(BridgeError):
+    """The OpenCode Story writer run failed with a policy-block signature."""
 
 
 def resolve_story_model(raw: str | None = None) -> str:
@@ -232,6 +265,7 @@ class OpenCodeStoryWriter:
         cmd: Sequence[str] = build_opencode_command(
             prompt=prompt,
             workspace=self._workspace,
+            model=self.model,
             binary=resolve_opencode_binary(),
         )
 
@@ -258,6 +292,18 @@ class OpenCodeStoryWriter:
             if REACHABILITY_PATTERN.search(combined):
                 raise StoryWriterUnreachableError(
                     "OpenCode Story writer failed: provider unreachable"
+                )
+            if _AUTH_PATTERN.search(combined):
+                raise StoryWriterAuthError(
+                    "OpenCode Story writer failed: provider auth error"
+                )
+            if _RATE_LIMIT_PATTERN.search(combined):
+                raise StoryWriterRateLimitedError(
+                    "OpenCode Story writer failed: provider rate limited"
+                )
+            if _POLICY_PATTERN.search(combined):
+                raise StoryWriterPolicyBlockedError(
+                    "OpenCode Story writer failed: provider policy block"
                 )
             raise BridgeError(
                 f"OpenCode Story writer failed (exit={cp.returncode})"
