@@ -12,6 +12,8 @@
 const assert = require("node:assert/strict");
 const { test, before } = require("node:test");
 const Module = require("node:module");
+const { EventEmitter } = require("node:events");
+const { createApprovalStore } = require("../../plugins/nullone-final-publish/approval-route");
 
 const POST = "0123456789abcdef01234567";
 
@@ -134,14 +136,116 @@ before(() => {
   plugin = require("../../plugins/nullone-final-publish/index.js");
 });
 
-function registeredHandler(link) {
+function registeredHandler(link, approvalRunner) {
   const api = makeApi();
   plugin.register(api);
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
-  // Swap the real link for the fake by rebuilding through buildHandler.
-  return plugin.buildHandler(link);
+  // Swap the real link/runner for fakes by rebuilding through buildHandler.
+  return plugin.buildHandler(link, approvalRunner);
+}
+
+/**
+ * Fake child process for the durable first-stage subprocess
+ * (nullone-approval-callback-run.py). Mirrors FakeChild's shape below
+ * (stdin/stdout/stderr, 'error'/'close' events) for the same reason: the
+ * real Node.ChildProcess contract, not a mock library.
+ */
+class FakeApprovalChild extends EventEmitter {
+  constructor(handleRequest) {
+    super();
+    this._chunks = [];
+    this.stdin = {
+      write: (chunk) => {
+        this._chunks.push(Buffer.from(chunk));
+        return true;
+      },
+      end: () => {
+        setImmediate(() => {
+          let request;
+          try {
+            request = JSON.parse(Buffer.concat(this._chunks).toString("utf8"));
+          } catch {
+            this.stderr.emit("data", "bad request");
+            this.emit("close", 2);
+            return;
+          }
+          let outcome;
+          try {
+            outcome = handleRequest(request);
+          } catch (error) {
+            this.stderr.emit("data", String(error));
+            this.emit("close", 2);
+            return;
+          }
+          if (outcome && outcome.__spawnError) {
+            this.emit("error", outcome.__spawnError);
+            return;
+          }
+          if (outcome && outcome.__hang) {
+            return;
+          }
+          this.stdout.emit("data", JSON.stringify(outcome));
+          this.emit("close", 0);
+        });
+      },
+    };
+    this.stdout = new EventEmitter();
+    this.stderr = new EventEmitter();
+  }
+  kill() {
+    this.killed = true;
+  }
+}
+
+/**
+ * A working fake durable-approval subprocess backed by the SAME pure
+ * transition table as the real Python controller (approval-route.js is
+ * kept byte-identical to nullone_approval_controller.py -- see
+ * test_deterministic_approval.py's parity test), so these offline tests
+ * exercise real stage-machine behavior without spawning Python.
+ */
+function makeApprovalRunner(handleRequestOverride) {
+  const store = createApprovalStore();
+  const calls = [];
+  const handleRequest =
+    handleRequestOverride ||
+    ((request) => {
+      const result = store.handle({
+        action: request.action,
+        postId: request.review_post_id,
+        authorized: request.authorized,
+        messageId: request.message_id,
+        chatId: request.chat_id,
+        accountId: request.account_id,
+        senderId: request.sender_id,
+      });
+      return {
+        outcome: result.outcome,
+        from_stage: result.fromStage,
+        to_stage: result.toStage,
+        reply: result.reply,
+        publish_authorized: result.publishAuthorized,
+        zernio_calls: result.zernioCalls,
+      };
+    });
+  const spawnFn = () =>
+    new FakeApprovalChild((request) => {
+      calls.push(request);
+      return handleRequest(request);
+    });
+  return {
+    runner: {
+      pythonBin: "python3",
+      runnerPath: "/tmp/nullone-test-workspace/social/ops/scripts/nullone-approval-callback-run.py",
+      workspace: "/tmp/nullone-test-workspace",
+      spawnFn,
+      timeoutMs: 500,
+    },
+    calls,
+    store,
+  };
 }
 
 test("OpenClaw loader sees top-level plugin entry (regression)", () => {
@@ -239,7 +343,8 @@ test("unauthorized sender fails closed with zero daemon request", async () => {
 
 test("approve/reject/revise/back are consumed deterministically (no agent flow)", async () => {
   const link = makeLink();
-  const handler = registeredHandler(link);
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
   const expectations = {
     approve: /son təsdiqdən sonra/,
     reject: /İmtina edildi/,
@@ -273,7 +378,8 @@ test("approve/reject/revise/back are consumed deterministically (no agent flow)"
 
 test("approve reply carries the second-confirmation button values", async () => {
   const link = makeLink();
-  const handler = registeredHandler(link);
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
   const sent = [];
   const ctx = makeHandlerCtx({ callback: {
     data: `texbrif:approve:${POST}`,
@@ -298,7 +404,8 @@ test("approve reply carries the second-confirmation button values", async () => 
 
 test("duplicate approve is idempotent with zero daemon contact", async () => {
   const link = makeLink();
-  const handler = registeredHandler(link);
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
   const base = { callback: {
     data: `texbrif:approve:${POST}`,
     namespace: "texbrif",
@@ -333,6 +440,84 @@ test("unauthorized first-stage callback is consumed silently", async () => {
   assert.deepEqual(result, { handled: true });
   assert.equal(ctx._replies.length, 0);
   assert.equal(link.calls.length, 0);
+});
+
+test("missing/unavailable approval runner fails closed with safe text, no throw", async () => {
+  const link = makeLink();
+  // approvalRunner intentionally omitted: mirrors a failed registration
+  // (workspace/runner path unavailable) -- must never fall back to an
+  // in-memory decision.
+  const handler = registeredHandler(link);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:reject:${POST}`,
+      namespace: "texbrif",
+      payload: `reject:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+  });
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /Təsdiq xidməti hazır deyil/);
+});
+
+test("subprocess failure (non-zero exit) fails closed, never claims a transition", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner((_request) => {
+    throw new Error("simulated internal failure");
+  });
+  const handler = registeredHandler(link, runner);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:reject:${POST}`,
+      namespace: "texbrif",
+      payload: `reject:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+  });
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /nəticəsi qeyri-müəyyəndir|hazır deyil/);
+});
+
+test("reply-send failure is observable (logged) and never throws", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:reject:${POST}`,
+      namespace: "texbrif",
+      payload: `reject:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+  });
+  ctx.respond.reply = async () => {
+    throw new Error("Telegram API unreachable");
+  };
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  let result;
+  try {
+    result = await handler(ctx);
+  } finally {
+    console.log = originalLog;
+  }
+  // Previously silently swallowed (bare catch {}): now must leave a trace,
+  // and must never throw out of the interactive handler either way.
+  assert.deepEqual(result, { handled: true });
+  const parsed = logs.map((line) => JSON.parse(line));
+  const replyFailure = parsed.find(
+    (entry) => entry.event === "reply_send_result" && entry.ok === false
+  );
+  assert.ok(replyFailure, "expected an observable reply_send_result failure log");
+  assert.match(replyFailure.error, /Telegram API unreachable/);
 });
 
 test("malformed approval-shaped callbacks are consumed safely", async () => {

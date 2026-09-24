@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import nullone_bridge_common as _bridge_common
 from nullone_bridge_common import (
     WORKSPACE,
     atomic_write_json,
@@ -205,6 +206,47 @@ def record_publication_event(
         TOPIC_LEDGER,
         topic_record,
         ("status", "live_zernio_post_id"),
+    )
+
+
+def record_approval_decision(
+    manifest: dict[str, Any],
+    result: dict[str, Any],
+) -> bool:
+    """Idempotently append one first-stage approval-decision ledger row.
+
+    Called only for a real ``TRANSITIONED`` outcome (never for a
+    converged/duplicate/rejected one), so the natural uniqueness key
+    (review post + resulting stage) already prevents a second row for a
+    replayed callback -- terminal stages only ever converge afterwards,
+    they never transition twice.
+    """
+
+    review = manifest.get("review") or {}
+
+    record = {
+        "timestamp": now_iso(),
+        "event": "APPROVAL_DECISION",
+        "manifest_id": manifest.get("manifest_id"),
+        "candidate_id": manifest.get("candidate_id"),
+        "topic": manifest.get("topic"),
+        "topic_cluster": manifest.get("topic_cluster"),
+        "review_post_id": review.get("zernio_draft_id"),
+        "action": result.get("receipt", {}).get("action"),
+        "from_stage": result.get("from_stage"),
+        "to_stage": result.get("to_stage"),
+        "outcome": result.get("outcome"),
+    }
+
+    # Resolved dynamically (not the module-level TOPIC_LEDGER constant) so
+    # tests that isolate nullone_bridge_common.WORKSPACE after import time
+    # (the existing IsolatedWorkspace pattern) affect this write too.
+    ledger_path = _bridge_common.WORKSPACE / "social/state/topic-ledger.jsonl"
+
+    return append_jsonl_once(
+        ledger_path,
+        record,
+        ("event", "review_post_id", "to_stage"),
     )
 
 

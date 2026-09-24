@@ -67,6 +67,10 @@ const {
   approvalReply,
   createApprovalStore,
 } = require("./approval-route");
+const {
+  resolveApprovalRunnerPath,
+  runApprovalCallback,
+} = require("./approval-durable");
 
 const FRAME_MAGIC = Buffer.from("NP1", "utf8");
 const FRAME_VERSION = 1;
@@ -152,6 +156,40 @@ const SAFE_TEXT = {
   dispatchUnknown:
     "❓ Nəşr sorğusunun nəticəsi qeyri-müəyyəndir. Avtomatik təkrar cəhd edilməyəcək.",
 };
+
+// First-stage (approve/reject/revise/back) safe fallback text, distinct
+// from SAFE_TEXT above: this path never touches publication/Zernio, so its
+// wording must never borrow "Nəşr" (publication) framing.
+const FIRST_STAGE_SAFE_TEXT = {
+  unavailable: "⛔ Təsdiq xidməti hazır deyil. Heç nə dəyişmədi.",
+  // Dispatch boundary: the request may have reached the durable subprocess
+  // (and even completed a manifest write) before failure; never claim
+  // "nothing changed" here.
+  dispatchUnknown:
+    "❓ Sorğunun nəticəsi qeyri-müəyyəndir. Bir daha basma, admin yoxlayacaq.",
+};
+
+/**
+ * Structured, redacted first-stage callback observability (issue: durable
+ * approval state, observability requirement). Never includes tokens,
+ * messageId/chatId/senderId, or any other raw Telegram identity -- only
+ * business-outcome fields (action, stage, outcome), which is what a P0
+ * incident trace actually needs and what the 2026-09-24 investigation
+ * found was completely absent from the live path.
+ */
+function logApprovalEvent(fields) {
+  try {
+    console.log(
+      JSON.stringify({
+        subsystem: "approval/callback",
+        ts: new Date().toISOString(),
+        ...fields,
+      })
+    );
+  } catch {
+    // Logging must never break the callback path.
+  }
+}
 
 // Authoritative publication states the daemon may report (closed enum).
 // Anything else (missing, malformed, unknown) maps to unknown — never to
@@ -636,8 +674,10 @@ function outcomeText(reply) {
  *
  * @returns {{handled: boolean}} always handled:true except fallthrough.
  */
-async function handleApprovalFirstStage(handlerCtx, callback, data, store) {
+async function handleApprovalFirstStage(handlerCtx, callback, data, approvalRunner) {
+  logApprovalEvent({ event: "callback_received" });
   const approval = routeApprovalCallback(data);
+  logApprovalEvent({ event: "callback_parsed", decision: approval.decision });
   if (approval.decision === "fallthrough") {
     return { handled: false };
   }
@@ -646,6 +686,7 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, store) {
   }
   const authed =
     handlerCtx && handlerCtx.auth && handlerCtx.auth.isAuthorizedSender === true;
+  logApprovalEvent({ event: "auth_result", authorized: authed === true });
   if (!authed) {
     return { handled: true };
   }
@@ -661,28 +702,74 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, store) {
   ) {
     return { handled: true };
   }
-  const result = store.handle({
-    action: approval.decision,
-    postId: approval.postId,
-    authorized: true,
-    messageId,
-    chatId,
-    accountId,
-    senderId,
-  });
-  if (result.outcome === "REJECTED_UNAUTHORIZED") {
+
+  async function sendReply(text, buttons) {
+    try {
+      if (Array.isArray(buttons) && buttons.length > 0) {
+        await handlerCtx.respond.reply({ text, buttons });
+      } else {
+        await handlerCtx.respond.reply({ text });
+      }
+      logApprovalEvent({ event: "callback_ack_result", ok: true });
+      logApprovalEvent({ event: "reply_send_result", ok: true });
+    } catch (error) {
+      // Observable now (previously silently swallowed): a failed send must
+      // leave a trace, even though it stays best-effort/non-throwing --
+      // whatever the durable subprocess already did or didn't do stands
+      // either way, and this function must never throw out of a Telegram
+      // interactive handler.
+      logApprovalEvent({
+        event: "reply_send_result",
+        ok: false,
+        error: error && error.message,
+      });
+    }
+  }
+
+  if (!approvalRunner) {
+    logApprovalEvent({ event: "persistence_result", result: "runner_unavailable" });
+    await sendReply(FIRST_STAGE_SAFE_TEXT.unavailable);
     return { handled: true };
   }
-  const reply = result.reply || approvalReply(approval.decision, approval.postId);
+
+  let result;
   try {
-    if (reply && Array.isArray(reply.buttons) && reply.buttons.length > 0) {
-      await handlerCtx.respond.reply({ text: reply.text, buttons: reply.buttons });
-    } else {
-      await handlerCtx.respond.reply({ text: reply.text });
-    }
-  } catch {
-    // Respond path is best-effort; the control transition already stands.
+    result = await runApprovalCallback(approvalRunner, {
+      action: approval.decision,
+      review_post_id: approval.postId,
+      authorized: true,
+      message_id: messageId,
+      chat_id: String(chatId),
+      account_id: String(accountId),
+      sender_id: String(senderId),
+    });
+  } catch (error) {
+    const dispatched = error && error.dispatched === true;
+    logApprovalEvent({ event: "persistence_result", result: "error", dispatched });
+    // Dispatch boundary (mirrors the second-stage #89 rule): never claim
+    // "nothing changed" once the request may have reached the subprocess.
+    await sendReply(
+      dispatched
+        ? FIRST_STAGE_SAFE_TEXT.dispatchUnknown
+        : FIRST_STAGE_SAFE_TEXT.unavailable
+    );
+    return { handled: true };
   }
+
+  logApprovalEvent({
+    event: "persistence_result",
+    postId: approval.postId,
+    action: approval.decision,
+    outcome: result && result.outcome,
+    from_stage: result && result.from_stage,
+    to_stage: result && result.to_stage,
+  });
+
+  if (result && result.outcome === "REJECTED_UNAUTHORIZED") {
+    return { handled: true };
+  }
+  const reply = (result && result.reply) || approvalReply(approval.decision, approval.postId);
+  await sendReply(reply.text, reply.buttons);
   // No submitText: zero LLM involvement after the human click.
   return { handled: true };
 }
@@ -692,12 +779,14 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, store) {
  * constructs the real link; offline tests inject a fake). A null link
  * (failed registration) consumes every publish callback safely with zero
  * daemon contact and zero LLM fallback.
+ *
+ * `approvalRunner` (production: {pythonBin, runnerPath, workspace, spawnFn}
+ * bound to the resolved workspace; offline tests inject a fake spawnFn) is
+ * the durable first-stage authority. A null approvalRunner (failed
+ * registration) consumes every approve/reject/revise/back callback safely
+ * with a fail-closed reply -- never falls back to an in-memory decision.
  */
-function buildHandler(link) {
-  // Per-handler deterministic first-stage approval store (issue #132):
-  // stage per post + replay keys, process-local, bounded. Fresh handler
-  // instances (including every offline test) start from DRAFT_READY.
-  const approvalStore = createApprovalStore();
+function buildHandler(link, approvalRunner) {
   return async (handlerCtx) => {
     const callback =
       handlerCtx && typeof handlerCtx.callback === "object" && handlerCtx.callback !== null
@@ -709,7 +798,7 @@ function buildHandler(link) {
       // P0 deterministic first-stage: approve/reject/revise/back are
       // consumed here with zero LLM involvement. Unknown texbrif:*
       // subcommands still fall through to existing agent behavior.
-      return handleApprovalFirstStage(handlerCtx, callback, data, approvalStore);
+      return handleApprovalFirstStage(handlerCtx, callback, data, approvalRunner);
     }
     if (routed.decision === "consume") {
       // Malformed publish-shaped callback: swallow safely, zero side effects.
@@ -834,34 +923,69 @@ const entry = definePluginEntry({
     const hostConfig = api && api.config ? api.config : undefined;
     let link = null;
     let linkError = null;
+    let approvalRunner = null;
+    let approvalRunnerError = null;
+    let workspace = null;
     try {
       // Supported installed 2026.8.2 API for the served production
       // workspace: api.runtime.agent.resolveAgentWorkspaceDir(cfg, agentId).
       // Kept inside this same fail-closed boundary so an unavailable/invalid
       // runtime resolver still registers the interactive handler with
-      // link=null instead of throwing out of register() and crashing
-      // Gateway startup.
-      const workspace = api.runtime.agent.resolveAgentWorkspaceDir(
-        api.config,
-        "main"
-      );
-      const controllerPath = resolveControllerPath(workspace, override);
-      const spawnFn = (ctx && ctx.spawnFn) || undefined;
-      link = new DaemonLink(pythonBin, controllerPath, workspace, spawnFn, {
-        resolvePublishToken: () =>
-          resolvePublishToken(rawPublishToken, hostConfig),
-      });
+      // link=null/approvalRunner=null instead of throwing out of register()
+      // and crashing Gateway startup.
+      workspace = api.runtime.agent.resolveAgentWorkspaceDir(api.config, "main");
     } catch (error) {
-      // Fail closed at registration: the handler below stays installed but
-      // every publish callback is consumed safely with zero daemon contact
-      // and zero LLM fallback.
       linkError = error;
+      approvalRunnerError = error;
+    }
+    if (workspace !== null) {
+      const spawnFn = (ctx && ctx.spawnFn) || undefined;
+      try {
+        const controllerPath = resolveControllerPath(workspace, override);
+        link = new DaemonLink(pythonBin, controllerPath, workspace, spawnFn, {
+          resolvePublishToken: () =>
+            resolvePublishToken(rawPublishToken, hostConfig),
+        });
+      } catch (error) {
+        // Fail closed at registration: the handler below stays installed but
+        // every publish callback is consumed safely with zero daemon contact
+        // and zero LLM fallback.
+        linkError = error;
+      }
+      try {
+        // Independent from the publish DaemonLink above: a failure
+        // resolving one path must never take down the other (they used to
+        // share one try/catch only for the publish path; the first-stage
+        // durable runner is a separate concern with its own fail-closed
+        // boundary).
+        const approvalOverride =
+          ctx && ctx.approvalRunnerPath ? ctx.approvalRunnerPath : undefined;
+        const runnerPath = resolveApprovalRunnerPath(workspace, approvalOverride);
+        approvalRunner = {
+          pythonBin,
+          runnerPath,
+          workspace,
+          spawnFn,
+          timeoutMs: (ctx && ctx.approvalTimeoutMs) || undefined,
+        };
+      } catch (error) {
+        approvalRunnerError = error;
+      }
+    }
+    if (approvalRunnerError) {
+      // Observable registration failure: previously nothing recorded why
+      // the first-stage durable path came up unavailable.
+      logApprovalEvent({
+        event: "persistence_result",
+        result: "runner_registration_failed",
+        error: approvalRunnerError.message,
+      });
     }
 
     api.registerInteractiveHandler({
       channel: "telegram",
       namespace: "texbrif",
-      handler: buildHandler(link, linkError),
+      handler: buildHandler(link, approvalRunner),
     });
   },
 });
@@ -879,7 +1003,10 @@ Object.assign(entry, {
   DaemonLink,
   outcomeText,
   SAFE_TEXT,
+  FIRST_STAGE_SAFE_TEXT,
   resolveControllerPath,
+  resolveApprovalRunnerPath,
+  runApprovalCallback,
   resolvePublishToken,
   SECRET_CONFIG_PATH,
   MAX_TOKEN_LEN,

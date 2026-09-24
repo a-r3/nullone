@@ -19,12 +19,17 @@ NODE_SUITES = [
     ROOT / "tests/js/test_plugin_index.js",
     ROOT / "tests/js/test_plugin_link.js",
     ROOT / "tests/js/test_approval_route.js",
+    ROOT / "tests/js/test_approval_durable.js",
 ]
 EXPECTED_PASSES = {
     "test_plugin_route.js": 9,
-    "test_plugin_index.js": 34,
+    # +3 for the durable first-stage approval routing (issue-durable-approval):
+    # missing/unavailable runner fails closed, subprocess failure fails
+    # closed, and reply-send failure is observable.
+    "test_plugin_index.js": 37,
     "test_plugin_link.js": 16,
     "test_approval_route.js": 15,
+    "test_approval_durable.js": 11,
 }
 
 
