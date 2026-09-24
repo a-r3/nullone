@@ -564,8 +564,7 @@ class RenderDispatcherTests(unittest.TestCase):
                 )
         self.assertEqual(len(calls), 1)
         self.assertIn("render_texbrif_v2.py", calls[0][1])
-        sent_source = calls[0][calls[0].index("--source") + 1]
-        self.assertIn("nullone-neutral-bg-", sent_source)
+        self.assertNotIn("--source", calls[0])
 
     def test_typography_freeform_source_blocked(self):
         with tempfile.TemporaryDirectory() as td:

@@ -64,103 +64,133 @@ def fit_headline(draw, text):
     return font, wrap(draw, text, font, 900), 55
 
 
-def render(args):
-    source = load_image(args.source)
+def fit_stat(draw, text, max_width, start=31, minimum=20, max_lines=3):
+    for size in range(start, minimum - 1, -1):
+        font = fnt(size, True)
+        lines = wrap(draw, text, font, max_width)
 
-    # Decorative full-bleed background derived from source.
-    bg = ImageOps.fit(
-        source,
-        (W, HERO_H),
-        method=Image.Resampling.LANCZOS,
-    )
-    bg = bg.filter(ImageFilter.GaussianBlur(20))
+        if len(lines) <= max_lines:
+            return font, lines, int(size * 1.3)
+
+    font = fnt(minimum, True)
+    return font, wrap(draw, text, font, max_width), int(minimum * 1.3)
+
+
+class RenderBoundsError(RuntimeError):
+    """Raised when drawn content would fall outside the output canvas."""
+
+
+def render(args):
+    has_photo = bool(args.source)
 
     canvas = Image.new("RGB", (W, H), (14, 14, 15))
-    canvas.paste(bg, (0, 0))
 
-    # Darken decorative hero background.
-    overlay = Image.new("RGBA", (W, HERO_H), (0, 0, 0, 95))
-    canvas = canvas.convert("RGBA")
-    canvas.alpha_composite(overlay, (0, 0))
+    if has_photo:
+        source = load_image(args.source)
 
-    # Preserve full official/source asset in foreground.
-    foreground = ImageOps.contain(
-        source,
-        (900, 535),
-        Image.Resampling.LANCZOS,
-    )
+        # Decorative full-bleed background derived from source.
+        bg = ImageOps.fit(
+            source,
+            (W, HERO_H),
+            method=Image.Resampling.LANCZOS,
+        )
+        bg = bg.filter(ImageFilter.GaussianBlur(20))
+        canvas.paste(bg, (0, 0))
 
-    fx = (W - foreground.width) // 2
-    fy = 125 + (535 - foreground.height) // 2
+        # Darken decorative hero background.
+        overlay = Image.new("RGBA", (W, HERO_H), (0, 0, 0, 95))
+        canvas = canvas.convert("RGBA")
+        canvas.alpha_composite(overlay, (0, 0))
 
-    # Soft panel behind source visual.
-    panel = Image.new(
-        "RGBA",
-        (foreground.width + 28, foreground.height + 28),
-        (255, 255, 255, 28),
-    )
-    canvas.alpha_composite(panel, (fx - 14, fy - 14))
-    canvas.paste(foreground, (fx, fy))
+        # Preserve full official/source asset in foreground.
+        foreground = ImageOps.contain(
+            source,
+            (900, 535),
+            Image.Resampling.LANCZOS,
+        )
+
+        fx = (W - foreground.width) // 2
+        fy = 125 + (535 - foreground.height) // 2
+
+        # Soft panel behind source visual.
+        panel = Image.new(
+            "RGBA",
+            (foreground.width + 28, foreground.height + 28),
+            (255, 255, 255, 28),
+        )
+        canvas.alpha_composite(panel, (fx - 14, fy - 14))
+        canvas.paste(foreground, (fx, fy))
+        band_top = HERO_H
+    else:
+        # Typography-only: no source evidence to frame. Reclaim the hero
+        # area rather than drawing an empty placeholder panel/frame.
+        canvas = canvas.convert("RGBA")
+        band_top = 0
 
     draw = ImageDraw.Draw(canvas)
+    text_boxes = []
+
+    def text(xy, s, font, fill):
+        draw.text(xy, s, font=font, fill=fill)
+        text_boxes.append(draw.textbbox(xy, s, font=font))
 
     # Brand header.
-    draw.text((70, 55), "NULLONE", font=fnt(32, True), fill=(242, 234, 225))
+    text((70, 55), "NULLONE", fnt(32, True), (242, 234, 225))
 
     section = "AI • TEXNOLOGİYA"
     box = draw.textbbox((0, 0), section, font=fnt(22, True))
-    draw.text(
+    text(
         (W - 70 - (box[2] - box[0]), 64),
         section,
-        font=fnt(22, True),
-        fill=(225, 225, 225),
+        fnt(22, True),
+        (225, 225, 225),
     )
 
-    # Editorial lower band.
-    draw.rectangle((0, HERO_H, W, H), fill=(15, 15, 15, 255))
+    # Editorial band (full canvas when typography-only, lower band otherwise).
+    draw.rectangle((0, band_top, W, H), fill=(15, 15, 15, 255))
 
-    kicker_y = HERO_H + 62
-    draw.text(
-        (70, kicker_y),
-        args.kicker.upper(),
-        font=fnt(24, True),
-        fill=(185, 185, 185),
-    )
+    kicker_y = (HERO_H + 62) if has_photo else 170
+    text((70, kicker_y), args.kicker.upper(), fnt(24, True), (185, 185, 185))
 
     hf, lines, line_h = fit_headline(draw, args.headline)
 
     y = kicker_y + 62
     for line in lines:
-        draw.text((70, y), line, font=hf, fill=(242, 234, 225))
+        text((70, y), line, hf, (242, 234, 225))
         y += line_h
 
     if args.stat:
         y += 24
-        draw.text(
-            (70, y),
-            args.stat,
-            font=fnt(31, True),
-            fill=(220, 220, 220),
-        )
+        sf, stat_lines, stat_line_h = fit_stat(draw, args.stat, W - 140)
+        for line in stat_lines:
+            text((70, y), line, sf, (220, 220, 220))
+            y += stat_line_h
 
     # Bottom metadata.
     bottom_y = H - 105
 
-    draw.text(
+    text(
         (70, bottom_y),
         f"Mənbə: {args.source_name}",
-        font=fnt(23),
-        fill=(150, 150, 150),
+        fnt(23),
+        (150, 150, 150),
     )
 
     handle = "@nullone.az"
     box = draw.textbbox((0, 0), handle, font=fnt(27, True))
-    draw.text(
+    text(
         (W - 70 - (box[2] - box[0]), bottom_y - 2),
         handle,
-        font=fnt(27, True),
-        fill=(242, 234, 225),
+        fnt(27, True),
+        (242, 234, 225),
     )
+
+    for tb in text_boxes:
+        x0, y0, x1, y1 = tb
+        if x0 < 0 or y0 < 0 or x1 > W or y1 > H:
+            raise RenderBoundsError(
+                f"TEXT_OUTSIDE_CANVAS: bbox {tb} exceeds canvas {(W, H)}"
+            )
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +208,7 @@ def render(args):
 def main():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--source", required=True)
+    p.add_argument("--source", default=None)
     p.add_argument("--kicker", required=True)
     p.add_argument("--headline", required=True)
     p.add_argument("--stat", default="")
