@@ -12,6 +12,8 @@
 const assert = require("node:assert/strict");
 const { test, before } = require("node:test");
 const Module = require("node:module");
+const { EventEmitter } = require("node:events");
+const { createApprovalStore } = require("../../plugins/nullone-final-publish/approval-route");
 
 const POST = "0123456789abcdef01234567";
 
@@ -134,14 +136,155 @@ before(() => {
   plugin = require("../../plugins/nullone-final-publish/index.js");
 });
 
-function registeredHandler(link) {
+function registeredHandler(link, approvalRunner) {
   const api = makeApi();
   plugin.register(api);
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
-  // Swap the real link for the fake by rebuilding through buildHandler.
-  return plugin.buildHandler(link);
+  // Swap the real link/runner for fakes by rebuilding through buildHandler.
+  return plugin.buildHandler(link, approvalRunner);
+}
+
+/**
+ * Fake child process for the durable first-stage subprocess
+ * (nullone-approval-callback-run.py). Mirrors FakeChild's shape below
+ * (stdin/stdout/stderr, 'error'/'close' events) for the same reason: the
+ * real Node.ChildProcess contract, not a mock library.
+ */
+class FakeApprovalChild extends EventEmitter {
+  constructor(handleRequest) {
+    super();
+    this._chunks = [];
+    this.stdin = {
+      write: (chunk) => {
+        this._chunks.push(Buffer.from(chunk));
+        return true;
+      },
+      end: () => {
+        setImmediate(() => {
+          let request;
+          try {
+            request = JSON.parse(Buffer.concat(this._chunks).toString("utf8"));
+          } catch {
+            this.stderr.emit("data", "bad request");
+            this.emit("close", 2);
+            return;
+          }
+          let outcome;
+          try {
+            outcome = handleRequest(request);
+          } catch (error) {
+            this.stderr.emit("data", String(error));
+            this.emit("close", 2);
+            return;
+          }
+          if (outcome && outcome.__spawnError) {
+            this.emit("error", outcome.__spawnError);
+            return;
+          }
+          if (outcome && outcome.__hang) {
+            return;
+          }
+          this.stdout.emit("data", JSON.stringify(outcome));
+          this.emit("close", 0);
+        });
+      },
+    };
+    this.stdout = new EventEmitter();
+    this.stderr = new EventEmitter();
+  }
+  kill() {
+    this.killed = true;
+  }
+}
+
+/**
+ * A working fake durable-approval subprocess backed by the SAME pure
+ * transition table as the real Python controller (approval-route.js is
+ * kept byte-identical to nullone_approval_controller.py -- see
+ * test_deterministic_approval.py's parity test), so these offline tests
+ * exercise real stage-machine behavior without spawning Python.
+ */
+function makeApprovalRunner(handleRequestOverride) {
+  const store = createApprovalStore();
+  const calls = [];
+  const handleRequest =
+    handleRequestOverride ||
+    ((request) => {
+      const result = store.handle({
+        action: request.action,
+        postId: request.review_post_id,
+        authorized: request.authorized,
+        messageId: request.message_id,
+        chatId: request.chat_id,
+        accountId: request.account_id,
+        senderId: request.sender_id,
+      });
+      return {
+        outcome: result.outcome,
+        from_stage: result.fromStage,
+        to_stage: result.toStage,
+        reply: result.reply,
+        publish_authorized: result.publishAuthorized,
+        zernio_calls: result.zernioCalls,
+      };
+    });
+  const spawnFn = () =>
+    new FakeApprovalChild((request) => {
+      calls.push(request);
+      return handleRequest(request);
+    });
+  return {
+    runner: {
+      pythonBin: "python3",
+      runnerPath: "/tmp/nullone-test-workspace/social/ops/scripts/nullone-approval-callback-run.py",
+      workspace: "/tmp/nullone-test-workspace",
+      spawnFn,
+      timeoutMs: 500,
+    },
+    calls,
+    store,
+  };
+}
+
+/**
+ * Fake child for the pending-ledger recovery sweep
+ * (nullone_approval_durable.py recover-pending) -- simpler protocol than
+ * FakeApprovalChild: no stdin envelope, just stdout + close.
+ */
+class FakeRecoveryChild extends EventEmitter {
+  constructor(behavior) {
+    super();
+    this.stdin = { write: () => true, end: () => {} };
+    this.stdout = new EventEmitter();
+    this.stderr = new EventEmitter();
+    setImmediate(() => {
+      if (behavior && behavior.hang) return;
+      if (behavior && behavior.spawnError) {
+        this.emit("error", behavior.spawnError);
+        return;
+      }
+      if (behavior && behavior.stderr) this.stderr.emit("data", behavior.stderr);
+      this.stdout.emit(
+        "data",
+        `RECOVERED_COUNT=${(behavior && behavior.recoveredCount) || 0}\n`
+      );
+      this.emit("close", behavior && behavior.exitCode !== undefined ? behavior.exitCode : 0);
+    });
+  }
+  kill() {
+    this.killed = true;
+  }
+}
+
+function makeRecoverySpawnFn(behavior) {
+  const calls = [];
+  const spawnFn = (bin, args, opts) => {
+    calls.push({ bin, args, opts });
+    return new FakeRecoveryChild(behavior);
+  };
+  return { spawnFn, calls };
 }
 
 test("OpenClaw loader sees top-level plugin entry (regression)", () => {
@@ -239,7 +382,8 @@ test("unauthorized sender fails closed with zero daemon request", async () => {
 
 test("approve/reject/revise/back are consumed deterministically (no agent flow)", async () => {
   const link = makeLink();
-  const handler = registeredHandler(link);
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
   const expectations = {
     approve: /son təsdiqdən sonra/,
     reject: /İmtina edildi/,
@@ -273,7 +417,8 @@ test("approve/reject/revise/back are consumed deterministically (no agent flow)"
 
 test("approve reply carries the second-confirmation button values", async () => {
   const link = makeLink();
-  const handler = registeredHandler(link);
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
   const sent = [];
   const ctx = makeHandlerCtx({ callback: {
     data: `texbrif:approve:${POST}`,
@@ -298,7 +443,8 @@ test("approve reply carries the second-confirmation button values", async () => 
 
 test("duplicate approve is idempotent with zero daemon contact", async () => {
   const link = makeLink();
-  const handler = registeredHandler(link);
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
   const base = { callback: {
     data: `texbrif:approve:${POST}`,
     namespace: "texbrif",
@@ -333,6 +479,84 @@ test("unauthorized first-stage callback is consumed silently", async () => {
   assert.deepEqual(result, { handled: true });
   assert.equal(ctx._replies.length, 0);
   assert.equal(link.calls.length, 0);
+});
+
+test("missing/unavailable approval runner fails closed with safe text, no throw", async () => {
+  const link = makeLink();
+  // approvalRunner intentionally omitted: mirrors a failed registration
+  // (workspace/runner path unavailable) -- must never fall back to an
+  // in-memory decision.
+  const handler = registeredHandler(link);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:reject:${POST}`,
+      namespace: "texbrif",
+      payload: `reject:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+  });
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /Təsdiq xidməti hazır deyil/);
+});
+
+test("subprocess failure (non-zero exit) fails closed, never claims a transition", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner((_request) => {
+    throw new Error("simulated internal failure");
+  });
+  const handler = registeredHandler(link, runner);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:reject:${POST}`,
+      namespace: "texbrif",
+      payload: `reject:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+  });
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /nəticəsi qeyri-müəyyəndir|hazır deyil/);
+});
+
+test("reply-send failure is observable (logged) and never throws", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
+  const ctx = makeHandlerCtx({
+    callback: {
+      data: `texbrif:reject:${POST}`,
+      namespace: "texbrif",
+      payload: `reject:${POST}`,
+      messageId: 424242,
+      chatId: "770011",
+    },
+  });
+  ctx.respond.reply = async () => {
+    throw new Error("Telegram API unreachable");
+  };
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  let result;
+  try {
+    result = await handler(ctx);
+  } finally {
+    console.log = originalLog;
+  }
+  // Previously silently swallowed (bare catch {}): now must leave a trace,
+  // and must never throw out of the interactive handler either way.
+  assert.deepEqual(result, { handled: true });
+  const parsed = logs.map((line) => JSON.parse(line));
+  const replyFailure = parsed.find(
+    (entry) => entry.event === "reply_send_result" && entry.ok === false
+  );
+  assert.ok(replyFailure, "expected an observable reply_send_result failure log");
+  assert.match(replyFailure.error, /Telegram API unreachable/);
 });
 
 test("malformed approval-shaped callbacks are consumed safely", async () => {
@@ -947,4 +1171,201 @@ test("OpenClaw one-argument register resolves workspace from runtime agent API",
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].channel, "telegram");
   assert.equal(registrations[0].namespace, "texbrif");
+});
+
+test("register() fires the automatic pending-ledger recovery sweep on every call", async () => {
+  const api = makeApi();
+  const { spawnFn, calls } = makeRecoverySpawnFn({ recoveredCount: 2 });
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  try {
+    plugin.register(api, makeCtx({ recoverySpawnFn: spawnFn }));
+    // Fire-and-forget: give the microtask/timer queue a turn to settle.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(calls.length, 1, "recovery sweep must spawn exactly once per register()");
+  assert.match(calls[0].args[0], /nullone_approval_durable\.py$/);
+  assert.equal(calls[0].args[1], "recover-pending");
+  const parsed = logs.map((l) => JSON.parse(l));
+  // Matched on the exact recovered_count this test's fake reports, not just
+  // event name: other tests' own (unawaited, real-spawn-against-a-fake-path)
+  // recovery sweeps can still be settling concurrently and would otherwise
+  // be picked up here too.
+  const recoveryLog = parsed.find(
+    (e) => e.event === "pending_ledger_recovery" && e.recovered_count === 2
+  );
+  assert.ok(recoveryLog, "expected an observable pending_ledger_recovery log");
+  assert.equal(recoveryLog.ok, true);
+});
+
+test("register() fires recovery again on plugin reload (a second register() call)", async () => {
+  const api = makeApi();
+  const { spawnFn, calls } = makeRecoverySpawnFn({ recoveredCount: 0 });
+  plugin.register(api, makeCtx({ recoverySpawnFn: spawnFn }));
+  plugin.register(api, makeCtx({ recoverySpawnFn: spawnFn }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls.length, 2, "each register() call (boot, and every reload) sweeps again");
+});
+
+test("recovery sweep failure is observable but never throws out of register()", async () => {
+  const api = makeApi();
+  const { spawnFn } = makeRecoverySpawnFn({ exitCode: 1, stderr: "disk full" });
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  let threw = false;
+  try {
+    plugin.register(api, makeCtx({ recoverySpawnFn: spawnFn }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } catch {
+    threw = true;
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(threw, false, "register() must never throw on a recovery sweep failure");
+  const parsed = logs.map((l) => JSON.parse(l));
+  const recoveryLog = parsed.find(
+    (e) =>
+      e.event === "pending_ledger_recovery" &&
+      typeof e.error === "string" &&
+      e.error.includes("disk full")
+  );
+  assert.ok(recoveryLog, "expected the specific disk-full failure to be logged");
+  assert.equal(recoveryLog.ok, false);
+  // Approval state safety: a failed sweep must never touch the interactive
+  // registration itself -- the handler is still installed normally.
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].channel, "telegram");
+});
+
+test("recovery sweep is bounded: a hung subprocess is killed and logged, register() unaffected", async () => {
+  const api = makeApi();
+  const { spawnFn } = makeRecoverySpawnFn({ hang: true });
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  const start = Date.now();
+  try {
+    plugin.register(
+      api,
+      makeCtx({ recoverySpawnFn: spawnFn, recoveryTimeoutMs: 30 })
+    );
+    // register() itself returns immediately regardless of the sweep timeout.
+    assert.ok(Date.now() - start < 25, "register() must not block on the sweep");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  } finally {
+    console.log = originalLog;
+  }
+  const parsed = logs.map((l) => JSON.parse(l));
+  const recoveryLog = parsed.find(
+    (e) =>
+      e.event === "pending_ledger_recovery" &&
+      typeof e.error === "string" &&
+      /timeout/.test(e.error)
+  );
+  assert.ok(recoveryLog, "expected the specific timeout failure to be logged");
+  assert.equal(recoveryLog.ok, false);
+});
+
+test("recovery sweep does not use the publish daemon's spawn hook (no interference)", async () => {
+  // Regression for the exact bug this test suite caught: sharing ctx.spawnFn
+  // between the publish DaemonLink and the recovery sweep broke every
+  // existing "spawn must never happen" test built only for the daemon's
+  // HMAC handshake shape.
+  const api = makeApi();
+  let daemonSpawnCalls = 0;
+  plugin.register(
+    api,
+    makeCtx({
+      spawnFn: () => {
+        daemonSpawnCalls += 1;
+        throw new Error("daemon must not spawn in this test");
+      },
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(
+    daemonSpawnCalls,
+    0,
+    "the recovery sweep must never invoke ctx.spawnFn (the daemon-only hook)"
+  );
+});
+
+test("ledger_sync is surfaced in persistence_result logs: flushed", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner((request) => {
+    return {
+      outcome: "TRANSITIONED",
+      from_stage: "DRAFT_READY",
+      to_stage: "REJECTED",
+      reply: { text: "❌ İmtina edildi. Heç nə yayımlanmadı.", buttons: null },
+      publish_authorized: false,
+      zernio_calls: 0,
+      ledger_sync: "flushed",
+    };
+  });
+  const handler = registeredHandler(link, runner);
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  let result;
+  try {
+    result = await handler(
+      makeHandlerCtx({
+        callback: { data: `texbrif:reject:${POST}`, messageId: 1, chatId: "770011" },
+      })
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  assert.deepEqual(result, { handled: true });
+  const parsed = logs.map((l) => JSON.parse(l));
+  const persistLog = parsed.find(
+    (e) => e.event === "persistence_result" && e.outcome === "TRANSITIONED"
+  );
+  assert.ok(persistLog);
+  assert.equal(persistLog.ledger_sync, "flushed");
+});
+
+test("ledger_sync is surfaced in persistence_result logs: pending", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner((request) => {
+    return {
+      outcome: "TRANSITIONED",
+      from_stage: "DRAFT_READY",
+      to_stage: "REJECTED",
+      reply: { text: "❌ İmtina edildi. Heç nə yayımlanmadı.", buttons: null },
+      publish_authorized: false,
+      zernio_calls: 0,
+      ledger_sync: "pending",
+    };
+  });
+  const handler = registeredHandler(link, runner);
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (line) => logs.push(line);
+  const ctx = makeHandlerCtx({
+    callback: { data: `texbrif:reject:${POST}`, messageId: 1, chatId: "770011" },
+  });
+  let result;
+  try {
+    result = await handler(ctx);
+  } finally {
+    console.log = originalLog;
+  }
+  // The human-facing outcome must be identical to the "flushed" case above
+  // -- only observability differs. This is the exact requirement: pending
+  // audit sync must never change what the human sees.
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.equal(ctx._replies[0], "❌ İmtina edildi. Heç nə yayımlanmadı.");
+  const parsed = logs.map((l) => JSON.parse(l));
+  const persistLog = parsed.find(
+    (e) => e.event === "persistence_result" && e.outcome === "TRANSITIONED"
+  );
+  assert.ok(persistLog);
+  assert.equal(persistLog.ledger_sync, "pending");
 });
