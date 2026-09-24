@@ -42,38 +42,70 @@ const RUNNER_RELATIVE = [
   "nullone-approval-callback-run.py",
 ];
 const RUNNER_BASENAME = "nullone-approval-callback-run.py";
+const RECOVERY_MODULE_RELATIVE = [
+  "social",
+  "ops",
+  "scripts",
+  "nullone_approval_durable.py",
+];
+const RECOVERY_MODULE_BASENAME = "nullone_approval_durable.py";
 const DEFAULT_TIMEOUT_MS = 10000;
+// Recovery is a background sweep over every manifest in the workspace, not
+// one bounded human click: generous but still bounded, so a stuck sweep
+// can never hang around the Gateway process forever.
+const DEFAULT_RECOVERY_TIMEOUT_MS = 30000;
 const MAX_OUTPUT_LEN = 65536;
 
 /**
- * Deterministic runner path construction (mirrors resolveControllerPath in
- * index.js for the same reason: the daemon/subprocess child runs with
- * cwd = workspace, so a relative path would resolve wrong).
+ * Deterministic path construction shared by every script this plugin
+ * spawns (mirrors resolveControllerPath in index.js for the same reason:
+ * the child runs with cwd = workspace, so a relative path would resolve
+ * wrong).
  */
-function resolveApprovalRunnerPath(workspace, override) {
+function resolveWorkspaceScriptPath(workspace, override, relativeParts, basename, label) {
   if (typeof workspace !== "string" || workspace.length === 0) {
     throw new Error("workspace unavailable");
   }
   if (override !== undefined && override !== null && override !== "") {
     if (typeof override !== "string" || !path.isAbsolute(override)) {
-      throw new Error("approval runner override must be absolute");
+      throw new Error(`${label} override must be absolute`);
     }
-    if (path.basename(override) !== RUNNER_BASENAME) {
-      throw new Error("approval runner override basename mismatch");
+    if (path.basename(override) !== basename) {
+      throw new Error(`${label} override basename mismatch`);
     }
     return override;
   }
   const root = path.resolve(workspace);
-  const absolute = path.join(root, ...RUNNER_RELATIVE);
+  const absolute = path.join(root, ...relativeParts);
   const relative = path.relative(root, absolute);
   if (
     relative === "" ||
     relative.startsWith("..") ||
     path.isAbsolute(relative)
   ) {
-    throw new Error("approval runner path escapes workspace");
+    throw new Error(`${label} path escapes workspace`);
   }
   return absolute;
+}
+
+function resolveApprovalRunnerPath(workspace, override) {
+  return resolveWorkspaceScriptPath(
+    workspace,
+    override,
+    RUNNER_RELATIVE,
+    RUNNER_BASENAME,
+    "approval runner"
+  );
+}
+
+function resolveRecoveryModulePath(workspace, override) {
+  return resolveWorkspaceScriptPath(
+    workspace,
+    override,
+    RECOVERY_MODULE_RELATIVE,
+    RECOVERY_MODULE_BASENAME,
+    "pending-ledger recovery module"
+  );
 }
 
 /**
@@ -177,10 +209,101 @@ function runApprovalCallback(
   });
 }
 
+/**
+ * Automatic recovery sweep (PR #162 review, blocker: "recovery mechanism
+ * exists but is never invoked automatically"). Runs
+ * `nullone_approval_durable.py recover-pending`, which flushes every
+ * manifest's pending audit-ledger outbox marker -- catch-up for a
+ * transition that committed durably but whose ledger row lagged behind
+ * (see runApprovalCallback's docstring). Never touches approval.stage;
+ * see nullone_approval_durable.py's own broad-except guarantee that a
+ * failed flush leaves the manifest exactly as it was.
+ *
+ * Bounded by `timeoutMs` (SIGKILL on expiry) so a stuck sweep can never
+ * hang around the Gateway process. Every outcome -- success, failure, or
+ * timeout -- resolves rather than rejects: this is a best-effort
+ * background catch-up, not a human-facing action, so the caller logs
+ * whatever happened and moves on instead of treating a failure as fatal.
+ */
+function runPendingLedgerRecoverySweep({
+  pythonBin,
+  modulePath,
+  workspace,
+  spawnFn,
+  timeoutMs,
+}) {
+  const spawnImpl = spawnFn || spawn;
+  const timeout = timeoutMs || DEFAULT_RECOVERY_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnImpl(pythonBin, [modulePath, "recover-pending"], {
+        cwd: workspace,
+        env: { ...process.env, NULLONE_WORKSPACE: workspace },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      resolve({ ok: false, error: error && error.message, recoveredCount: 0 });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Best-effort only.
+      }
+      resolve({ ok: false, error: "pending-ledger recovery timeout", recoveredCount: 0 });
+    }, timeout);
+
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < MAX_OUTPUT_LEN) stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < MAX_OUTPUT_LEN) stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: error && error.message, recoveredCount: 0 });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        resolve({
+          ok: false,
+          error: `recover-pending exited ${code}: ${stderr.slice(0, 500)}`,
+          recoveredCount: 0,
+        });
+        return;
+      }
+      const match = stdout.match(/RECOVERED_COUNT=(\d+)/);
+      resolve({
+        ok: true,
+        recoveredCount: match ? Number(match[1]) : 0,
+      });
+    });
+  });
+}
+
 module.exports = {
   resolveApprovalRunnerPath,
+  resolveRecoveryModulePath,
   runApprovalCallback,
+  runPendingLedgerRecoverySweep,
   RUNNER_RELATIVE,
   RUNNER_BASENAME,
+  RECOVERY_MODULE_RELATIVE,
+  RECOVERY_MODULE_BASENAME,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_RECOVERY_TIMEOUT_MS,
 };

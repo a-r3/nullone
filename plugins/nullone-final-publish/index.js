@@ -69,7 +69,9 @@ const {
 } = require("./approval-route");
 const {
   resolveApprovalRunnerPath,
+  resolveRecoveryModulePath,
   runApprovalCallback,
+  runPendingLedgerRecoverySweep,
 } = require("./approval-durable");
 
 const FRAME_MAGIC = Buffer.from("NP1", "utf8");
@@ -763,6 +765,10 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, approvalRunn
     outcome: result && result.outcome,
     from_stage: result && result.from_stage,
     to_stage: result && result.to_stage,
+    // "pending" | "flushed" | null (no manifest examined). Distinguishes
+    // "decision persisted" from "audit ledger row still catching up" --
+    // the human-facing reply below is unaffected either way.
+    ledger_sync: result && result.ledger_sync,
   });
 
   if (result && result.outcome === "REJECTED_UNAUTHORIZED") {
@@ -982,6 +988,62 @@ const entry = definePluginEntry({
       });
     }
 
+    if (approvalRunner) {
+      // Automatic pending-ledger recovery (PR #162 review, blocker: the
+      // recovery function existed but nothing ever called it, so a
+      // terminal REJECT/REVISE nobody clicks again could leave its audit
+      // row pending forever). Fires once per register() call -- i.e. once
+      // per Gateway boot AND once per plugin reload, satisfying both
+      // "after host reboot" and "after plugin reload" without a new
+      // daemon or scheduled job: register() already runs on exactly those
+      // two lifecycle events. Deliberately NOT awaited: register() must
+      // stay synchronous and startup must never block on this. Every
+      // outcome (success, failure, timeout) only ever logs -- a failed
+      // sweep leaves pending markers exactly as they were (proven safe in
+      // nullone_approval_durable.py) and is retried on the NEXT boot/
+      // reload or the next opportunistic per-callback flush; it can never
+      // corrupt approval.stage, since the sweep only ever touches
+      // approval.pending_ledger_event.
+      try {
+        const recoveryOverride =
+          ctx && ctx.recoveryModulePath ? ctx.recoveryModulePath : undefined;
+        const recoveryModulePath = resolveRecoveryModulePath(workspace, recoveryOverride);
+        runPendingLedgerRecoverySweep({
+          pythonBin,
+          modulePath: recoveryModulePath,
+          workspace,
+          // Deliberately its OWN override hook, never ctx.spawnFn: the
+          // recovery sweep is a fundamentally different spawn (different
+          // argv, different stdio contract -- pipes stderr, where the
+          // publish DaemonLink ignores it) that fires unconditionally and
+          // unawaited on every register() call. Sharing ctx.spawnFn would
+          // silently feed this call into every existing publish-path test
+          // fake (many assert "spawn was never called" via one shared
+          // flag/mock built only for the daemon's HMAC handshake shape).
+          spawnFn: (ctx && ctx.recoverySpawnFn) || undefined,
+          timeoutMs: (ctx && ctx.recoveryTimeoutMs) || undefined,
+        }).then((outcome) => {
+          logApprovalEvent({
+            event: "pending_ledger_recovery",
+            ok: outcome.ok,
+            recovered_count: outcome.recoveredCount,
+            error: outcome.ok ? undefined : outcome.error,
+          });
+        });
+        // No .catch() needed: runPendingLedgerRecoverySweep's promise
+        // always resolves (see its own docstring) -- it never rejects.
+      } catch (error) {
+        // Path resolution itself failed (e.g. workspace escape): log and
+        // move on, never throw out of register().
+        logApprovalEvent({
+          event: "pending_ledger_recovery",
+          ok: false,
+          error: error && error.message,
+          result: "path_resolution_failed",
+        });
+      }
+    }
+
     api.registerInteractiveHandler({
       channel: "telegram",
       namespace: "texbrif",
@@ -1006,7 +1068,9 @@ Object.assign(entry, {
   FIRST_STAGE_SAFE_TEXT,
   resolveControllerPath,
   resolveApprovalRunnerPath,
+  resolveRecoveryModulePath,
   runApprovalCallback,
+  runPendingLedgerRecoverySweep,
   resolvePublishToken,
   SECRET_CONFIG_PATH,
   MAX_TOKEN_LEN,

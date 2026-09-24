@@ -110,7 +110,9 @@ class LegacyStageUnsafeError(BridgeError):
     is unrecoverable) legacy manifests. Both fail closed identically."""
 
 
-def _closed(outcome: str, text: str, stage: str) -> dict[str, Any]:
+def _closed(
+    outcome: str, text: str, stage: str, *, ledger_sync: str | None = None
+) -> dict[str, Any]:
     return {
         "outcome": outcome,
         "from_stage": stage,
@@ -123,7 +125,19 @@ def _closed(outcome: str, text: str, stage: str) -> dict[str, Any]:
         },
         "publish_authorized": False,
         "zernio_calls": 0,
+        # None where no manifest was ever examined (not-found/unauthorized/
+        # malformed) or a write failure leaves its true on-disk state
+        # unconfirmed; "pending"/"flushed" wherever a manifest WAS read.
+        "ledger_sync": ledger_sync,
     }
+
+
+def _ledger_sync_state(manifest: dict[str, Any]) -> str:
+    """"pending" if this manifest still carries an unflushed audit-ledger
+    outbox marker, "flushed" otherwise. Observability only -- never
+    influences the human-facing outcome/reply."""
+    pending = (manifest.get("approval") or {}).get("pending_ledger_event")
+    return "pending" if pending else "flushed"
 
 
 def approval_stage(manifest: dict[str, Any]) -> str:
@@ -398,11 +412,17 @@ def handle_durable_approval_callback(
             current_stage = approval_stage(manifest)
         except LegacyStageUnsafeError:
             return _closed(
-                OUTCOME_REJECTED_LEGACY_UNSAFE, TEXT_LEGACY_UNSAFE, STAGE_DRAFT_READY
+                OUTCOME_REJECTED_LEGACY_UNSAFE,
+                TEXT_LEGACY_UNSAFE,
+                STAGE_DRAFT_READY,
+                ledger_sync=_ledger_sync_state(manifest),
             )
         except BridgeError:
             return _closed(
-                OUTCOME_REJECTED_STATE_CORRUPT, TEXT_STATE_CORRUPT, STAGE_DRAFT_READY
+                OUTCOME_REJECTED_STATE_CORRUPT,
+                TEXT_STATE_CORRUPT,
+                STAGE_DRAFT_READY,
+                ledger_sync=_ledger_sync_state(manifest),
             )
 
         expired = is_effectively_expired(
@@ -425,7 +445,7 @@ def handle_durable_approval_callback(
 
         if result["outcome"] == OUTCOME_TRANSITIONED:
             try:
-                _persist_transition(manifest_path, manifest, result, sender_id)
+                manifest = _persist_transition(manifest_path, manifest, result, sender_id)
             except Exception:
                 # The in-memory decision was computed but never durably
                 # stuck: report as if nothing changed (fail closed) so the
@@ -434,9 +454,15 @@ def handle_durable_approval_callback(
                     OUTCOME_PERSISTENCE_FAILED,
                     TEXT_PERSISTENCE_FAILED,
                     current_stage,
+                    ledger_sync=None,
                 )
 
-        return result
+        # Observability (PR #162 review): whether the audit ledger has
+        # actually caught up to the manifest's current durable state, or a
+        # pending_ledger_event outbox marker is still waiting on recovery.
+        # Never changes the human-facing outcome/reply -- that was already
+        # decided above from the manifest transition alone.
+        return {**result, "ledger_sync": _ledger_sync_state(manifest)}
 
 
 def self_test() -> None:

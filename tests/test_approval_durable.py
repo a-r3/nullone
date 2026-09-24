@@ -559,6 +559,102 @@ class LedgerOutboxRecoveryTests(unittest.TestCase):
             self.assertNotIn("stage", manifest["approval"])
 
 
+class LedgerSyncObservabilityTests(unittest.TestCase):
+    """PR #162 review round 3: ledger_sync must be exposed on every
+    result so operators can distinguish "decision persisted" from "audit
+    projection pending" -- without ever changing the human-facing outcome."""
+
+    def test_ledger_sync_flushed_on_normal_success(self):
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            result = call("reject")
+            self.assertEqual(result["outcome"], "TRANSITIONED")
+            self.assertEqual(result["ledger_sync"], "flushed")
+
+    def test_ledger_sync_pending_when_ledger_append_fails(self):
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            original = durable.record_approval_decision
+
+            def boom(*_args, **_kwargs):
+                raise OSError("synthetic ledger disk failure")
+
+            durable.record_approval_decision = boom
+            try:
+                result = call("reject")
+            finally:
+                durable.record_approval_decision = original
+
+            # The human-facing result must be untouched: still the true
+            # transition, still the true reply text.
+            self.assertEqual(result["outcome"], "TRANSITIONED")
+            self.assertEqual(result["to_stage"], "REJECTED")
+            self.assertEqual(result["reply"]["text"], "❌ İmtina edildi. Heç nə yayımlanmadı.")
+            # Only observability differs.
+            self.assertEqual(result["ledger_sync"], "pending")
+
+    def test_ledger_sync_flushed_after_recovery(self):
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            original = durable.record_approval_decision
+
+            def boom(*_args, **_kwargs):
+                raise OSError("synthetic ledger disk failure")
+
+            durable.record_approval_decision = boom
+            try:
+                call("reject")
+            finally:
+                durable.record_approval_decision = original
+
+            durable.recover_pending_ledger_events()
+            # A later callback for the same post now reports flushed.
+            replay = call("reject")
+            self.assertEqual(replay["outcome"], "CONVERGED")
+            self.assertEqual(replay["ledger_sync"], "flushed")
+
+
+class AutomaticRecoveryCliTests(unittest.TestCase):
+    """The exact CLI entrypoint plugins/nullone-final-publish/index.js
+    invokes automatically on register()/plugin-reload
+    (`nullone_approval_durable.py recover-pending`).
+
+    Drives it through ``main()`` directly rather than a real subprocess:
+    nullone_bridge_common.WORKSPACE is resolved once from `__file__` at
+    import time (not NULLONE_WORKSPACE-aware), so a real subprocess here
+    would scan this checkout's actual workspace/social/ops/manifests
+    instead of the isolated fixture -- calling main() in-process keeps
+    this test honestly isolated while still exercising the real CLI
+    arg-parsing/dispatch/print-format code path index.js's subprocess
+    call depends on (see test_plugin_index.js for the subprocess-spawn
+    plumbing itself, faked there for the same reason).
+    """
+
+    def test_recover_pending_cli_flushes_and_reports_count(self):
+        import contextlib
+        import io
+
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            original = durable.record_approval_decision
+
+            def boom(*_args, **_kwargs):
+                raise OSError("synthetic ledger disk failure")
+
+            durable.record_approval_decision = boom
+            try:
+                call("reject")
+            finally:
+                durable.record_approval_decision = original
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = durable.main(["recover-pending"])
+            self.assertEqual(exit_code, 0)
+            self.assertIn("RECOVERED_COUNT=1", out.getvalue())
+            self.assertIn(f"RECOVERED_REVIEW_POST_ID={POST}", out.getvalue())
+
+
 class LegacyManifestProtectionTests(unittest.TestCase):
     """Blocker 2 (PR #162 review): production has 29 manifests predating
     approval.stage, 9 of which are already published/attempted. Defaulting
