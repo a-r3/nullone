@@ -27,14 +27,31 @@ inventing a second state machine:
 
 The durable record lives at ``manifest["approval"]``:
 
-    stage           DRAFT_READY | AWAITING_PUBLISH_CONFIRMATION |
-                    REJECTED | REVISION_REQUESTED (absent == DRAFT_READY,
-                    for backward compatibility with manifests written before
-                    this field existed)
-    first_stage     True once any first-stage decision has been recorded
-    first_stage_at  ISO-8601 UTC timestamp of that decision
-    operator        the authorized Telegram sender_id that made the decision
-    source          "telegram"
+    stage               DRAFT_READY | AWAITING_PUBLISH_CONFIRMATION |
+                        REJECTED | REVISION_REQUESTED. Absent (a manifest
+                        written before this field existed) derives a safe
+                        fallback from the EXISTING publication/approval
+                        fields instead of blindly defaulting to
+                        DRAFT_READY -- see ``approval_stage``.
+    first_stage         True once any first-stage decision has been recorded
+    first_stage_at      ISO-8601 UTC timestamp of that decision
+    operator            the authorized Telegram sender_id that decided
+    source              "telegram"
+    pending_ledger_event  durable outbox marker: non-null only between a
+                        committed stage transition and its audit-ledger row
+                        actually landing -- see ``_persist_transition``.
+
+Two correctness properties proven by review of this module (PR #162):
+
+1. Once ``approval.stage`` changes on disk, the human is NEVER told the
+   transition didn't happen, even if the audit ledger append fails
+   afterward (a durable ``pending_ledger_event`` outbox marker recovers it
+   later -- opportunistically on the next access, or via an explicit
+   ``recover_pending_ledger_events()`` sweep).
+2. A legacy manifest with no ``approval.stage`` is NEVER treated as fresh
+   DRAFT_READY if it already reached second-stage publication, or if its
+   pre-existing fields make its true first-stage decision unrecoverable --
+   both fail closed instead of guessing.
 
 NO network. NO Zernio. NO model. NO secrets. Stdlib + existing NullOne
 bridge helpers only.
@@ -51,6 +68,7 @@ from nullone_approval_controller import (
     POST_ID_RE,
     STAGE_DRAFT_READY,
     STAGES,
+    TEXT_WRONG_STATE,
     handle_approval_callback,
 )
 from nullone_bridge_common import (
@@ -68,15 +86,28 @@ from nullone_story_supersession import review_post_lock
 # the dependency-free pure module.
 OUTCOME_REJECTED_NOT_FOUND = "REJECTED_NOT_FOUND"
 OUTCOME_REJECTED_STATE_CORRUPT = "REJECTED_STATE_CORRUPT"
+OUTCOME_REJECTED_LEGACY_UNSAFE = "REJECTED_LEGACY_UNSAFE"
 OUTCOME_PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
 
 TEXT_NOT_FOUND = "⛔ Bu draft tapılmadı. Heç nə dəyişmədi."
 TEXT_STATE_CORRUPT = (
     "⛔ Draft vəziyyəti oxuna bilmədi. Heç nə dəyişmədi."
 )
+# Reuses the existing wrong-state wording (nullone_approval_controller):
+# from the human's point of view "this legacy item can't be safely
+# actioned" and "this request doesn't match the current stage" are the
+# same situation -- no new vocabulary needed.
+TEXT_LEGACY_UNSAFE = TEXT_WRONG_STATE
 TEXT_PERSISTENCE_FAILED = (
     "⚠️ Nəticə yadda saxlanılmadı. Yenidən cəhd et."
 )
+
+
+class LegacyStageUnsafeError(BridgeError):
+    """A legacy (pre-approval.stage) manifest cannot be safely defaulted to
+    DRAFT_READY -- covers both proven-terminal (already published/attempted)
+    and ambiguous (some first-stage signal exists but which decision it was
+    is unrecoverable) legacy manifests. Both fail closed identically."""
 
 
 def _closed(outcome: str, text: str, stage: str) -> dict[str, Any]:
@@ -96,18 +127,170 @@ def _closed(outcome: str, text: str, stage: str) -> dict[str, Any]:
 
 
 def approval_stage(manifest: dict[str, Any]) -> str:
-    """Durable stage for one manifest. Absent field == DRAFT_READY.
+    """Durable stage for one manifest.
 
-    Raises BridgeError on a present-but-invalid value: a corrupted or
-    hand-edited field must never be silently coerced into a live stage.
+    A manifest written by this fix carries an explicit ``approval.stage``
+    and that value alone is authoritative -- present-but-invalid (corrupted
+    or hand-edited) raises BridgeError rather than being silently coerced.
+
+    A manifest written BEFORE this fix existed has no ``approval.stage`` at
+    all. Defaulting that blindly to DRAFT_READY is only safe for a manifest
+    that was genuinely never actioned. Using the EXISTING durable fields
+    already in the schema (no new meanings invented):
+
+    - ``publication.attempts >= 1`` or ``publication.state`` not in
+      (None, "NOT_REQUESTED") -- this manifest already went through the
+      second-stage publish flow. Proven terminal: fail closed
+      (LegacyStageUnsafeError), never DRAFT_READY.
+    - ``approval.final_publish is True`` or ``approval.first_stage is
+      True`` -- some first-stage/second-stage signal was recorded under
+      the old (pre-``stage``) mechanism, but WHICH decision it was
+      (approve vs reject vs revise) is not recoverable from these two
+      booleans alone. Ambiguous: fail closed (LegacyStageUnsafeError)
+      rather than guess.
+    - Otherwise -- first_stage is False/absent AND publication was never
+      attempted AND final_publish is False/absent -- this item was
+      genuinely never actioned. Safe: DRAFT_READY.
     """
-    approval = manifest.get("approval")
-    if not isinstance(approval, dict) or "stage" not in approval:
-        return STAGE_DRAFT_READY
-    stage = approval.get("stage")
-    if stage not in STAGES:
-        raise BridgeError(f"Invalid durable approval stage: {stage!r}")
-    return stage
+    approval = manifest.get("approval") or {}
+    if "stage" in approval:
+        stage = approval.get("stage")
+        if stage not in STAGES:
+            raise BridgeError(f"Invalid durable approval stage: {stage!r}")
+        return stage
+
+    publication = manifest.get("publication") or {}
+    attempts = publication.get("attempts", 0)
+    pub_state = publication.get("state")
+    if (isinstance(attempts, int) and attempts >= 1) or (
+        pub_state not in (None, "NOT_REQUESTED")
+    ):
+        raise LegacyStageUnsafeError(
+            "legacy manifest already reached second-stage publication "
+            f"(attempts={attempts!r}, state={pub_state!r})"
+        )
+    if approval.get("final_publish") is True or approval.get("first_stage") is True:
+        raise LegacyStageUnsafeError(
+            "legacy manifest carries an unrecoverable pre-stage approval signal"
+        )
+    return STAGE_DRAFT_READY
+
+
+def _ledger_record(manifest: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """The exact ledger row `record_approval_decision` would build -- kept
+    as a pure function so the SAME record can be embedded as a durable
+    outbox marker on the manifest and later replayed byte-identically."""
+    review = manifest.get("review") or {}
+    return {
+        "timestamp": now_iso(),
+        "event": "APPROVAL_DECISION",
+        "manifest_id": manifest.get("manifest_id"),
+        "candidate_id": manifest.get("candidate_id"),
+        "topic": manifest.get("topic"),
+        "topic_cluster": manifest.get("topic_cluster"),
+        "review_post_id": review.get("zernio_draft_id"),
+        "action": result.get("receipt", {}).get("action"),
+        "from_stage": result.get("from_stage"),
+        "to_stage": result.get("to_stage"),
+        "outcome": result.get("outcome"),
+    }
+
+
+def _flush_pending_ledger_event(
+    manifest_path: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Best-effort: if this manifest carries a pending (unflushed) ledger
+    event, retry appending it and clear the marker on success.
+
+    Idempotent and safe to call unconditionally on every access to this
+    manifest (opportunistic self-healing) or from an explicit restart-time
+    sweep (``recover_pending_ledger_events``). Never touches
+    ``approval.stage`` -- this only catches up the AUDIT trail, which lags
+    behind the (already-authoritative) manifest by construction. Must be
+    called while holding ``review_post_lock(post_id)``.
+
+    Returns the manifest as it now stands on disk (unchanged if there was
+    nothing pending, or if the flush attempt itself failed again).
+    """
+    approval = manifest.get("approval") or {}
+    pending = approval.get("pending_ledger_event")
+    if not pending:
+        return manifest
+    # Deliberately broad and never re-raised past this function: a failed
+    # (or partially failed) catch-up attempt must never turn an already-
+    # committed transition into a reported failure. Worst case on any
+    # exception here is exactly the pre-flush state -- marker stays
+    # pending, picked up by the next opportunistic access or an explicit
+    # recover_pending_ledger_events() sweep. append_jsonl_once is
+    # idempotent by content, so retrying a half-finished attempt (ledger
+    # row already written, marker-clear write failed) never duplicates
+    # the row.
+    try:
+        record_approval_decision(manifest, pending)
+        cleared_approval = dict(approval)
+        cleared_approval["pending_ledger_event"] = None
+        cleared_manifest = {**manifest, "approval": cleared_approval}
+        atomic_write_json(manifest_path, cleared_manifest)
+    except Exception:
+        # Return the manifest exactly as it still stands on disk (marker
+        # still pending) -- never claim a clear that didn't durably commit.
+        return manifest
+    return cleared_manifest
+
+
+def recover_pending_ledger_events(review_post_id: str | None = None) -> list[str]:
+    """Explicit restart/reboot recovery sweep: flush every manifest's
+    pending ledger event.
+
+    Safe to call at Gateway boot, from a periodic reconciliation job (the
+    existing pattern -- see ``nullone_state.reconcile``), or directly in
+    tests. Scans a single post when ``review_post_id`` is given, otherwise
+    every manifest in the workspace. Returns the review_post_ids that had a
+    pending event flushed.
+
+    ``pending_ledger_event`` records ARE the durable, recoverable marker
+    this scan needs: it never depends on any process-local queue.
+    """
+    import nullone_bridge_common as _common
+
+    flushed: list[str] = []
+    if review_post_id is not None:
+        try:
+            manifest_path, manifest = find_manifest_by_review_post_id(
+                review_post_id.lower()
+            )
+        except BridgeError:
+            return flushed
+        candidates = [(manifest_path, manifest, review_post_id.lower())]
+    else:
+        candidates = []
+        for manifest_path in sorted(_common.MANIFEST_DIR.glob("*.json")):
+            try:
+                _, manifest = _common.load_manifest(manifest_path)
+            except Exception:
+                continue
+            post_id = (manifest.get("review") or {}).get("zernio_draft_id")
+            if isinstance(post_id, str) and POST_ID_RE.match(post_id):
+                candidates.append((manifest_path, manifest, post_id.lower()))
+
+    for manifest_path, manifest, post_id in candidates:
+        approval = manifest.get("approval") or {}
+        if not approval.get("pending_ledger_event"):
+            continue
+        with review_post_lock(post_id):
+            # Re-read under the lock: the marker may have already been
+            # flushed by another caller between the scan above and here.
+            try:
+                manifest_path, manifest = find_manifest_by_review_post_id(post_id)
+            except BridgeError:
+                continue
+            before = (manifest.get("approval") or {}).get("pending_ledger_event")
+            if not before:
+                continue
+            after = _flush_pending_ledger_event(manifest_path, manifest)
+            if not (after.get("approval") or {}).get("pending_ledger_event"):
+                flushed.append(post_id)
+    return flushed
 
 
 def _persist_transition(
@@ -115,16 +298,47 @@ def _persist_transition(
     manifest: dict[str, Any],
     result: dict[str, Any],
     sender_id: Any,
-) -> None:
+) -> dict[str, Any]:
+    """Commit a real stage transition durably, then catch the audit ledger
+    up to it -- in that exact order, and never the other way around.
+
+    Ordering (this is the fix for the manifest/ledger split-brain a prior
+    review found):
+
+    1. Build the ledger record.
+    2. ONE atomic write: the new ``approval.stage`` AND the ledger record
+       as ``approval.pending_ledger_event`` land in the SAME manifest
+       write. The instant this write is durable, the transition is
+       committed AND the audit event is durably queued -- there is no
+       window where the stage changed but the outbox marker doesn't exist
+       yet, and no window where the marker exists without the stage having
+       changed.
+    3. Best-effort: append the ledger row and clear the marker
+       (``_flush_pending_ledger_event``). If this fails (or the process
+       dies before it runs at all), the marker stays on the manifest and
+       is recovered later -- by the next callback for this post
+       (opportunistic) or by ``recover_pending_ledger_events`` (explicit
+       sweep) -- never lost, never duplicated (``append_jsonl_once`` is
+       idempotent by content).
+
+    Only step 2 can produce ``NO_FALSE_SUCCESS_IF_AUTHORITATIVE_MANIFEST_
+    WRITE_FAILS``-relevant PERSISTENCE_FAILED: if it raises, the caller
+    (below) still reports failure and current_stage is genuinely
+    unchanged. Step 3 never raises and never changes what gets reported to
+    the human -- the transition already stands once step 2 committed.
+    """
+    record = _ledger_record(manifest, result)
     approval = dict(manifest.get("approval") or {})
     approval["stage"] = result["to_stage"]
     approval["first_stage"] = True
     approval["first_stage_at"] = now_iso()
     approval["operator"] = str(sender_id) if isinstance(sender_id, (str, int)) else None
     approval["source"] = "telegram"
+    approval["pending_ledger_event"] = record
     manifest = {**manifest, "approval": approval}
-    atomic_write_json(manifest_path, manifest)
-    record_approval_decision(manifest, result)
+    atomic_write_json(manifest_path, manifest)  # <-- transition is now durable
+
+    return _flush_pending_ledger_event(manifest_path, manifest)
 
 
 def handle_durable_approval_callback(
@@ -174,8 +388,18 @@ def handle_durable_approval_callback(
         except BridgeError:
             return _closed(OUTCOME_REJECTED_NOT_FOUND, TEXT_NOT_FOUND, STAGE_DRAFT_READY)
 
+        # Opportunistic self-healing: catch up any audit ledger row left
+        # pending by a prior transition (e.g. the process died between the
+        # manifest write and the ledger append) before doing anything else.
+        # Never touches approval.stage; safe on every access.
+        manifest = _flush_pending_ledger_event(manifest_path, manifest)
+
         try:
             current_stage = approval_stage(manifest)
+        except LegacyStageUnsafeError:
+            return _closed(
+                OUTCOME_REJECTED_LEGACY_UNSAFE, TEXT_LEGACY_UNSAFE, STAGE_DRAFT_READY
+            )
         except BridgeError:
             return _closed(
                 OUTCOME_REJECTED_STATE_CORRUPT, TEXT_STATE_CORRUPT, STAGE_DRAFT_READY
@@ -359,10 +583,21 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["self-test"])
+    parser.add_argument("command", choices=["self-test", "recover-pending"])
+    parser.add_argument(
+        "--review-post-id",
+        default=None,
+        help="Recover only this post; default scans every manifest.",
+    )
     args = parser.parse_args(argv)
     if args.command == "self-test":
         self_test()
+        return 0
+    if args.command == "recover-pending":
+        flushed = recover_pending_ledger_events(args.review_post_id)
+        print(f"RECOVERED_COUNT={len(flushed)}")
+        for post_id in flushed:
+            print(f"RECOVERED_REVIEW_POST_ID={post_id}")
         return 0
     return 2
 

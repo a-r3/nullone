@@ -68,6 +68,7 @@ COMMANDS = [
     [sys.executable, "tests/test_story_wakeup_expected_gate.py"],
     [sys.executable, "tests/test_publish_ipc.py"],
     [sys.executable, "tests/test_deterministic_approval.py"],
+    [sys.executable, "tests/test_approval_durable.py"],
     [sys.executable, "tests/test_deterministic_heartbeat.py"],
     [sys.executable, "tests/test_publish_receipt.py"],
     [sys.executable, "tests/test_final_publish_controller.py"],

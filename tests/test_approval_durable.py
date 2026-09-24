@@ -386,5 +386,324 @@ class PersistenceFailureFailsClosedTests(unittest.TestCase):
             self.assertEqual(retry["to_stage"], "REJECTED")
 
 
+class LedgerOutboxRecoveryTests(unittest.TestCase):
+    """Blocker 1 (PR #162 review): a ledger-append failure AFTER a
+    successful manifest write used to be reported to the human as
+    PERSISTENCE_FAILED ("nothing changed") while the manifest had actually
+    already transitioned, and the audit row was permanently lost. Fixed via
+    a durable pending_ledger_event outbox marker committed in the SAME
+    atomic write as the stage transition."""
+
+    def _break_ledger(self):
+        original = durable.record_approval_decision
+
+        def boom(*_args, **_kwargs):
+            raise OSError("synthetic ledger disk failure")
+
+        durable.record_approval_decision = boom
+        return original
+
+    def _restore_ledger(self, original):
+        durable.record_approval_decision = original
+
+    def test_MANIFEST_WRITE_SUCCESS_LEDGER_FAILURE_DOES_NOT_LIE_TO_HUMAN(self):
+        with IsolatedWorkspace() as root:
+            path = make_manifest(root)
+            original = self._break_ledger()
+            try:
+                result = call("reject")
+            finally:
+                self._restore_ledger(original)
+
+            # The human must be told the truth: the transition happened.
+            self.assertEqual(result["outcome"], "TRANSITIONED")
+            self.assertEqual(result["to_stage"], "REJECTED")
+            self.assertEqual(result["reply"]["text"], "❌ İmtina edildi. Heç nə yayımlanmadı.")
+            _, manifest = common.load_manifest(path)
+            self.assertEqual(manifest["approval"]["stage"], "REJECTED")
+
+    def test_LEDGER_FAILURE_LEAVES_RECOVERABLE_DURABLE_MARKER(self):
+        with IsolatedWorkspace() as root:
+            path = make_manifest(root)
+            original = self._break_ledger()
+            try:
+                call("reject")
+            finally:
+                self._restore_ledger(original)
+
+            _, manifest = common.load_manifest(path)
+            pending = manifest["approval"].get("pending_ledger_event")
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending["to_stage"], "REJECTED")
+            self.assertEqual(pending["review_post_id"], POST)
+            # And, matching the bug this fixes: the ledger itself is still
+            # missing the row until recovery runs.
+            rows = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            self.assertEqual(len([r for r in rows if r.get("event") == "APPROVAL_DECISION"]), 0)
+
+    def test_RESTART_RECOVERS_PENDING_LEDGER_EVENT(self):
+        with IsolatedWorkspace() as root:
+            path = make_manifest(root)
+            original = self._break_ledger()
+            try:
+                call("reject")
+            finally:
+                self._restore_ledger(original)
+
+            # "Restart": fresh module import, no in-memory state carried
+            # over, then the explicit recovery sweep (also how a real
+            # Gateway boot or periodic reconciliation job would call this).
+            for name in list(sys.modules):
+                if name == "nullone_approval_durable":
+                    del sys.modules[name]
+            import nullone_approval_durable as fresh_durable
+
+            flushed = fresh_durable.recover_pending_ledger_events()
+            self.assertIn(POST, flushed)
+
+            _, manifest = common.load_manifest(path)
+            self.assertIsNone(manifest["approval"].get("pending_ledger_event"))
+            rows = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            approval_rows = [r for r in rows if r.get("event") == "APPROVAL_DECISION"]
+            self.assertEqual(len(approval_rows), 1)
+            self.assertEqual(approval_rows[0]["to_stage"], "REJECTED")
+
+    def test_RESTART_RECOVERS_VIA_NEXT_OPPORTUNISTIC_ACCESS(self):
+        """Recovery doesn't require the explicit sweep either: the very
+        next callback for the same post opportunistically flushes it."""
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            original = self._break_ledger()
+            try:
+                call("reject")
+            finally:
+                self._restore_ledger(original)
+
+            rows_before = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            self.assertEqual(len(rows_before), 0)
+
+            # A later callback for the SAME (now-terminal) post -- e.g. a
+            # replayed old button press -- opportunistically flushes the
+            # pending event before doing anything else.
+            replay = call("reject")
+            self.assertEqual(replay["outcome"], "CONVERGED")
+            rows_after = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            approval_rows = [r for r in rows_after if r.get("event") == "APPROVAL_DECISION"]
+            self.assertEqual(len(approval_rows), 1)
+
+    def test_RETRY_DOES_NOT_DUPLICATE_LEDGER_EVENT(self):
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            original = self._break_ledger()
+            try:
+                call("reject")
+            finally:
+                self._restore_ledger(original)
+
+            # Recover twice in a row (e.g. two overlapping sweeps, or a
+            # sweep racing an opportunistic flush) -- idempotent either way.
+            durable.recover_pending_ledger_events()
+            durable.recover_pending_ledger_events()
+            durable.recover_pending_ledger_events(POST)
+
+            rows = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            approval_rows = [r for r in rows if r.get("event") == "APPROVAL_DECISION"]
+            self.assertEqual(len(approval_rows), 1)
+
+    def test_SUCCESS_CLEARS_PENDING_AUDIT_STATE(self):
+        with IsolatedWorkspace() as root:
+            path = make_manifest(root)
+            # Normal path: ledger append succeeds first try.
+            call("reject")
+            _, manifest = common.load_manifest(path)
+            self.assertIsNone(manifest["approval"].get("pending_ledger_event"))
+            self.assertEqual(manifest["approval"]["stage"], "REJECTED")
+            rows = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            self.assertEqual(len([r for r in rows if r.get("event") == "APPROVAL_DECISION"]), 1)
+
+    def test_MANIFEST_FAILURE_DOES_NOT_APPEND_LEDGER(self):
+        with IsolatedWorkspace() as root:
+            make_manifest(root)
+            original_write = durable.atomic_write_json
+
+            def boom(*_args, **_kwargs):
+                raise OSError("synthetic disk failure")
+
+            durable.atomic_write_json = boom
+            try:
+                result = call("reject")
+            finally:
+                durable.atomic_write_json = original_write
+
+            self.assertEqual(result["outcome"], durable.OUTCOME_PERSISTENCE_FAILED)
+            rows = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            self.assertEqual(len(rows), 0)
+
+    def test_NO_FALSE_SUCCESS_IF_AUTHORITATIVE_MANIFEST_WRITE_FAILS(self):
+        with IsolatedWorkspace() as root:
+            path = make_manifest(root)
+            original_write = durable.atomic_write_json
+
+            def boom(*_args, **_kwargs):
+                raise OSError("synthetic disk failure")
+
+            durable.atomic_write_json = boom
+            try:
+                result = call("reject")
+            finally:
+                durable.atomic_write_json = original_write
+
+            self.assertNotEqual(result["reply"]["text"], "❌ İmtina edildi. Heç nə yayımlanmadı.")
+            self.assertEqual(result["to_stage"], "DRAFT_READY")
+            _, manifest = common.load_manifest(path)
+            self.assertNotIn("stage", manifest["approval"])
+
+
+class LegacyManifestProtectionTests(unittest.TestCase):
+    """Blocker 2 (PR #162 review): production has 29 manifests predating
+    approval.stage, 9 of which are already published/attempted. Defaulting
+    an absent approval.stage straight to DRAFT_READY let a stray callback
+    on one of those old approval cards mutate an already-published
+    manifest's approval state. Fixed by deriving a safe fallback from the
+    EXISTING publication/approval fields instead."""
+
+    def _legacy_manifest(self, root: Path, *, publication_overrides=None, approval_overrides=None):
+        path = make_manifest(root)
+        _, manifest = common.load_manifest(path)
+        if publication_overrides:
+            manifest["publication"].update(publication_overrides)
+        if approval_overrides:
+            manifest["approval"].update(approval_overrides)
+        common.atomic_write_json(path, manifest)
+        return path
+
+    def test_LEGACY_PUBLISHED_FIRST_STAGE_CALLBACK_FAILS_CLOSED(self):
+        with IsolatedWorkspace() as root:
+            path = self._legacy_manifest(
+                root,
+                publication_overrides={"attempts": 1, "state": "PUBLISHED"},
+                approval_overrides={"first_stage": True},
+            )
+            for action in ("approve", "reject", "revise", "back"):
+                result = call(action)
+                self.assertEqual(result["outcome"], durable.OUTCOME_REJECTED_LEGACY_UNSAFE, action)
+            _, manifest = common.load_manifest(path)
+            self.assertNotIn("stage", manifest["approval"])
+            self.assertEqual(manifest["publication"]["state"], "PUBLISHED")
+
+    def test_LEGACY_ATTEMPTED_FIRST_STAGE_CALLBACK_FAILS_CLOSED(self):
+        # Attempted but NOT published (e.g. FAILED/UNKNOWN/CHECK_REQUIRED) --
+        # attempts>=1 alone is enough, regardless of the exact terminal state.
+        for state in ("FAILED", "UNKNOWN", "CHECK_REQUIRED", "PUBLISHING"):
+            with IsolatedWorkspace() as root:
+                self._legacy_manifest(
+                    root,
+                    publication_overrides={"attempts": 1, "state": state},
+                    approval_overrides={"first_stage": True},
+                )
+                result = call("reject")
+                self.assertEqual(
+                    result["outcome"], durable.OUTCOME_REJECTED_LEGACY_UNSAFE, state
+                )
+
+    def test_LEGACY_PENDING_MANIFEST_READS_DRAFT_READY(self):
+        with IsolatedWorkspace() as root:
+            # Genuinely untouched legacy manifest: no approval.stage, never
+            # attempted publication, no prior first-stage signal.
+            self._legacy_manifest(root)
+            result = call("reject")
+            self.assertEqual(result["outcome"], "TRANSITIONED")
+            self.assertEqual(result["to_stage"], "REJECTED")
+
+    def test_LEGACY_APPROVED_FIELDS_DERIVE_CORRECT_STAGE_IF_SUPPORTED(self):
+        # No legacy field distinguishes "approved" from "rejected" from
+        # "revised" -- only the generic first_stage/final_publish booleans
+        # exist pre-dating approval.stage. Inventing a specific derived
+        # stage from an ambiguous signal would be guessing, which the
+        # review explicitly ruled out ("fail closed rather than DRAFT_READY
+        # ... do not invent new meanings"). Verify the fail-closed path
+        # instead of a fabricated APPROVED-equivalent stage.
+        with IsolatedWorkspace() as root:
+            self._legacy_manifest(
+                root,
+                approval_overrides={"first_stage": True, "final_publish": True},
+            )
+            result = call("approve")
+            self.assertEqual(result["outcome"], durable.OUTCOME_REJECTED_LEGACY_UNSAFE)
+
+    def test_LEGACY_REJECTED_FIELDS_DERIVE_CORRECT_STAGE_IF_SUPPORTED(self):
+        # Same reasoning as above for the reject direction: first_stage=True
+        # with no publication activity and no stage field is ambiguous
+        # (could have been approve, reject, or revise) -- fails closed
+        # rather than guessing REJECTED.
+        with IsolatedWorkspace() as root:
+            self._legacy_manifest(root, approval_overrides={"first_stage": True})
+            result = call("reject")
+            self.assertEqual(result["outcome"], durable.OUTCOME_REJECTED_LEGACY_UNSAFE)
+
+    def test_NO_TERMINAL_ITEM_CAN_BE_RESURRECTED_BY_STALE_CALLBACK(self):
+        with IsolatedWorkspace() as root:
+            path = self._legacy_manifest(
+                root,
+                publication_overrides={"attempts": 1, "state": "PUBLISHED"},
+                approval_overrides={"first_stage": True},
+            )
+            before = path.stat().st_mtime_ns
+            result = call("reject")
+            self.assertEqual(result["outcome"], durable.OUTCOME_REJECTED_LEGACY_UNSAFE)
+            after = path.stat().st_mtime_ns
+            self.assertEqual(before, after, "a fail-closed legacy rejection must never write")
+            rows = read_jsonl(root / "social/state/topic-ledger.jsonl")
+            self.assertEqual(len(rows), 0)
+
+    def test_real_production_manifests_are_correctly_classified(self):
+        """Cross-checks the fix against the ACTUAL production manifest
+        directory (read-only) -- the exact 9/20 split the PR #162 review
+        found. Skips gracefully if that directory isn't present (e.g. CI)."""
+        import json
+
+        real_dir = Path("/home/oem/.openclaw/workspace/social/ops/manifests")
+        if not real_dir.is_dir():
+            self.skipTest("production manifest directory not present in this environment")
+        safe = 0
+        blocked = 0
+        for p in sorted(real_dir.glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            approval = data.get("approval") or {}
+            if "stage" in approval:
+                continue
+            try:
+                durable.approval_stage(data)
+                safe += 1
+            except durable.LegacyStageUnsafeError:
+                blocked += 1
+            except common.BridgeError:
+                blocked += 1
+        # Not asserting exact counts (production data changes over time);
+        # asserting the INVARIANT the fix must uphold: every already-
+        # published/attempted legacy manifest is blocked, none silently
+        # pass through as DRAFT_READY.
+        for p in sorted(real_dir.glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            approval = data.get("approval") or {}
+            if "stage" in approval:
+                continue
+            pub = data.get("publication") or {}
+            attempts = pub.get("attempts", 0)
+            pub_state = pub.get("state")
+            already_published = (isinstance(attempts, int) and attempts >= 1) or (
+                pub_state not in (None, "NOT_REQUESTED")
+            )
+            if already_published:
+                with self.assertRaises(durable.LegacyStageUnsafeError, msg=p.name):
+                    durable.approval_stage(data)
+
+
 if __name__ == "__main__":
     unittest.main()
