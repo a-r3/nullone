@@ -128,19 +128,18 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
                 raise BridgeError(
                     "PACKAGING_INPUT_INVALID: typography receipt takes no image source; smuggling blocked"
                 )
-            source = _neutral_background(root)
-        _run_renderer(
-            [
-                sys.executable,
-                str(FEED_RENDERER),
-                "--source", source,
-                "--kicker", args.kicker,
-                "--headline", args.headline,
-                "--stat", args.stat or "",
-                "--source-name", args.source_name,
-                "--output", str(output),
-            ]
-        )
+            source = None
+        argv = [sys.executable, str(FEED_RENDERER)]
+        if source is not None:
+            argv += ["--source", source]
+        argv += [
+            "--kicker", args.kicker,
+            "--headline", args.headline,
+            "--stat", args.stat or "",
+            "--source-name", args.source_name,
+            "--output", str(output),
+        ]
+        _run_renderer(argv)
         if not output.is_file():
             raise BridgeError("PACKAGING_RENDER_FAILED: feed output missing")
         _write_render_record(
@@ -181,27 +180,6 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         print(f"RENDER_FORMAT=CAROUSEL SLIDES={len(slides)} OUTPUT={output}")
         return 0
     raise BridgeError(f"PACKAGING_DECISION_MISMATCH: unknown FORMAT_DECISION {decision!r}")
-
-
-def _neutral_background(root: Path) -> str:
-    """Deterministic neutral canvas for typography receipts.
-
-    The V2 feed renderer always composites over a source image, but a
-    typography receipt claims no photo evidence -- so no agent-supplied
-    image may be used. This generates a fresh blank canvas per
-    invocation under the system temp dir (never persisted into the
-    workspace, never agent-addressable), closing the smuggling surface
-    without inventing evidentiary imagery.
-    """
-
-    import tempfile
-
-    from PIL import Image
-
-    tmpdir = Path(tempfile.mkdtemp(prefix="nullone-neutral-bg-"))
-    canvas = tmpdir / "neutral-bg.png"
-    Image.new("RGB", (1080, 1350), (15, 15, 15)).save(canvas)
-    return str(canvas)
 
 
 def _write_render_record(*, candidate_id: str, receipt: dict[str, Any], format_decision: str,
