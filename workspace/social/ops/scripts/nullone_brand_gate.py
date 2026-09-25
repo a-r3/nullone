@@ -42,6 +42,14 @@ MIN_MARGIN_PX = 90
 # evaluable from the metadata sidecar alone, with no renderer import.
 MIN_TYPOGRAPHY_COVERAGE = 0.45
 
+# See render_texbrif_v2.MIN_PHOTO_REGION_STDDEV -- same independence
+# rationale. Closes the SOURCE_PHOTO false-pass gap: `has_photo=True`
+# only ever meant "a --source path was given and loaded without error",
+# never "the composited region actually carries real visual content".
+# A near-uniform/blank/placeholder source now fails PHOTO_REGION_
+# MEANINGFUL even though VISUAL_REGION_PRESENT still (correctly) passes.
+MIN_PHOTO_REGION_STDDEV = 14.0
+
 VISUAL_STYLES = frozenset(
     {"REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION", "EDITORIAL_TYPOGRAPHY", "BRANDED_GRAPHIC"}
 )
@@ -58,11 +66,15 @@ BASE_CHECKS = (
 
 # Per-style checks added on top of BASE_CHECKS.
 STYLE_EXTRA_CHECKS: dict[str, tuple[str, ...]] = {
-    "REAL_PHOTO": ("VISUAL_REGION_PRESENT",),
-    "SOURCE_SCREENSHOT": ("VISUAL_REGION_PRESENT",),
-    "DATA_VISUALIZATION": ("VISUAL_REGION_PRESENT",),
+    "REAL_PHOTO": ("VISUAL_REGION_PRESENT", "PHOTO_REGION_MEANINGFUL"),
+    "SOURCE_SCREENSHOT": ("VISUAL_REGION_PRESENT", "PHOTO_REGION_MEANINGFUL"),
+    "DATA_VISUALIZATION": ("VISUAL_REGION_PRESENT", "PHOTO_REGION_MEANINGFUL"),
     "EDITORIAL_TYPOGRAPHY": ("CONTENT_COVERAGE_SUFFICIENT",),
-    "BRANDED_GRAPHIC": ("CONTENT_COVERAGE_SUFFICIENT",),
+    # BRANDED_GRAPHIC additionally requires real editorial substance (a
+    # stat or a deck line) beyond headline + motif -- see
+    # CONTENT_DENSITY_SUFFICIENT: "A branded graphic cannot merely be
+    # headline + decorative shape + empty space."
+    "BRANDED_GRAPHIC": ("CONTENT_COVERAGE_SUFFICIENT", "CONTENT_DENSITY_SUFFICIENT"),
 }
 
 REQUIRED_METADATA_FIELDS = (
@@ -76,6 +88,9 @@ REQUIRED_METADATA_FIELDS = (
     "brand_mark_opacity",
     "text_bounds_valid",
     "content_coverage_ratio",
+    "deck_present",
+    "photo_region_stddev",
+    "photo_source_sha256",
 )
 
 
@@ -108,7 +123,9 @@ def evaluate_brand_gate(metadata: dict[str, Any]) -> dict[str, Any]:
 
     stat_present = bool(metadata["stat_present"])
     has_photo = bool(metadata["has_photo"])
+    deck_present = bool(metadata["deck_present"])
     coverage = metadata["content_coverage_ratio"]
+    photo_stddev = metadata["photo_region_stddev"]
 
     checks = {
         # Vacuously compliant when there is no stat to color.
@@ -130,11 +147,27 @@ def evaluate_brand_gate(metadata: dict[str, Any]) -> dict[str, Any]:
         # must actually have composited a hero visual region, not a
         # typography layout mislabeled with an evidence style.
         "VISUAL_REGION_PRESENT": has_photo,
+        # A photo region existing is not the same as it carrying real
+        # visual content: a blank/solid/placeholder source also sets
+        # has_photo=True. Requires the renderer's own measured pixel
+        # variance on the exact composited region to clear a floor well
+        # below genuine photo/screenshot variance -- the false-pass this
+        # check exists to close (a near-empty/dark placeholder region
+        # reported as SOURCE_PHOTO/REAL_PHOTO).
+        "PHOTO_REGION_MEANINGFUL": (
+            isinstance(photo_stddev, (int, float)) and photo_stddev >= MIN_PHOTO_REGION_STDDEV
+        ),
         # EDITORIAL_TYPOGRAPHY/BRANDED_GRAPHIC: the typography band must
         # not read as an empty canvas (2026-09-25 production incident).
         "CONTENT_COVERAGE_SUFFICIENT": (
             isinstance(coverage, (int, float)) and coverage >= MIN_TYPOGRAPHY_COVERAGE
         ),
+        # BRANDED_GRAPHIC only: headline + decorative motif alone is not
+        # a complete editorial card -- at least one of a verified stat
+        # or a supporting deck line must be present. Never satisfied by
+        # inventing text; if upstream genuinely has neither, this style
+        # must not be chosen (fail closed rather than ship a thin card).
+        "CONTENT_DENSITY_SUFFICIENT": stat_present or deck_present,
     }
 
     required = _required_checks(visual_style)
@@ -163,6 +196,9 @@ def self_test() -> int:
         "brand_mark_opacity": 170,
         "text_bounds_valid": True,
         "content_coverage_ratio": 0.6,
+        "deck_present": False,
+        "photo_region_stddev": None,
+        "photo_source_sha256": None,
     }
     result = evaluate_brand_gate(compliant_typography)
     assert result["BRAND_GATE"] == "PASS", result
@@ -175,19 +211,35 @@ def self_test() -> int:
     assert result["BRAND_GATE"] == "BLOCKED", result
     assert "CONTENT_COVERAGE_SUFFICIENT" in result["BRAND_GATE_REASON"], result
 
-    # A branded-graphic render with the motif filling the band passes.
+    # A branded-graphic render with the motif filling the band, plus a
+    # stat (content density), passes.
     branded = dict(
         compliant_typography, visual_style="BRANDED_GRAPHIC", content_coverage_ratio=0.96
     )
     assert evaluate_brand_gate(branded)["BRAND_GATE"] == "PASS"
 
-    # A real-photo render needs has_photo=True regardless of coverage
+    # BRANDED_GRAPHIC with no stat AND no deck -- headline + motif alone
+    # -- is not a complete editorial card and must BLOCK (Blocker 3:
+    # "cannot merely be headline + decorative shape + empty space").
+    thin_branded = dict(branded, stat_present=False, stat_color=None, deck_present=False)
+    result = evaluate_brand_gate(thin_branded)
+    assert result["BRAND_GATE"] == "BLOCKED", result
+    assert "CONTENT_DENSITY_SUFFICIENT" in result["BRAND_GATE_REASON"], result
+
+    # A deck line alone (no stat) is sufficient content density.
+    deck_only_branded = dict(branded, stat_present=False, stat_color=None, deck_present=True)
+    assert evaluate_brand_gate(deck_only_branded)["BRAND_GATE"] == "PASS"
+
+    # A real-photo render needs has_photo=True AND a genuinely varied
+    # (non-placeholder) composited region, regardless of coverage
     # (coverage is not computed/meaningful for photo-backed styles).
     photo = dict(
         compliant_typography,
         visual_style="REAL_PHOTO",
         has_photo=True,
         content_coverage_ratio=None,
+        photo_region_stddev=42.0,
+        photo_source_sha256="a" * 64,
     )
     assert evaluate_brand_gate(photo)["BRAND_GATE"] == "PASS"
     mislabeled = dict(photo, has_photo=False)
@@ -195,7 +247,22 @@ def self_test() -> int:
     assert result["BRAND_GATE"] == "BLOCKED"
     assert "VISUAL_REGION_PRESENT" in result["BRAND_GATE_REASON"], result
 
-    data_viz = dict(compliant_typography, visual_style="DATA_VISUALIZATION", has_photo=True)
+    # The exact 2026-09-25-shaped SOURCE_PHOTO false pass: has_photo=True
+    # (a --source loaded without error) but the composited region is a
+    # near-blank/placeholder panel -- must BLOCK even though
+    # VISUAL_REGION_PRESENT alone would pass.
+    blank_photo = dict(photo, photo_region_stddev=0.4)
+    result = evaluate_brand_gate(blank_photo)
+    assert result["BRAND_GATE"] == "BLOCKED", result
+    assert "PHOTO_REGION_MEANINGFUL" in result["BRAND_GATE_REASON"], result
+    assert "VISUAL_REGION_PRESENT" not in result["BRAND_GATE_REASON"], result
+
+    data_viz = dict(
+        compliant_typography,
+        visual_style="DATA_VISUALIZATION",
+        has_photo=True,
+        photo_region_stddev=30.0,
+    )
     assert evaluate_brand_gate(data_viz)["BRAND_GATE"] == "PASS"
 
     # Structural failures now block regardless of stat presence (the old

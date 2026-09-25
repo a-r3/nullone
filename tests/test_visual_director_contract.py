@@ -230,6 +230,9 @@ class TypographyContentTests(unittest.TestCase):
             "brand_mark_opacity": 170,
             "text_bounds_valid": True,
             "content_coverage_ratio": 0.34,
+            "deck_present": False,
+            "photo_region_stddev": None,
+            "photo_source_sha256": None,
         }
         result = evaluate_brand_gate(production_incident_metadata)
         self.assertEqual(result["BRAND_GATE"], "BLOCKED")

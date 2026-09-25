@@ -219,6 +219,87 @@ class BrandGateIntegrationTests(RenderTestCase):
             dispatcher._enforce_brand_gate(out, root=ROOT)
         self.assertIn("BRAND_GATE_BLOCKED", str(ctx.exception))
 
+    def _make_image(self, name: str, *, noisy: bool, seed: int = 7) -> Path:
+        from PIL import Image
+        import random
+
+        path = self.work / name
+        img = Image.new("RGB", (400, 300))
+        px = img.load()
+        rng = random.Random(seed)
+        for x in range(400):
+            for y in range(300):
+                px[x, y] = (
+                    (rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255))
+                    if noisy
+                    else (18, 18, 19)
+                )
+        img.save(path)
+        return path
+
+    def test_gate_blocks_real_photo_render_with_near_blank_source(self):
+        """End-to-end reproduction of the 2026-09-25-shaped SOURCE_PHOTO
+        false pass: a real, hash-valid, successfully-loaded source file
+        that is nonetheless a near-blank placeholder must BLOCK through
+        the actual renderer + dispatcher path, not just the pure gate
+        function."""
+        blank_source = self._make_image("blank.png", noisy=False)
+        out = self.work / "photo.png"
+        cp = run_renderer(
+            "--source", str(blank_source),
+            "--kicker", "Faktlar", "--headline", "Başlıq", "--stat", "55%",
+            "--source-name", "Mənbə", "--output", str(out),
+            "--visual-style", "REAL_PHOTO",
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        with self.assertRaises(BridgeError) as ctx:
+            dispatcher._enforce_brand_gate(out, root=self.work, source=str(blank_source))
+        self.assertIn("PHOTO_REGION_MEANINGFUL", str(ctx.exception))
+
+    def test_gate_passes_real_photo_render_with_genuine_source_and_verifies_provenance(self):
+        noisy_source = self._make_image("real.png", noisy=True)
+        out = self.work / "photo.png"
+        cp = run_renderer(
+            "--source", str(noisy_source),
+            "--kicker", "Faktlar", "--headline", "Başlıq", "--stat", "55%",
+            "--source-name", "Mənbə", "--output", str(out),
+            "--visual-style", "REAL_PHOTO",
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        dispatcher._enforce_brand_gate(out, root=self.work, source=str(noisy_source))
+
+    def test_gate_blocks_on_photo_provenance_mismatch(self):
+        """The renderer's reported source hash must match the exact file
+        the dispatcher believes it passed -- otherwise a substituted
+        asset could reach production undetected."""
+        noisy_source = self._make_image("real.png", noisy=True, seed=7)
+        other_source = self._make_image("other.png", noisy=True, seed=99)
+        out = self.work / "photo.png"
+        cp = run_renderer(
+            "--source", str(noisy_source),
+            "--kicker", "Faktlar", "--headline", "Başlıq", "--stat", "55%",
+            "--source-name", "Mənbə", "--output", str(out),
+            "--visual-style", "REAL_PHOTO",
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        with self.assertRaises(BridgeError) as ctx:
+            dispatcher._enforce_brand_gate(out, root=self.work, source=str(other_source))
+        self.assertIn("PHOTO_PROVENANCE_MISMATCH", str(ctx.exception))
+
+    def test_deck_line_renders_and_reports_in_metadata(self):
+        out = self.work / "deck.png"
+        cp = run_renderer(
+            "--kicker", "Faktlar", "--headline", "Başlıq", "--stat", "55%",
+            "--deck", "Dəstəkləyici kontekst sətri",
+            "--source-name", "Mənbə", "--output", str(out),
+            "--visual-style", "BRANDED_GRAPHIC",
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        metadata_path = out.with_suffix(out.suffix + ".brand.json")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertTrue(metadata["deck_present"])
+        dispatcher._enforce_brand_gate(out, root=ROOT)
+
     def test_pure_gate_function_matrix(self):
         base = {
             "schema": "nullone.render-brand-metadata.v1",
@@ -232,6 +313,9 @@ class BrandGateIntegrationTests(RenderTestCase):
             "brand_mark_opacity": 170,
             "text_bounds_valid": True,
             "content_coverage_ratio": 0.6,
+            "deck_present": False,
+            "photo_region_stddev": None,
+            "photo_source_sha256": None,
         }
         self.assertEqual(evaluate_brand_gate(base)["BRAND_GATE"], "PASS")
         for field, bad_value, reason in (
@@ -270,31 +354,72 @@ class TemplateAwareBrandGateTests(unittest.TestCase):
             "brand_mark_opacity": 170,
             "text_bounds_valid": True,
             "content_coverage_ratio": 0.7,
+            "deck_present": False,
+            "photo_region_stddev": None,
+            "photo_source_sha256": None,
         }
         base.update(overrides)
         return base
 
     def test_brand_gate_source_photo_requires_visual_region(self):
-        metadata = self._base(visual_style="REAL_PHOTO", has_photo=True, content_coverage_ratio=None)
+        metadata = self._base(
+            visual_style="REAL_PHOTO", has_photo=True, content_coverage_ratio=None,
+            photo_region_stddev=40.0, photo_source_sha256="a" * 64,
+        )
         self.assertEqual(evaluate_brand_gate(metadata)["BRAND_GATE"], "PASS")
         no_region = dict(metadata, has_photo=False)
         result = evaluate_brand_gate(no_region)
         self.assertEqual(result["BRAND_GATE"], "BLOCKED")
         self.assertIn("VISUAL_REGION_PRESENT", result["BRAND_GATE_REASON"])
 
+    def test_brand_gate_source_photo_requires_meaningful_content(self):
+        """The 2026-09-25-shaped false pass: has_photo=True (a --source
+        loaded without error) but the composited region is a near-blank
+        placeholder -- must BLOCK even though VISUAL_REGION_PRESENT
+        alone would still pass."""
+        metadata = self._base(
+            visual_style="REAL_PHOTO", has_photo=True, content_coverage_ratio=None,
+            photo_region_stddev=0.3, photo_source_sha256="a" * 64,
+        )
+        result = evaluate_brand_gate(metadata)
+        self.assertEqual(result["BRAND_GATE"], "BLOCKED")
+        self.assertIn("PHOTO_REGION_MEANINGFUL", result["BRAND_GATE_REASON"])
+        self.assertNotIn("VISUAL_REGION_PRESENT", result["BRAND_GATE_REASON"])
+
     def test_brand_gate_data_visualization_requires_visual_region(self):
-        metadata = self._base(visual_style="DATA_VISUALIZATION", has_photo=True, content_coverage_ratio=None)
+        metadata = self._base(
+            visual_style="DATA_VISUALIZATION", has_photo=True, content_coverage_ratio=None,
+            photo_region_stddev=25.0, photo_source_sha256="b" * 64,
+        )
         self.assertEqual(evaluate_brand_gate(metadata)["BRAND_GATE"], "PASS")
         no_region = dict(metadata, has_photo=False)
         self.assertEqual(evaluate_brand_gate(no_region)["BRAND_GATE"], "BLOCKED")
 
     def test_brand_gate_branded_graphic_requires_coverage(self):
-        filled = self._base(visual_style="BRANDED_GRAPHIC", content_coverage_ratio=0.96)
+        filled = self._base(visual_style="BRANDED_GRAPHIC", content_coverage_ratio=0.96, stat_present=True, stat_color=list(ACCENT))
         self.assertEqual(evaluate_brand_gate(filled)["BRAND_GATE"], "PASS")
         empty = dict(filled, content_coverage_ratio=0.1)
         result = evaluate_brand_gate(empty)
         self.assertEqual(result["BRAND_GATE"], "BLOCKED")
         self.assertIn("CONTENT_COVERAGE_SUFFICIENT", result["BRAND_GATE_REASON"])
+
+    def test_brand_gate_branded_graphic_requires_content_density(self):
+        """Blocker 3: a branded graphic cannot merely be headline +
+        decorative motif + empty space. Requires a stat or a deck line
+        beyond the motif's coverage fill."""
+        thin = self._base(
+            visual_style="BRANDED_GRAPHIC", content_coverage_ratio=0.96,
+            stat_present=False, stat_color=None, deck_present=False,
+        )
+        result = evaluate_brand_gate(thin)
+        self.assertEqual(result["BRAND_GATE"], "BLOCKED")
+        self.assertIn("CONTENT_DENSITY_SUFFICIENT", result["BRAND_GATE_REASON"])
+
+        with_deck = dict(thin, deck_present=True)
+        self.assertEqual(evaluate_brand_gate(with_deck)["BRAND_GATE"], "PASS")
+
+        with_stat = dict(thin, stat_present=True, stat_color=list(ACCENT))
+        self.assertEqual(evaluate_brand_gate(with_stat)["BRAND_GATE"], "PASS")
 
     def test_brand_gate_editorial_typography_requires_coverage(self):
         # The exact 2026-09-25 production incident: short headline + one

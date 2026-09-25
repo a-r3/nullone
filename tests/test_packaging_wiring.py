@@ -29,6 +29,7 @@ All offline: fake subprocesses, temp files, no network/model calls.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -65,15 +66,21 @@ render_dispatcher = _load_hyphenated("packaging_render_dispatcher", "nullone-pac
 dispatcher = render_dispatcher
 
 
-def _write_fake_brand_metadata(out: Path, *, visual_style: str = "EDITORIAL_TYPOGRAPHY") -> None:
+def _write_fake_brand_metadata(
+    out: Path, *, visual_style: str = "EDITORIAL_TYPOGRAPHY", source_path: Path | None = None
+) -> None:
     """Sidecar a mocked SINGLE_POST renderer stub must also emit now that
     the real render_texbrif_v2.py always writes one (Visual V2 brand-
     compliance gate). These wiring tests fake the renderer subprocess to
     stay offline/fast; the metadata is always shaped to PASS the
     template-aware gate for the given style, since none of them are
     testing brand compliance itself (see tests/test_v2_brand_compliance.py
-    for that)."""
+    for that). `source_path` must be the exact file the dispatcher will
+    pass as --source (the validated asset descriptor's local_path) so
+    the fake photo_source_sha256 matches what _enforce_brand_gate's
+    provenance check recomputes from that same file."""
     has_photo = visual_style in ("REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION")
+    photo_source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest() if has_photo and source_path else None
     metadata_path = out.with_suffix(out.suffix + ".brand.json")
     metadata_path.write_text(
         json.dumps(
@@ -89,6 +96,9 @@ def _write_fake_brand_metadata(out: Path, *, visual_style: str = "EDITORIAL_TYPO
                 "brand_mark_opacity": 170,
                 "text_bounds_valid": True,
                 "content_coverage_ratio": None if has_photo else 1.0,
+                "deck_present": False,
+                "photo_region_stddev": 40.0 if has_photo else None,
+                "photo_source_sha256": photo_source_sha256,
             }
         ),
         encoding="utf-8",
@@ -975,7 +985,7 @@ class SourcePropagationTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
-                _write_fake_brand_metadata(out, visual_style="REAL_PHOTO")
+                _write_fake_brand_metadata(out, visual_style="REAL_PHOTO", source_path=photo)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             args = _argparse.Namespace(
@@ -1003,7 +1013,7 @@ class SourcePropagationTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
-                _write_fake_brand_metadata(out, visual_style="REAL_PHOTO")
+                _write_fake_brand_metadata(out, visual_style="REAL_PHOTO", source_path=photo)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             args = _argparse.Namespace(
@@ -2019,7 +2029,7 @@ class VisualGroundingTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
-                _write_fake_brand_metadata(out, visual_style="SOURCE_SCREENSHOT")
+                _write_fake_brand_metadata(out, visual_style="SOURCE_SCREENSHOT", source_path=shot)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
@@ -2052,7 +2062,7 @@ class VisualGroundingTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
-                _write_fake_brand_metadata(out, visual_style="DATA_VISUALIZATION")
+                _write_fake_brand_metadata(out, visual_style="DATA_VISUALIZATION", source_path=data)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):

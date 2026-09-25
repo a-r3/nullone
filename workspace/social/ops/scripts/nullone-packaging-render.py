@@ -31,6 +31,7 @@ a deterministic failure, never as a format change.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -46,6 +47,12 @@ from nullone_packaging_receipt import (
     require_canonical_receipt,
     validate_asset_descriptor,
 )
+from nullone_visual_director import VisualDirectorError, load_visual_decision
+
+# Receipt VISUAL_STYLE values that name a file-backed evidence asset --
+# the same set nullone_packaging_receipt.FILE_BACKED_ASSET_KINDS covers,
+# imported here by value to avoid a second name for the same thing.
+EVIDENCE_BACKED_STYLES = frozenset({"REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION"})
 
 FEED_RENDERER = WORKSPACE / "social/tools/render_texbrif_v2.py"
 CAROUSEL_RENDERER = WORKSPACE / "social/tools/render_carousel_v2.py"
@@ -65,11 +72,22 @@ def _run_renderer(argv: list[str]) -> None:
     print(cp.stdout.strip()[-500:] if cp.stdout.strip() else "RENDER_OK")
 
 
-def _enforce_brand_gate(output: Path, *, root: Path) -> None:
+def _enforce_brand_gate(output: Path, *, root: Path, source: str | None = None) -> None:
     """Visual V2 brand-compliance gate: SINGLE_POST only, before the
     render record (and therefore before every downstream manifest and
     delivery step) is ever written. Reads the renderer's own semantic
-    metadata sidecar (never re-derives brand facts by scanning pixels)."""
+    metadata sidecar (never re-derives brand facts by scanning pixels).
+
+    Also enforces render-time source provenance: for an evidence-backed
+    render (`source` given), the renderer's self-reported
+    `photo_source_sha256` must equal the exact hash of the file this
+    dispatcher passed as `--source` -- the first concrete boundary in
+    "Visual Director decision -> ... -> renderer input -> composite ->
+    final pixels" where a false SOURCE_PHOTO pass could hide a
+    mismatched or substituted asset. PHOTO_REGION_MEANINGFUL (in the
+    gate itself) separately catches a genuinely blank/placeholder
+    region even when provenance matches.
+    """
 
     metadata_path = output.with_suffix(output.suffix + ".brand.json")
     if not metadata_path.is_file():
@@ -89,6 +107,45 @@ def _enforce_brand_gate(output: Path, *, root: Path) -> None:
         print(f"BRAND_GATE_REASON={result['BRAND_GATE_REASON']}")
     if result["BRAND_GATE"] != "PASS":
         raise BridgeError(f"BRAND_GATE_BLOCKED: {result['BRAND_GATE_REASON']}")
+
+    if source is not None:
+        reported = metadata.get("photo_source_sha256")
+        if reported is None:
+            raise BridgeError(
+                "BRAND_GATE_BLOCKED: renderer reported no source provenance for an evidence-backed render"
+            )
+        resolved_source = contained_path(Path(source), root)
+        actual = hashlib.sha256(resolved_source.read_bytes()).hexdigest()
+        if reported != actual:
+            raise BridgeError(
+                "BRAND_GATE_BLOCKED: PHOTO_PROVENANCE_MISMATCH -- rendered source does not match the validated asset"
+            )
+        print(f"PHOTO_SOURCE_SHA256={reported}")
+
+
+def _enforce_visual_decision_provenance(
+    *, receipt: dict[str, Any], asset: dict[str, Any], visual_decision_path: str | None, root: Path
+) -> None:
+    """When a Visual Director decision is supplied for an evidence-backed
+    style, the asset descriptor actually used for rendering must name the
+    exact same validated file the Visual Director chose -- otherwise a
+    separately-authored asset descriptor could silently substitute a
+    different (but still hash-valid) file at render time, breaking the
+    provenance chain from "Visual Director selected this asset" through
+    to "this is what got rendered"."""
+
+    style = receipt.get("VISUAL_STYLE")
+    if style not in EVIDENCE_BACKED_STYLES or visual_decision_path is None:
+        return
+    try:
+        decision = load_visual_decision(Path(visual_decision_path), receipt["candidate_id"], root=root)
+    except VisualDirectorError as e:
+        raise BridgeError(f"PACKAGING_ASSET_PROVENANCE_MISMATCH: {e}") from e
+    if decision.get("local_path") != asset.get("local_path") or decision.get("sha256") != asset.get("sha256"):
+        raise BridgeError(
+            "PACKAGING_ASSET_PROVENANCE_MISMATCH: asset descriptor does not match the"
+            " Visual Director's validated source asset"
+        )
 
 
 def _carousel_slide_count(spec_path: Path) -> int:
@@ -138,6 +195,10 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
             " the validated asset claims no evidence; refusing to render a placeholder frame"
         )
 
+    _enforce_visual_decision_provenance(
+        receipt=receipt, asset=asset, visual_decision_path=getattr(args, "visual_decision", None), root=root
+    )
+
     candidate_id = receipt["candidate_id"]
     style = receipt.get("VISUAL_STYLE")
     if style == "GENERATED_ILLUSTRATION_ALLOWED":
@@ -163,6 +224,7 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
             "--kicker", args.kicker,
             "--headline", args.headline,
             "--stat", args.stat or "",
+            "--deck", getattr(args, "deck", None) or "",
             "--source-name", args.source_name,
             "--output", str(output),
             "--visual-style", style,
@@ -170,7 +232,7 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         _run_renderer(argv)
         if not output.is_file():
             raise BridgeError("PACKAGING_RENDER_FAILED: feed output missing")
-        _enforce_brand_gate(output, root=root)
+        _enforce_brand_gate(output, root=root, source=source)
         _write_render_record(
             candidate_id=candidate_id, receipt=receipt, format_decision=decision,
             asset_kind=asset["asset_kind"], outputs=[output], root=root,
@@ -308,7 +370,9 @@ def main() -> int:
     r.add_argument("--kicker", default=None)
     r.add_argument("--headline", default=None)
     r.add_argument("--stat", default=None)
+    r.add_argument("--deck", default=None)
     r.add_argument("--source-name", default=None)
+    r.add_argument("--visual-decision", default=None)
     sub.add_parser("self-test")
     args = parser.parse_args()
 
