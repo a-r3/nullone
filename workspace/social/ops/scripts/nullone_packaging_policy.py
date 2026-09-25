@@ -68,11 +68,22 @@ VISUAL_STYLES = frozenset(
         "SOURCE_SCREENSHOT",
         "DATA_VISUALIZATION",
         "EDITORIAL_TYPOGRAPHY",
+        "BRANDED_GRAPHIC",
         "GENERATED_ILLUSTRATION_ALLOWED",
         "GENERATED_ILLUSTRATION_FORBIDDEN",
         "NONE",
     }
 )
+
+# The only two styles the NullOne Visual Director
+# (docs/contracts/visual-director-contract-v1.md) may direct this
+# contract toward, and ONLY in the one branch below where neither a real
+# photo nor other visual evidence is required. Every other branch keeps
+# this contract's existing evidence-based ladder fully authoritative and
+# unchanged; a Visual Director SOURCE_PHOTO/DATA_VISUALIZATION decision
+# is never routed through this field -- it acts upstream, on `assets.*`,
+# by directing real asset acquisition before this contract ever runs.
+VISUAL_DIRECTOR_STYLES = frozenset({"EDITORIAL_TYPOGRAPHY", "BRANDED_GRAPHIC"})
 
 REASON_CODES = frozenset(
     {
@@ -185,6 +196,19 @@ def _validate_candidate(request: dict[str, Any]) -> dict[str, Any]:
             candidate.get("still_developing"), "candidate.still_developing"
         ),
     }
+    # Optional Visual Director signal (docs/contracts/visual-director-
+    # contract-v1.md). Absent -> None -> byte-identical legacy behavior.
+    # Present -> must be one of the two styles this contract ever
+    # forwards to the renderer verbatim in the no-evidence-required
+    # branch; anything else is malformed input, not a silent default.
+    if "visual_director_style" in candidate:
+        validated["visual_director_style"] = _require_enum(
+            candidate.get("visual_director_style"),
+            VISUAL_DIRECTOR_STYLES,
+            "candidate.visual_director_style",
+        )
+    else:
+        validated["visual_director_style"] = None
     return validated
 
 
@@ -328,7 +352,9 @@ def _decide_format(candidate: dict[str, Any]) -> tuple[str, str]:
 
 
 def _resolve_visual_style(
-    assets: dict[str, Any], visual_evidence_required: bool
+    assets: dict[str, Any],
+    visual_evidence_required: bool,
+    visual_director_style: str | None = None,
 ) -> str:
     strength = _asset_strength(assets)
     if strength == "STRONG_OFFICIAL" and assets["has_official_or_source_image"]:
@@ -338,6 +364,17 @@ def _resolve_visual_style(
     if assets["data_visualization_possible"]:
         return "DATA_VISUALIZATION"
     if not visual_evidence_required:
+        # No real photo/screenshot/data-visualization evidence exists or
+        # is required. Historically this branch blindly defaulted to
+        # EDITORIAL_TYPOGRAPHY (or an unusable GENERATED_ILLUSTRATION_
+        # ALLOWED stub the renderer refuses outright) -- exactly the gap
+        # that produced a bare headline+stat card over an empty canvas.
+        # When the Visual Director participated, its validated choice
+        # between EDITORIAL_TYPOGRAPHY and BRANDED_GRAPHIC is
+        # authoritative here; when it did not, legacy behavior is
+        # byte-identical.
+        if visual_director_style is not None:
+            return visual_director_style
         return "EDITORIAL_TYPOGRAPHY" if strength == "NONE" else "GENERATED_ILLUSTRATION_ALLOWED"
     return "GENERATED_ILLUSTRATION_ALLOWED"
 
@@ -419,7 +456,7 @@ def evaluate_packaging(request: dict[str, Any]) -> dict[str, Any]:
 
     # 9. Visual-style resolution.
     visual_style = forced_visual_style or _resolve_visual_style(
-        assets, visual_evidence_required
+        assets, visual_evidence_required, candidate["visual_director_style"]
     )
 
     return _build_response(

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import io
 import json
+import math
 import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, ImageStat
 
 
 W, H = 1080, 1350
@@ -100,13 +102,145 @@ class RenderBoundsError(RuntimeError):
     """Raised when drawn content would fall outside the output canvas."""
 
 
+VISUAL_STYLES = (
+    "REAL_PHOTO",
+    "SOURCE_SCREENSHOT",
+    "DATA_VISUALIZATION",
+    "EDITORIAL_TYPOGRAPHY",
+    "BRANDED_GRAPHIC",
+)
+
+# The only styles this renderer draws a no-photo layout for; the other
+# three arrive with --source already set by the render dispatcher (the
+# receipt's VISUAL_STYLE, passed through verbatim for observability/
+# brand-gate reporting -- this renderer does not re-decide it).
+NO_PHOTO_STYLES = ("EDITORIAL_TYPOGRAPHY", "BRANDED_GRAPHIC")
+
+# Below this fraction of the available typography band, a no-photo card
+# reads as an empty canvas rather than a deliberate composition (the
+# exact failure mode of the 2026-09-25 production incident: a bare
+# headline + one stat left roughly a quarter of the band filled). The
+# template-aware brand gate (nullone_brand_gate.py) enforces this via
+# CONTENT_COVERAGE_SUFFICIENT; the renderer only measures and reports it.
+MIN_TYPOGRAPHY_COVERAGE = 0.45
+
+# Below this combined-channel pixel stddev, a "photo" region reads as a
+# near-uniform placeholder (blank/solid/near-black "image failed to
+# load" panel) rather than real photographic/screenshot content -- the
+# exact SOURCE_PHOTO false-pass shape: `has_photo=True` (a --source was
+# given and loaded without error) while the actual pixels carry no real
+# visual information. Calibrated well below genuine photo/screenshot
+# variance (typically 30-70) but well above a flat-color fill (~0-3) or
+# gentle gradient (~5-10). The template-aware brand gate
+# (nullone_brand_gate.py) enforces this via PHOTO_REGION_MEANINGFUL; the
+# renderer only measures and reports it.
+MIN_PHOTO_REGION_STDDEV = 14.0
+
+
+# Approved NullOne BRANDED_GRAPHIC motif/template library (visual-rules.md
+# "BRANDED_GRAPHIC" + the real @nullone.az feed language: strong black
+# base, Signal Orange focal accent, an established radar/"C"-arc motif,
+# meaningful canvas occupation). Exactly one deterministic, code-drawn
+# treatment -- never an arbitrary per-render shape choice, never
+# AI-generated. Reviewed/extended here only by editing this function, the
+# same governance as every other fixed layout constant in this file.
+RADAR_ARC_SWEEP_DEGREES = 270  # "C" opening, not a full closed ring
+RADAR_ARC_STROKE = 26
+RADAR_ARC_MIN_DIAM = 140
+
+
+def _draw_branded_graphic_motif(canvas, *, empty_top, empty_bottom):
+    """Deterministic NullOne radar-arc motif filling typography negative space.
+
+    Not AI-generated, not photographic: a fixed accent rule + a bold,
+    partially-open ("C"/radar-sweep) arc built entirely from the
+    documented brand palette (visual-rules.md Signal Orange accent),
+    anchored bottom-right with a bright leading node -- the established
+    NullOne radar/ring motif, not a generic thin decorative ellipse.
+    Gives BRANDED_GRAPHIC a genuinely distinct, always-present visual
+    treatment that meaningfully occupies the canvas instead of acting as
+    filler.
+    """
+
+    empty_height = empty_bottom - empty_top
+    if empty_height < 80:
+        return empty_top  # not enough room for a motif; caller keeps plain background
+
+    draw = ImageDraw.Draw(canvas)
+    rule_y = empty_top
+    draw.rectangle((MARGIN, rule_y, MARGIN + 160, rule_y + 6), fill=(*ACCENT, 255))
+
+    arc_top = rule_y + 48
+    arc_bottom = empty_bottom
+    arc_diam = min(arc_bottom - arc_top, W - 2 * MARGIN, 760)
+    if arc_diam <= RADAR_ARC_MIN_DIAM:
+        return arc_top
+
+    arc_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    arc_draw = ImageDraw.Draw(arc_layer)
+    cx = W - MARGIN - int(arc_diam * 0.32)
+    cy = arc_top + (arc_bottom - arc_top) // 2
+    bbox = (cx - arc_diam // 2, cy - arc_diam // 2, cx + arc_diam // 2, cy + arc_diam // 2)
+
+    # A faint full backing ring first (depth), then the bold, brighter
+    # "C" sweep on top -- the established NullOne radar treatment rather
+    # than one flat thin outline.
+    arc_draw.ellipse(bbox, outline=(*ACCENT, 40), width=4)
+    start_angle = -90 - (RADAR_ARC_SWEEP_DEGREES / 2)
+    end_angle = -90 + (RADAR_ARC_SWEEP_DEGREES / 2)
+    arc_draw.arc(bbox, start_angle, end_angle, fill=(*ACCENT, 190), width=RADAR_ARC_STROKE)
+
+    # Bright leading node at the sweep's open end -- the "radar signal"
+    # focal point, echoing the accent rule at the top of the band.
+    node_angle = math.radians(end_angle)
+    node_r = arc_diam / 2
+    node_cx = cx + node_r * math.cos(node_angle)
+    node_cy = cy + node_r * math.sin(node_angle)
+    node_radius = RADAR_ARC_STROKE * 0.7
+    arc_draw.ellipse(
+        (node_cx - node_radius, node_cy - node_radius, node_cx + node_radius, node_cy + node_radius),
+        fill=(*ACCENT, 255),
+    )
+
+    canvas.alpha_composite(arc_layer)
+
+    return arc_bottom
+
+
+def _draw_kicker_chip(draw, canvas, *, xy, text_str, font):
+    """Top micro-brand/category chip: a subtle low-opacity Signal Orange
+    outline pill behind the kicker label. BRANDED_GRAPHIC-only top-band
+    treatment giving the category label more visual weight than plain
+    metadata-colored text, without competing with the headline below."""
+
+    box = draw.textbbox(xy, text_str, font=font)
+    pad_x, pad_y = 18, 10
+    chip_box = (box[0] - pad_x, box[1] - pad_y, box[2] + pad_x, box[3] + pad_y)
+    chip_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    chip_draw = ImageDraw.Draw(chip_layer)
+    chip_draw.rounded_rectangle(chip_box, radius=chip_box[3] - chip_box[1], outline=(*ACCENT, 130), width=2)
+    canvas.alpha_composite(chip_layer)
+
+
 def render(args):
     has_photo = bool(args.source)
+    visual_style = getattr(args, "visual_style", None) or "EDITORIAL_TYPOGRAPHY"
+    if visual_style not in VISUAL_STYLES:
+        raise ValueError(f"Unsupported --visual-style: {visual_style!r}")
 
     canvas = Image.new("RGB", (W, H), BG)
+    photo_region_stddev = None
+    photo_source_sha256 = None
 
     if has_photo:
         source = load_image(args.source)
+
+        # Renderer-reported provenance/content facts for the brand gate
+        # (PHOTO_REGION_MEANINGFUL / provenance-binding): computed from
+        # the exact foreground region actually composited below, never
+        # re-derived downstream by scanning the final flattened canvas.
+        if not (args.source.startswith("http://") or args.source.startswith("https://")):
+            photo_source_sha256 = hashlib.sha256(Path(args.source).read_bytes()).hexdigest()
 
         # Decorative full-bleed background derived from source.
         bg = ImageOps.fit(
@@ -128,6 +262,14 @@ def render(args):
             (900, 535),
             Image.Resampling.LANCZOS,
         )
+
+        # A near-uniform (blank/solid/placeholder) source reads as a
+        # near-zero stddev region regardless of dimensions -- the exact
+        # SOURCE_PHOTO false-pass shape: has_photo=True while the actual
+        # pixels carry no real visual information. Measured on the exact
+        # foreground region composited into the final canvas below.
+        region_stat = ImageStat.Stat(foreground)
+        photo_region_stddev = round(sum(region_stat.stddev) / len(region_stat.stddev), 2)
 
         fx = (W - foreground.width) // 2
         fy = 125 + (535 - foreground.height) // 2
@@ -159,7 +301,15 @@ def render(args):
     draw.rectangle((0, band_top, W, H), fill=(*BG, 255))
 
     kicker_y = (HERO_H + 62) if has_photo else 170
-    text((MARGIN, kicker_y), args.kicker.upper(), fnt(24, True), METADATA)
+    kicker_font = fnt(24, True)
+    kicker_text = args.kicker.upper()
+    if visual_style == "BRANDED_GRAPHIC":
+        # Top micro-brand/category treatment: the established chip
+        # around the category kicker, in addition to the bottom-right
+        # handle -- BRANDED_GRAPHIC-only per the approved motif library.
+        _draw_kicker_chip(draw, canvas, xy=(MARGIN, kicker_y), text_str=kicker_text, font=kicker_font)
+        draw = ImageDraw.Draw(canvas)  # chip alpha-composited a new layer
+    text((MARGIN, kicker_y), kicker_text, kicker_font, METADATA)
 
     hf, lines, line_h = fit_headline(draw, args.headline)
 
@@ -167,6 +317,16 @@ def render(args):
     for line in lines:
         text((MARGIN, y), line, hf, TEXT_PRIMARY)
         y += line_h
+
+    deck_present = bool(args.deck)
+    if deck_present:
+        y += 14
+        deck_font, deck_lines, deck_line_h = fit_stat(
+            draw, args.deck, W - 2 * MARGIN, start=32, minimum=22, max_lines=2
+        )
+        for line in deck_lines:
+            text((MARGIN, y), line, deck_font, METADATA)
+            y += deck_line_h
 
     if args.stat:
         y += 24
@@ -176,8 +336,24 @@ def render(args):
             text((MARGIN, y), line, sf, ACCENT)
             y += stat_line_h
 
+    content_bottom_y = y
+
     # Bottom metadata.
     bottom_y = H - 105
+
+    content_coverage_ratio = None
+    if not has_photo:
+        available_span = bottom_y - kicker_y
+        content_span = content_bottom_y - kicker_y
+        if visual_style == "BRANDED_GRAPHIC":
+            motif_bottom = _draw_branded_graphic_motif(
+                canvas, empty_top=content_bottom_y + 40, empty_bottom=bottom_y - 40
+            )
+            content_span = max(content_span, motif_bottom - kicker_y)
+            draw = ImageDraw.Draw(canvas)  # motif may have alpha-composited a new layer
+        content_coverage_ratio = (
+            round(min(1.0, content_span / available_span), 4) if available_span > 0 else 1.0
+        )
 
     text(
         (MARGIN, bottom_y),
@@ -230,6 +406,8 @@ def render(args):
 
     brand_metadata = {
         "schema": BRAND_METADATA_SCHEMA,
+        "visual_style": visual_style,
+        "has_photo": has_photo,
         "stat_present": bool(args.stat),
         "stat_color": list(stat_color) if stat_color is not None else None,
         "margin_px": MARGIN,
@@ -237,6 +415,10 @@ def render(args):
         "brand_mark_position": brand_mark_position,
         "brand_mark_opacity": BRAND_MARK_OPACITY,
         "text_bounds_valid": text_bounds_valid,
+        "content_coverage_ratio": content_coverage_ratio,
+        "deck_present": deck_present,
+        "photo_region_stddev": photo_region_stddev,
+        "photo_source_sha256": photo_source_sha256,
     }
     metadata_path = out.with_suffix(out.suffix + ".brand.json")
     metadata_path.write_text(
@@ -256,8 +438,10 @@ def main():
     p.add_argument("--kicker", required=True)
     p.add_argument("--headline", required=True)
     p.add_argument("--stat", default="")
+    p.add_argument("--deck", default="")
     p.add_argument("--source-name", required=True)
     p.add_argument("--output", required=True)
+    p.add_argument("--visual-style", choices=VISUAL_STYLES, default="EDITORIAL_TYPOGRAPHY")
 
     render(p.parse_args())
 

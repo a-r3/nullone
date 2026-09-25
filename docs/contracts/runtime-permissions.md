@@ -83,6 +83,36 @@ Do NOT claim B where only C exists.
   (MCP vs deterministic REST DraftProvider, #81) is owned by the #37
   deployment decision, not by this instruction file.
 
+### VISUAL DIRECTOR (visual-style decision, docs/contracts/visual-director-contract-v1.md)
+
+- Read the candidate's verified signals, `visual-rules.md`, and the
+  bounded recent-published visual-history file: A.
+- Decide `visual_style` (SOURCE_PHOTO / BRANDED_GRAPHIC / DATA_
+  VISUALIZATION / EDITORIAL_TYPOGRAPHY) and write ONLY the raw decision
+  request file: A, bounded to `*-visual-decision-request.json` (B --
+  `write`/`edit` deny everything else in the checked-in agent file; the
+  canonical `*-visual-decision.json` is CLI-written only).
+- NO web research: D. `ROLE_CAPABILITIES[visual_director]` carries no
+  `web-research` label and the checked-in agent denies `webfetch`/
+  `websearch` outright (B) -- it must reason only over already-verified
+  signals and already-discovered source assets, never broaden a claim by
+  going looking for new evidence.
+- NO shell/bash capability: D (B -- `bash: deny`, no exceptions, in the
+  checked-in agent file). It cannot invoke the deterministic validator,
+  the renderer, or the brand gate itself; those happen outside this
+  agent's turn, exactly like the packaging evaluator step it precedes.
+- NO Zernio/Telegram/publish/approval capability of any kind: D (C --
+  explicit prompt must-nots; B -- no such transport is wired to this
+  role at all).
+- v1 wiring note: this decision step currently runs inside the Draft
+  Factory cycle's own agent turn (`workspace/social/ops/prompts/draft-
+  factory.md`), reusing Draft Factory's existing capability grant for
+  the file paths involved; the standalone `visual_director` provider-
+  router role/agent/prompt exist and are offline-tested so a future
+  genuinely separate process invocation needs no additional permission
+  review, only an explicitly reviewed orchestration/deployment change
+  (not made here).
+
 ### APPROVAL (human authorization controller)
 
 - Telegram approval UI/control only (first/second-stage buttons, reject/

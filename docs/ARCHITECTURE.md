@@ -7,7 +7,12 @@ Morning Editorial
 → Breaking Radar delta monitoring
 → Draft Factory
 → verification
+→ Visual Director (docs/contracts/visual-director-contract-v1.md;
+  decides visual_style only, never format/carousel eligibility)
+→ deterministic packaging evaluator (format + final visual_style)
+→ source asset acquisition/validation where the decision requires it
 → render
+→ template-aware brand gate
 → deterministic Production Bridge
 → Zernio review draft
 → Telegram preview

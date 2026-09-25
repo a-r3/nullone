@@ -98,6 +98,14 @@ Operational design spec for @nullone.az. Dimensions are platform-fixed; the rest
 2. **Product/update card** — official product image as hero + one-line "what's new" headline + version/model label.
 3. **Quote/source card** — large quote (≤ 40 chars) + source attribution line + brand mark; muted background.
 
+### BRANDED_GRAPHIC (no source photo, not plain typography)
+Use when the story is abstract and no strong source image exists, but a
+NullOne graphic/motif can meaningfully support it (see docs/contracts/
+visual-director-contract-v1.md). A deterministic, code-drawn NullOne
+accent treatment (Signal Orange rule + motif) fills the space a bare
+typography card would otherwise leave empty — never AI-generated
+imagery. Chosen by the Visual Director, not automatically.
+
 ### 3 Carousel structures
 1. **Explainer (6–8 slides)** — cover(hook+number) → context → mechanism → numbers → limitation → takeaway → brand/CTA.
 2. **List/digest (5–7 slides)** — cover("günün xəbərləri" + date + swipe) → one item per slide → closing summary.
@@ -129,6 +137,14 @@ section, since production prompts cannot read outside this workspace).
   illustration standing in for missing real-world grounding.
 - One consistent typeface + 2 accent colors across all formats.
 - Dark scrims for text legibility over images.
+- FEED typography-only cards follow the same rule Story already states
+  below: large empty areas are never acceptable just because the
+  template lacks content. A sparse EDITORIAL_TYPOGRAPHY card (bare
+  headline + one stat over an otherwise-empty canvas) is not a valid
+  substitute for choosing SOURCE_PHOTO, BRANDED_GRAPHIC, or DATA_
+  VISUALIZATION where one of those actually serves the story better —
+  enforced deterministically by the brand gate's
+  `CONTENT_COVERAGE_SUFFICIENT` check, not left to judgment alone.
 - Brand mark always bottom-right, subtle, inside safe margin.
 
 ## Carousel visual system V2

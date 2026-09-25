@@ -407,6 +407,55 @@ Avoid duplicates by consulting:
 - publish ledger
 - existing Zernio drafts
 
+## Visual Director — visual-style decision (runs before packaging)
+
+Repository reference (engineering-only; not present in this runtime
+workspace, do not attempt to read it): the exact deterministic rule
+source is `docs/contracts/visual-director-contract-v1.md`.
+
+NullOne itself decides the visual format at runtime, for every new
+post — typography-only is never the automatic default. This step runs
+AFTER verification and BEFORE the Editorial Packaging Contract step
+below: it decides `visual_style`; packaging still decides
+CONTENT_SHAPE/FORMAT/carousel eligibility exactly as before, unchanged.
+
+For every selected candidate, before assessing packaging signals:
+
+1. Build the compact recent-published visual-history context (bounded,
+   PUBLISHED-only by construction — never a rejected/abandoned/
+   unpublished draft):
+   `python3 social/ops/scripts/nullone-visual-memory.py history
+   --candidate-id <CANDIDATE_ID>`
+   This writes `social/drafts/production/<CANDIDATE_ID>-visual-memory.json`.
+2. Follow `social/ops/prompts/visual-director.md` exactly to choose one
+   `visual_style` (SOURCE_PHOTO / BRANDED_GRAPHIC / DATA_VISUALIZATION /
+   EDITORIAL_TYPOGRAPHY) for this candidate, using the verified
+   headline/deck/facts, the primary source, any already-discovered
+   source asset, the visual-memory history, and
+   `social/references/visual-rules.md`. Write ONLY the raw decision —
+   never a rendered asset — to
+   `social/drafts/production/<CANDIDATE_ID>-visual-decision-request.json`
+   matching schema `nullone.visual-decision.v1` exactly.
+3. Run exactly once:
+   `python3 social/ops/scripts/nullone-visual-director.py evaluate
+   --candidate-id <CANDIDATE_ID> --request-file <request>.json`
+   The canonical decision path is derived deterministically
+   (`social/drafts/production/<CANDIDATE_ID>-visual-decision.json`); the
+   same candidate can never have two authoritative decisions. A
+   `BLOCKED=...` result means this candidate fails Visual Director —
+   record BLOCKED for it and follow BOUNDED CANDIDATE FALLBACK below,
+   exactly like a packaging SKIP.
+4. SOURCE_PHOTO/DATA_VISUALIZATION decisions are a DIRECTIVE to acquire
+   and validate a real asset (reuse existing source-asset discovery
+   tooling; prefer the primary-source domain; preserve the exact source
+   URL). If that acquisition fails, do not silently substitute
+   typography behind the scenes — treat it exactly like an unmet
+   real-photo requirement: BLOCKED for this candidate, then BOUNDED
+   CANDIDATE FALLBACK.
+
+The Visual Director never chooses FORMAT_DECISION, CAROUSEL eligibility,
+or slide count, and never gains Zernio/Telegram/publish capability.
+
 ## Format selection — Editorial Packaging Contract
 
 Repository reference (engineering-only; not present in this runtime
@@ -436,10 +485,15 @@ For every selected candidate, before any render or manifest work:
    exists (typography claims NONE and names no file).
 2. Run exactly once:
    `python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate
-   --candidate-id <CANDIDATE_ID> --request-file <request>.json`
+   --candidate-id <CANDIDATE_ID> --request-file <request>.json
+   --visual-decision social/drafts/production/<CANDIDATE_ID>-visual-decision.json`
    The receipt path is derived deterministically
    (`social/drafts/production/<CANDIDATE_ID>-packaging-decision.json`);
-   the same candidate can never have two authoritative receipts.
+   the same candidate can never have two authoritative receipts. The
+   `--visual-decision` file from the step above binds the Visual
+   Director's choice into the receipt wherever the packaging contract
+   does not already force a specific style (a real-photo/evidence
+   requirement always stays authoritative and is never overridden).
 3. Read the receipt and conform: render ONLY through
    `python3 social/ops/scripts/nullone-packaging-render.py render
    --receipt <receipt> --asset-file <asset>.json ...`, build the manifest ONLY with
@@ -871,10 +925,14 @@ This file is immutable after manifest creation.
      [--spec <CAROUSEL_SPEC> | --kicker ... --headline ... --stat ... --source-name ...]
 
    The render source image always comes from the validated asset
-   descriptor (typography renders over a deterministic neutral canvas;
-   never pass --source yourself). Styles the V2 renderer cannot
-   faithfully support (generated illustration; photo evidence inside a
-   carousel) are refused deterministically — do not work around that.
+   descriptor (EDITORIAL_TYPOGRAPHY and BRANDED_GRAPHIC render over a
+   deterministic neutral canvas — BRANDED_GRAPHIC additionally draws the
+   fixed NullOne motif treatment; never pass --source yourself). Styles
+   the V2 renderer cannot faithfully support (generated illustration;
+   photo evidence inside a carousel) are refused deterministically — do
+   not work around that. A sparse EDITORIAL_TYPOGRAPHY/BRANDED_GRAPHIC
+   render (an effectively empty canvas) is refused by the brand gate
+   (CONTENT_COVERAGE_SUFFICIENT) below, not by this step.
 
 3. Validate dimensions locally.
 

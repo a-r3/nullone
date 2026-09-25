@@ -73,6 +73,7 @@ ROLE_DRAFT_FACTORY = "draft_factory"
 ROLE_STORY_WRITER = "story_writer"
 ROLE_BREAKING_RADAR = "breaking_radar"
 ROLE_WEEKLY_STRATEGY = "weekly_strategy"
+ROLE_VISUAL_DIRECTOR = "visual_director"
 
 LOGICAL_ROLES = (
     ROLE_MORNING_EDITORIAL,
@@ -80,6 +81,7 @@ LOGICAL_ROLES = (
     ROLE_STORY_WRITER,
     ROLE_BREAKING_RADAR,
     ROLE_WEEKLY_STRATEGY,
+    ROLE_VISUAL_DIRECTOR,
 )
 
 TRANSPORT_OPENCODE = "opencode"
@@ -88,10 +90,13 @@ TRANSPORT_CLAUDE = "claude"
 KNOWN_TRANSPORTS = (TRANSPORT_OPENCODE, TRANSPORT_CLAUDE)
 
 # Claude transport exists only where a reviewed Claude implementation
-# exists: the Morning cycle (`claude -p`) and the Story writer
-# (`HaikuStoryWriter`). Any other role x claude combination fails
-# closed at resolve time instead of dispatching nowhere.
-CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER)
+# exists: the Morning cycle (`claude -p`), the Story writer
+# (`HaikuStoryWriter`), and the Visual Director (docs/contracts/visual-
+# director-contract-v1.md), which reuses the exact same reviewed
+# Morning claude-transport/Sonnet route rather than adding a new one.
+# Any other role x claude combination fails closed at resolve time
+# instead of dispatching nowhere.
+CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER, ROLE_VISUAL_DIRECTOR)
 
 FALLBACK_NONE = "none"
 
@@ -131,6 +136,11 @@ ROLE_CAPABILITIES: dict[str, tuple[str, ...]] = {
     ROLE_STORY_WRITER: ("story-reasoning",),
     ROLE_BREAKING_RADAR: ("radar-reasoning", "radar-artifacts", "web-research"),
     ROLE_WEEKLY_STRATEGY: ("strategy-reasoning", "strategy-artifacts", "web-research"),
+    # No web-research: the Visual Director decides among already-verified
+    # signals and already-discovered source assets -- it must never
+    # broaden factual claims by going looking for new ones itself
+    # (docs/contracts/visual-director-contract-v1.md).
+    ROLE_VISUAL_DIRECTOR: ("visual-reasoning", "draft-artifacts"),
 }
 
 # Reviewed per-role execution budgets (seconds). Must equal the
@@ -143,6 +153,7 @@ ROLE_TIMEOUTS: dict[str, int] = {
     ROLE_STORY_WRITER: 300,
     ROLE_BREAKING_RADAR: 600,
     ROLE_WEEKLY_STRATEGY: 600,
+    ROLE_VISUAL_DIRECTOR: 300,
 }
 
 # Reviewed per-role OpenCode agent names. Pinned here so a routing
@@ -153,6 +164,7 @@ ROLE_AGENTS: dict[str, str] = {
     ROLE_STORY_WRITER: "nullone-story-writer",
     ROLE_BREAKING_RADAR: "nullone-breaking-radar",
     ROLE_WEEKLY_STRATEGY: "nullone-weekly-strategy",
+    ROLE_VISUAL_DIRECTOR: "nullone-visual-director",
 }
 
 LEGACY_MORNING_TRANSPORT_ENV_VAR = "NULLONE_EDITORIAL_PROVIDER"
@@ -384,6 +396,7 @@ def self_test() -> int:
         ROLE_STORY_WRITER: TRANSPORT_OPENCODE,
         ROLE_BREAKING_RADAR: TRANSPORT_OPENCODE,
         ROLE_WEEKLY_STRATEGY: TRANSPORT_OPENCODE,
+        ROLE_VISUAL_DIRECTOR: TRANSPORT_CLAUDE,
     }
     for role in LOGICAL_ROLES:
         profile = resolve_provider_profile(role, config=mapping, env={})

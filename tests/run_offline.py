@@ -82,6 +82,7 @@ COMMANDS = [
     [sys.executable, "tests/test_offline_render_reproducibility.py"],
     [sys.executable, "tests/test_v2_renderer_layout_correctness.py"],
     [sys.executable, "tests/test_v2_brand_compliance.py"],
+    [sys.executable, "tests/test_visual_director_contract.py"],
     [sys.executable, "tests/test_carousel_semantic_validation.py"],
     [sys.executable, "tests/test_p0_orchestration_recovery.py"],
     [sys.executable, "tests/test_draft_bridge_action.py"],
@@ -139,6 +140,28 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-packaging-render.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_visual_director.py",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-visual-director.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_claude_visual_director_provider.py",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_visual_memory.py",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-visual-memory.py",
         "self-test",
     ],
     [
