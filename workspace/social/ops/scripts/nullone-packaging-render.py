@@ -165,6 +165,7 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
             "--stat", args.stat or "",
             "--source-name", args.source_name,
             "--output", str(output),
+            "--visual-style", style,
         ]
         _run_renderer(argv)
         if not output.is_file():

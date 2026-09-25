@@ -169,6 +169,7 @@ def build(args: argparse.Namespace) -> int:
             "record_hash": record["record_hash"],
             "format_decision": receipt["FORMAT_DECISION"],
             "asset_kind": record["asset_kind"],
+            "visual_style": receipt["VISUAL_STYLE"],
         },
 
         "review": {

@@ -211,7 +211,7 @@ class PerRoleRoutingTests(unittest.TestCase):
         mapping = checked_in_mapping()
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
-            if role == router.ROLE_MORNING_EDITORIAL:
+            if role in (router.ROLE_MORNING_EDITORIAL, router.ROLE_VISUAL_DIRECTOR):
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, MORNING_CLAUDE_MODEL)
             else:
@@ -225,6 +225,7 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("STORY_PROFILE_ROUTING=PASS")
         print("RADAR_PROFILE_ROUTING=PASS")
         print("WEEKLY_PROFILE_ROUTING=PASS")
+        print("VISUAL_DIRECTOR_PROFILE_ROUTING=PASS")
 
     def test_checked_in_morning_claude_route_is_role_only(self):
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -558,6 +559,7 @@ class MixedProviderConfigurationTests(unittest.TestCase):
         "story_writer": {"transport": "claude", "model": "haiku"},
         "breaking_radar": {"transport": "opencode", "model": "anthropic/model-c"},
         "weekly_strategy": {"transport": "opencode", "model": "openai/model-d"},
+        "visual_director": {"transport": "claude", "model": "sonnet"},
     }
 
     def test_mixed_configuration_resolves_exactly(self):
@@ -567,6 +569,7 @@ class MixedProviderConfigurationTests(unittest.TestCase):
             "story_writer": ("claude", "haiku"),
             "breaking_radar": ("opencode", "anthropic/model-c"),
             "weekly_strategy": ("opencode", "openai/model-d"),
+            "visual_director": ("claude", "sonnet"),
         }
         for role, (transport, model) in expected.items():
             profile = router.resolve_provider_profile(role, config=self.MIXED, env={})
@@ -596,6 +599,7 @@ class MixedProviderConfigurationTests(unittest.TestCase):
                 "story_writer": ("claude", "haiku"),
                 "breaking_radar": ("opencode", "anthropic/model-c"),
                 "weekly_strategy": ("opencode", "openai/model-d"),
+                "visual_director": ("claude", "sonnet"),
             }.items():
                 profile = router.resolve_provider_profile(
                     role, config=self.MIXED, env={}
@@ -621,7 +625,10 @@ class MixedProviderConfigurationTests(unittest.TestCase):
                 ("weekly_strategy", "openai/model-d"),
             ],
         )
-        self.assertEqual(calls["claude"], [("story_writer", "haiku")])
+        self.assertEqual(
+            sorted(calls["claude"]),
+            [("story_writer", "haiku"), ("visual_director", "sonnet")],
+        )
 
 
 class NoSilentFallbackTests(unittest.TestCase):
@@ -762,6 +769,7 @@ class PermissionBoundaryTests(unittest.TestCase):
             "nullone-draft-factory.md": ["shell"],
             "nullone-breaking-radar.md": ["shell"],
             "nullone-weekly-strategy.md": ["shell"],
+            "nullone-visual-director.md": ["shell"],
         }
         agents_dir = ROOT / "workspace/.opencode/agents"
         for filename, denied in registry.items():

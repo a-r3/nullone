@@ -182,7 +182,21 @@ class BrandMarkTests(RenderTestCase):
 
 class BrandGateIntegrationTests(RenderTestCase):
     def test_gate_passes_a_real_compliant_render(self):
-        out, _ = self.render(stat="55%")
+        # A short headline+stat typography card no longer counts as
+        # "compliant" on its own (see CONTENT_COVERAGE_SUFFICIENT below):
+        # exercise the gate through the BRANDED_GRAPHIC style, whose
+        # motif deterministically fills the band regardless of copy
+        # length.
+        out = self.work / "branded.png"
+        cp = run_renderer(
+            "--kicker", "Faktlar",
+            "--headline", "Qısa başlıq",
+            "--stat", "55%",
+            "--source-name", "Mənbə",
+            "--output", str(out),
+            "--visual-style", "BRANDED_GRAPHIC",
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
         # Must not raise.
         dispatcher._enforce_brand_gate(out, root=ROOT)
 
@@ -208,6 +222,8 @@ class BrandGateIntegrationTests(RenderTestCase):
     def test_pure_gate_function_matrix(self):
         base = {
             "schema": "nullone.render-brand-metadata.v1",
+            "visual_style": "EDITORIAL_TYPOGRAPHY",
+            "has_photo": False,
             "stat_present": True,
             "stat_color": list(ACCENT),
             "margin_px": 90,
@@ -215,6 +231,7 @@ class BrandGateIntegrationTests(RenderTestCase):
             "brand_mark_position": "bottom_right",
             "brand_mark_opacity": 170,
             "text_bounds_valid": True,
+            "content_coverage_ratio": 0.6,
         }
         self.assertEqual(evaluate_brand_gate(base)["BRAND_GATE"], "PASS")
         for field, bad_value, reason in (
@@ -230,6 +247,76 @@ class BrandGateIntegrationTests(RenderTestCase):
                 result = evaluate_brand_gate(bad)
                 self.assertEqual(result["BRAND_GATE"], "BLOCKED")
                 self.assertIn(reason, result["BRAND_GATE_REASON"])
+
+
+class TemplateAwareBrandGateTests(unittest.TestCase):
+    """Visual Director contract section 10: one check set per VISUAL_STYLE.
+
+    Named to match docs/contracts/visual-director-contract-v1.md's test
+    list (BRAND_GATE_SOURCE_PHOTO / BRAND_GATE_BRANDED_GRAPHIC /
+    BRAND_GATE_DATA_VISUALIZATION / BRAND_GATE_EDITORIAL_TYPOGRAPHY).
+    """
+
+    def _base(self, **overrides):
+        base = {
+            "schema": "nullone.render-brand-metadata.v1",
+            "visual_style": "EDITORIAL_TYPOGRAPHY",
+            "has_photo": False,
+            "stat_present": False,
+            "stat_color": None,
+            "margin_px": 90,
+            "brand_mark_count": 1,
+            "brand_mark_position": "bottom_right",
+            "brand_mark_opacity": 170,
+            "text_bounds_valid": True,
+            "content_coverage_ratio": 0.7,
+        }
+        base.update(overrides)
+        return base
+
+    def test_brand_gate_source_photo_requires_visual_region(self):
+        metadata = self._base(visual_style="REAL_PHOTO", has_photo=True, content_coverage_ratio=None)
+        self.assertEqual(evaluate_brand_gate(metadata)["BRAND_GATE"], "PASS")
+        no_region = dict(metadata, has_photo=False)
+        result = evaluate_brand_gate(no_region)
+        self.assertEqual(result["BRAND_GATE"], "BLOCKED")
+        self.assertIn("VISUAL_REGION_PRESENT", result["BRAND_GATE_REASON"])
+
+    def test_brand_gate_data_visualization_requires_visual_region(self):
+        metadata = self._base(visual_style="DATA_VISUALIZATION", has_photo=True, content_coverage_ratio=None)
+        self.assertEqual(evaluate_brand_gate(metadata)["BRAND_GATE"], "PASS")
+        no_region = dict(metadata, has_photo=False)
+        self.assertEqual(evaluate_brand_gate(no_region)["BRAND_GATE"], "BLOCKED")
+
+    def test_brand_gate_branded_graphic_requires_coverage(self):
+        filled = self._base(visual_style="BRANDED_GRAPHIC", content_coverage_ratio=0.96)
+        self.assertEqual(evaluate_brand_gate(filled)["BRAND_GATE"], "PASS")
+        empty = dict(filled, content_coverage_ratio=0.1)
+        result = evaluate_brand_gate(empty)
+        self.assertEqual(result["BRAND_GATE"], "BLOCKED")
+        self.assertIn("CONTENT_COVERAGE_SUFFICIENT", result["BRAND_GATE_REASON"])
+
+    def test_brand_gate_editorial_typography_requires_coverage(self):
+        # The exact 2026-09-25 production incident: short headline + one
+        # stat over an otherwise-empty canvas measured coverage ~0.34.
+        production_incident = self._base(
+            visual_style="EDITORIAL_TYPOGRAPHY",
+            stat_present=True,
+            stat_color=ACCENT,
+            content_coverage_ratio=0.34,
+        )
+        result = evaluate_brand_gate(production_incident)
+        self.assertEqual(result["BRAND_GATE"], "BLOCKED")
+        self.assertIn("CONTENT_COVERAGE_SUFFICIENT", result["BRAND_GATE_REASON"])
+
+    def test_structural_failure_blocks_even_without_a_stat(self):
+        """Regression: the old gate never blocked a stat-less render no
+        matter how many structural checks failed. Structural identity
+        checks are style-independent and must always gate."""
+        no_stat_bad_mark = self._base(brand_mark_count=2)
+        result = evaluate_brand_gate(no_stat_bad_mark)
+        self.assertEqual(result["BRAND_GATE"], "BLOCKED")
+        self.assertIn("BRAND_MARK_COUNT_EXACTLY_ONE", result["BRAND_GATE_REASON"])
 
 
 class NoPhotoRegressionTests(RenderTestCase):

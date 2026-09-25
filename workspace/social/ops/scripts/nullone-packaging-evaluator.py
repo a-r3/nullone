@@ -29,6 +29,16 @@ The model assesses raw signals only:
   both present must agree or the request is rejected. The Morning
   handoff schema itself is never altered.
 
+Optional `--visual-decision <canonical nullone.visual-decision.v1 file>`
+(docs/contracts/visual-director-contract-v1.md): when given, the
+decision is loaded and hash-verified (nullone_visual_director
+.load_visual_decision), mapped onto the one optional packaging signal
+`candidate.visual_director_style`, and injected before validation. The
+model must never submit `visual_director_style` directly in the request
+file -- only a properly validated decision file may supply it. Absent
+`--visual-decision`, behavior is byte-identical to before this flag
+existed.
+
 Receipts never carry secrets.
 """
 from __future__ import annotations
@@ -46,6 +56,11 @@ from nullone_packaging_receipt import (
     contained_path,
     evaluate_request,
 )
+from nullone_visual_director import (
+    VisualDirectorError,
+    load_visual_decision,
+    packaging_style_directive,
+)
 
 MODEL_FACING_ROOT = WORKSPACE / "social/drafts/production"
 
@@ -58,7 +73,13 @@ MORNING_VERIFICATION_VALUES = frozenset({"UNVERIFIED", "PARTIAL", "PASS", "BLOCK
 
 # Fields the model must never submit: evaluator outputs only.
 MODEL_FORBIDDEN_REQUEST_FIELDS = frozenset(
-    {"FORMAT_DECISION", "FORMAT_REASON", "VISUAL_STYLE", "slide_count_recommendation"}
+    {
+        "FORMAT_DECISION",
+        "FORMAT_REASON",
+        "VISUAL_STYLE",
+        "slide_count_recommendation",
+        "visual_director_style",
+    }
 )
 
 
@@ -105,9 +126,24 @@ def load_validated_request(path: Path, *, root: Path = WORKSPACE) -> dict[str, A
     return request
 
 
+def _apply_visual_decision(candidate_id: str, request: dict[str, Any], decision_path: str | None) -> dict[str, Any]:
+    if decision_path is None:
+        return request
+    try:
+        decision = load_visual_decision(Path(decision_path), candidate_id)
+    except VisualDirectorError as e:
+        raise BridgeError(f"PACKAGING_INPUT_INVALID: visual decision invalid: {e}") from e
+    directive = packaging_style_directive(decision)
+    if directive is not None:
+        request = dict(request)
+        request["candidate"] = dict(request["candidate"], visual_director_style=directive)
+    return request
+
+
 def evaluate_command(args: argparse.Namespace) -> int:
     candidate_id = check_candidate_id(args.candidate_id)
     request = load_validated_request(Path(args.request_file))
+    request = _apply_visual_decision(candidate_id, request, getattr(args, "visual_decision", None))
     receipt = evaluate_request(candidate_id, request)
     out = canonical_receipt_path(candidate_id)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +187,7 @@ def main() -> int:
     e = sub.add_parser("evaluate")
     e.add_argument("--candidate-id", required=True)
     e.add_argument("--request-file", required=True)
+    e.add_argument("--visual-decision", default=None, help="Canonical nullone.visual-decision.v1 file (optional)")
     sub.add_parser("self-test")
     args = parser.parse_args()
 

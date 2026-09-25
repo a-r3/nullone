@@ -100,8 +100,67 @@ class RenderBoundsError(RuntimeError):
     """Raised when drawn content would fall outside the output canvas."""
 
 
+VISUAL_STYLES = (
+    "REAL_PHOTO",
+    "SOURCE_SCREENSHOT",
+    "DATA_VISUALIZATION",
+    "EDITORIAL_TYPOGRAPHY",
+    "BRANDED_GRAPHIC",
+)
+
+# The only styles this renderer draws a no-photo layout for; the other
+# three arrive with --source already set by the render dispatcher (the
+# receipt's VISUAL_STYLE, passed through verbatim for observability/
+# brand-gate reporting -- this renderer does not re-decide it).
+NO_PHOTO_STYLES = ("EDITORIAL_TYPOGRAPHY", "BRANDED_GRAPHIC")
+
+# Below this fraction of the available typography band, a no-photo card
+# reads as an empty canvas rather than a deliberate composition (the
+# exact failure mode of the 2026-09-25 production incident: a bare
+# headline + one stat left roughly a quarter of the band filled). The
+# template-aware brand gate (nullone_brand_gate.py) enforces this via
+# CONTENT_COVERAGE_SUFFICIENT; the renderer only measures and reports it.
+MIN_TYPOGRAPHY_COVERAGE = 0.45
+
+
+def _draw_branded_graphic_motif(canvas, *, empty_top, empty_bottom):
+    """Deterministic NullOne motif filling typography negative space.
+
+    Not AI-generated, not photographic: a fixed accent rule + a large
+    low-opacity ring built entirely from the documented brand palette
+    (visual-rules.md Signal Orange accent). Gives BRANDED_GRAPHIC a
+    genuinely distinct, always-present visual treatment instead of
+    leaving the space empty.
+    """
+
+    empty_height = empty_bottom - empty_top
+    if empty_height < 80:
+        return empty_top  # not enough room for a motif; caller keeps plain background
+
+    draw = ImageDraw.Draw(canvas)
+    rule_y = empty_top
+    draw.rectangle((MARGIN, rule_y, MARGIN + 160, rule_y + 6), fill=(*ACCENT, 255))
+
+    ring_top = rule_y + 40
+    ring_bottom = empty_bottom
+    ring_diam = min(ring_bottom - ring_top, W - 2 * MARGIN, 620)
+    if ring_diam > 120:
+        ring_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ring_draw = ImageDraw.Draw(ring_layer)
+        cx = W - MARGIN - ring_diam // 3
+        cy = ring_top + (ring_bottom - ring_top) // 2
+        bbox = (cx - ring_diam // 2, cy - ring_diam // 2, cx + ring_diam // 2, cy + ring_diam // 2)
+        ring_draw.ellipse(bbox, outline=(*ACCENT, 60), width=10)
+        canvas.alpha_composite(ring_layer)
+
+    return ring_bottom
+
+
 def render(args):
     has_photo = bool(args.source)
+    visual_style = getattr(args, "visual_style", None) or "EDITORIAL_TYPOGRAPHY"
+    if visual_style not in VISUAL_STYLES:
+        raise ValueError(f"Unsupported --visual-style: {visual_style!r}")
 
     canvas = Image.new("RGB", (W, H), BG)
 
@@ -176,8 +235,24 @@ def render(args):
             text((MARGIN, y), line, sf, ACCENT)
             y += stat_line_h
 
+    content_bottom_y = y
+
     # Bottom metadata.
     bottom_y = H - 105
+
+    content_coverage_ratio = None
+    if not has_photo:
+        available_span = bottom_y - kicker_y
+        content_span = content_bottom_y - kicker_y
+        if visual_style == "BRANDED_GRAPHIC":
+            motif_bottom = _draw_branded_graphic_motif(
+                canvas, empty_top=content_bottom_y + 40, empty_bottom=bottom_y - 40
+            )
+            content_span = max(content_span, motif_bottom - kicker_y)
+            draw = ImageDraw.Draw(canvas)  # motif may have alpha-composited a new layer
+        content_coverage_ratio = (
+            round(min(1.0, content_span / available_span), 4) if available_span > 0 else 1.0
+        )
 
     text(
         (MARGIN, bottom_y),
@@ -230,6 +305,8 @@ def render(args):
 
     brand_metadata = {
         "schema": BRAND_METADATA_SCHEMA,
+        "visual_style": visual_style,
+        "has_photo": has_photo,
         "stat_present": bool(args.stat),
         "stat_color": list(stat_color) if stat_color is not None else None,
         "margin_px": MARGIN,
@@ -237,6 +314,7 @@ def render(args):
         "brand_mark_position": brand_mark_position,
         "brand_mark_opacity": BRAND_MARK_OPACITY,
         "text_bounds_valid": text_bounds_valid,
+        "content_coverage_ratio": content_coverage_ratio,
     }
     metadata_path = out.with_suffix(out.suffix + ".brand.json")
     metadata_path.write_text(
@@ -258,6 +336,7 @@ def main():
     p.add_argument("--stat", default="")
     p.add_argument("--source-name", required=True)
     p.add_argument("--output", required=True)
+    p.add_argument("--visual-style", choices=VISUAL_STYLES, default="EDITORIAL_TYPOGRAPHY")
 
     render(p.parse_args())
 

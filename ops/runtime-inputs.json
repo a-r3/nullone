@@ -37,8 +37,8 @@
       "sha256": "9b3eebef75495c9dcb1381bc92c12c3b9e6376616a5c76562d388ba189af65bc"
     },
     "workspace/social/references/visual-rules.md": {
-      "bytes": 9546,
-      "sha256": "a4a42d2e6e90c3b12abfa7c73e1323fca5ae764b4fea5ef7f3ab0cd91b290eb9"
+      "bytes": 10540,
+      "sha256": "19182df2dceb4b75bc02dc8d1b90726211ca81f8059176769e94570b81d6d0f6"
     },
     "workspace/social/tools/render_carousel_v2.py": {
       "bytes": 11261,
@@ -49,8 +49,8 @@
       "sha256": "86a49ab8b3ca679e51479bc32eb7268fd3f68474a1cf0697c59b9b58f09e5fb3"
     },
     "workspace/social/tools/render_texbrif_v2.py": {
-      "bytes": 8235,
-      "sha256": "709e8cc7595340b62ca9389299e54b0a88ecccbad77b07b8ff0a8071d54dade0"
+      "bytes": 11599,
+      "sha256": "11058232ebc81dcf664c70ee5b36cec2e26229312d124c890d7c9a2faf3d97ba"
     }
   },
   "note": "Immutable renderer/test inputs only. Never secrets, ledgers, manifests, state, sessions, or deploy-state.",

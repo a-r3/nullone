@@ -12,10 +12,12 @@ workflow ("I need role X")
 
 ## Concepts (do not conflate)
 
-- ROLE: a reviewed NullOne workflow capability. Exactly five:
+- ROLE: a reviewed NullOne workflow capability. Exactly six:
   `morning_editorial`, `draft_factory`, `story_writer`,
-  `breaking_radar`, `weekly_strategy`. Analytics and heartbeat stay
-  deterministic and are deliberately NOT routed through any LLM.
+  `breaking_radar`, `weekly_strategy`, `visual_director`
+  (docs/contracts/visual-director-contract-v1.md). Analytics and
+  heartbeat stay deterministic and are deliberately NOT routed through
+  any LLM.
 - TRANSPORT: the CLI vehicle, `opencode` or `claude`. OpenCode is a
   TRANSPORT, not the final LLM provider.
 - MODEL/PROVIDER ENDPOINT: the non-secret `provider/model`
@@ -78,12 +80,13 @@ router/adapter boundary.
   continuation, reviewed agents, timeouts, and fixed-string failures
   preserved.
 - Claude transport remains the explicit rollback adapter (Morning
-  cycle via `claude -p`, Story via `HaikuStoryWriter`), model from
-  the profile with truthful transport defaults when unpinned
+  cycle via `claude -p`, Story via `HaikuStoryWriter`, Visual Director
+  via the same reviewed `claude -p --model sonnet` route as Morning),
+  model from the profile with truthful transport defaults when unpinned
   (`sonnet` cycle / `haiku` writer -- the exact executed values, so
-  reported == executed). Claude supports `morning_editorial` +
-  `story_writer` only; any other role x claude fails closed at
-  resolve time.
+  reported == executed). Claude supports `morning_editorial`,
+  `story_writer`, and `visual_director` only; any other role x claude
+  fails closed at resolve time.
 
 ## Observability
 

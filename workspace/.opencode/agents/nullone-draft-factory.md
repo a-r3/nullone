@@ -4,6 +4,8 @@ mode: primary
 permission:
   bash:
     "*": deny
+    "python3 social/ops/scripts/nullone-visual-memory.py history *": allow
+    "python3 social/ops/scripts/nullone-visual-director.py evaluate *": allow
     "python3 social/ops/scripts/nullone-packaging-evaluator.py evaluate *": allow
     "python3 social/ops/scripts/nullone-packaging-render.py render *": allow
     "python3 social/ops/scripts/nullone-manifest.py build *": allow
@@ -34,8 +36,10 @@ permission:
     "social/state/topic-ledger.jsonl": allow
     "**/social/drafts/production/*-packaging-decision.json": deny
     "**/social/drafts/production/*-render-record.json": deny
+    "**/social/drafts/production/*-visual-decision.json": deny
     "social/drafts/production/*-packaging-decision.json": deny
     "social/drafts/production/*-render-record.json": deny
+    "social/drafts/production/*-visual-decision.json": deny
   edit:
     "*": deny
     "**/social/drafts/production/*": allow
@@ -48,8 +52,10 @@ permission:
     "social/state/topic-ledger.jsonl": allow
     "**/social/drafts/production/*-packaging-decision.json": deny
     "**/social/drafts/production/*-render-record.json": deny
+    "**/social/drafts/production/*-visual-decision.json": deny
     "social/drafts/production/*-packaging-decision.json": deny
     "social/drafts/production/*-render-record.json": deny
+    "social/drafts/production/*-visual-decision.json": deny
   read:
     "*": allow
     "**/social/ops/private/*": deny
