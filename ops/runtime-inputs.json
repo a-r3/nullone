@@ -49,8 +49,8 @@
       "sha256": "86a49ab8b3ca679e51479bc32eb7268fd3f68474a1cf0697c59b9b58f09e5fb3"
     },
     "workspace/social/tools/render_texbrif_v2.py": {
-      "bytes": 6037,
-      "sha256": "c4298f048aba8c5b375263a50ffb81b8612fca7124946357b2c06a63764b20a8"
+      "bytes": 8235,
+      "sha256": "709e8cc7595340b62ca9389299e54b0a88ecccbad77b07b8ff0a8071d54dade0"
     }
   },
   "note": "Immutable renderer/test inputs only. Never secrets, ledgers, manifests, state, sessions, or deploy-state.",

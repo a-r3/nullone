@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from nullone_bridge_common import BridgeError, WORKSPACE, atomic_write_json
+from nullone_brand_gate import BrandGateError, evaluate_brand_gate
 from nullone_packaging_receipt import (
     canonical_render_record_path,
     contained_path,
@@ -62,6 +63,32 @@ def _run_renderer(argv: list[str]) -> None:
     if cp.returncode != 0:
         raise BridgeError(f"PACKAGING_RENDER_FAILED: renderer exited {cp.returncode}")
     print(cp.stdout.strip()[-500:] if cp.stdout.strip() else "RENDER_OK")
+
+
+def _enforce_brand_gate(output: Path, *, root: Path) -> None:
+    """Visual V2 brand-compliance gate: SINGLE_POST only, before the
+    render record (and therefore before every downstream manifest and
+    delivery step) is ever written. Reads the renderer's own semantic
+    metadata sidecar (never re-derives brand facts by scanning pixels)."""
+
+    metadata_path = output.with_suffix(output.suffix + ".brand.json")
+    if not metadata_path.is_file():
+        raise BridgeError(
+            "BRAND_GATE_BLOCKED: renderer produced no brand-metadata sidecar"
+        )
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise BridgeError(f"BRAND_GATE_BLOCKED: brand metadata unreadable: {e}") from e
+    try:
+        result = evaluate_brand_gate(metadata)
+    except BrandGateError as e:
+        raise BridgeError(f"BRAND_GATE_BLOCKED: {e}") from e
+    print(f"BRAND_GATE={result['BRAND_GATE']}")
+    if result["BRAND_GATE_REASON"]:
+        print(f"BRAND_GATE_REASON={result['BRAND_GATE_REASON']}")
+    if result["BRAND_GATE"] != "PASS":
+        raise BridgeError(f"BRAND_GATE_BLOCKED: {result['BRAND_GATE_REASON']}")
 
 
 def _carousel_slide_count(spec_path: Path) -> int:
@@ -142,6 +169,7 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         _run_renderer(argv)
         if not output.is_file():
             raise BridgeError("PACKAGING_RENDER_FAILED: feed output missing")
+        _enforce_brand_gate(output, root=root)
         _write_render_record(
             candidate_id=candidate_id, receipt=receipt, format_decision=decision,
             asset_kind=asset["asset_kind"], outputs=[output], root=root,
