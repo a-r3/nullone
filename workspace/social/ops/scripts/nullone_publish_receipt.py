@@ -257,6 +257,101 @@ def transition_receipt(
     return record
 
 
+def converge_publishing_to_published(
+    workspace: Path,
+    review_post_id: str,
+    instance_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The ONE allowed terminal-to-terminal receipt transition (issue #169).
+
+    `transition_receipt` refuses ANY move once a receipt is terminal
+    (`SETTLED_PUBLISHING` included) -- correct for every writer, since
+    "terminal" must mean "dead, never executes again". But the GET-only
+    reconciliation path (never a writer: no promote_once/PUT anywhere on
+    its call chain) needs to let local truth catch up to Zernio's own
+    async-delivered truth when the original readback settled too early.
+
+    This function is that one narrow exception, not a loosening of
+    `transition_receipt`'s general rule:
+
+    - only ever moves SETTLED_PUBLISHING -> SETTLED_PUBLISHED, never any
+      other terminal pair;
+    - idempotent: a receipt already SETTLED_PUBLISHED is returned
+      unchanged (no-op, no double write);
+    - a receipt in any OTHER terminal state (SETTLED_FAILED,
+      SETTLED_UNKNOWN, ...) is left untouched and raises, exactly like
+      `transition_receipt` would -- this function widens nothing else;
+    - missing receipt (legacy/manual manifest with no receipt row) is a
+      no-op return of None: reconciliation must not fabricate a receipt
+      that never existed.
+    """
+    if not isinstance(result, dict) or "code" not in result:
+        raise BridgeError("Receipt convergence result missing a code")
+
+    path = receipt_path(workspace, review_post_id, instance_id)
+    try:
+        record = validate_receipt(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return None
+
+    if record["state"] == "SETTLED_PUBLISHED":
+        return record  # already converged; idempotent no-op
+
+    if record["state"] != "SETTLED_PUBLISHING":
+        raise BridgeError(
+            "Receipt convergence only allows SETTLED_PUBLISHING -> "
+            "SETTLED_PUBLISHED"
+        )
+
+    record["state"] = "SETTLED_PUBLISHED"
+    record["updated_at"] = now_iso()
+    record["result"] = dict(result)
+    atomic_write_json(path, record)
+    return record
+
+
+def converge_publishing_to_failed(
+    workspace: Path,
+    review_post_id: str,
+    instance_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The other allowed terminal-to-terminal transition (issue #169).
+
+    SETTLED_PUBLISHING -> SETTLED_FAILED, for the case where the ORIGINAL
+    readback settled PUBLISHING but a later GET-only reconciliation
+    readback proves the same authoritative terminal-failure signature the
+    primary bridge already trusts (`classify_readback_truth` returning
+    `FAILED`). Same shape as `converge_publishing_to_published`: only
+    that one state pair, idempotent, no-op on a missing receipt, refuses
+    any other terminal state untouched.
+    """
+    if not isinstance(result, dict) or "code" not in result:
+        raise BridgeError("Receipt convergence result missing a code")
+
+    path = receipt_path(workspace, review_post_id, instance_id)
+    try:
+        record = validate_receipt(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return None
+
+    if record["state"] == "SETTLED_FAILED":
+        return record  # already converged; idempotent no-op
+
+    if record["state"] != "SETTLED_PUBLISHING":
+        raise BridgeError(
+            "Receipt convergence only allows SETTLED_PUBLISHING -> "
+            "SETTLED_FAILED"
+        )
+
+    record["state"] = "SETTLED_FAILED"
+    record["updated_at"] = now_iso()
+    record["result"] = dict(result)
+    atomic_write_json(path, record)
+    return record
+
+
 def read_receipt(
     workspace: Path, review_post_id: str, instance_id: str
 ) -> dict[str, Any] | None:

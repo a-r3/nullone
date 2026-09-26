@@ -82,6 +82,26 @@ SECRET_ID_ZERNIO_PUBLISH_BEARER = "zernio.publish.bearer"
 # this module (or anywhere else) reads it from the process environment.
 PUBLISH_SECRET_STORE_ID = "ZERNIO_PUBLISH_API_TOKEN"
 
+# DISTINCT read-only reconciliation credential identity (issue #169).
+#
+# Deliberately separate from `zernio.publish.bearer` (the consequential
+# write credential, deliberately NOT environment-bound -- see above) and
+# from `zernio.analytics.bearer` / `zernio.drafts.bearer`. This identity
+# exists ONLY for the GET-only post-publish reconciliation path
+# (`nullone-publish-reconcile.py` / `nullone_publish_reconcile_provider_factory.py`),
+# which must never be able to construct the daemon's write-capable
+# provider. Unlike the publish bearer, this credential IS environment-bound
+# below: reconciliation runs standalone (no controller daemon, no private
+# pipe), the same runtime-source shape as analytics/drafts. Whatever Zernio
+# permission scope the operator provisions for this token is an operator
+# decision outside this module; this module's own guarantee is narrower
+# and structural: no code path reachable from this secret id ever issues
+# a PUT/POST to Zernio.
+SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER = "zernio.publish.reconcile.bearer"
+
+# Sole environment-variable binding for the reconciliation bearer secret.
+ENV_VAR_ZERNIO_PUBLISH_RECONCILE_API_TOKEN = "ZERNIO_PUBLISH_RECONCILE_API_TOKEN"
+
 # Fixed, value-free rendering produced by every non-revealing
 # representation of a SecretValue.
 SECRET_REDACTED_RENDER = "<redacted>"
@@ -193,6 +213,9 @@ class EnvironmentSecretProvider:
     ENV_VAR_BY_SECRET_ID: Mapping[str, str] = {
         SECRET_ID_ZERNIO_ANALYTICS_BEARER: ENV_VAR_ZERNIO_ANALYTICS_API_TOKEN,
         SECRET_ID_ZERNIO_DRAFTS_BEARER: ENV_VAR_ZERNIO_DRAFT_API_TOKEN,
+        SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER: (
+            ENV_VAR_ZERNIO_PUBLISH_RECONCILE_API_TOKEN
+        ),
     }
 
     def __init__(self, environ: Mapping[str, str] | None = None) -> None:

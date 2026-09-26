@@ -496,9 +496,11 @@ class SecretBoundaryTests(unittest.TestCase):
                 SECRET_ID_ZERNIO_PUBLISH_BEARER
             )
         )
-        # Exactly two inherited-env bindings remain (analytics + drafts).
+        # Three inherited-env bindings remain (analytics + drafts +
+        # publish-reconcile, #169). The write-capable publish bearer
+        # itself stays unbound (asserted above).
         self.assertEqual(
-            len(EnvironmentSecretProvider.ENV_VAR_BY_SECRET_ID), 2
+            len(EnvironmentSecretProvider.ENV_VAR_BY_SECRET_ID), 3
         )
 
 
