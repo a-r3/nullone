@@ -20,7 +20,10 @@ NODE_SUITES = [
 ]
 EXPECTED_PASSES = {
     "test_draft_bridge_route.js": 7,
-    "test_draft_bridge_index.js": 10,
+    # +1 for the P0 texbrif namespace collision fix: register() no longer
+    # calls registerInteractiveHandler itself (nullone-final-publish is now
+    # the sole registrant and delegates texbrif:draft:* here directly).
+    "test_draft_bridge_index.js": 11,
 }
 
 

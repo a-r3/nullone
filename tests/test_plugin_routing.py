@@ -30,7 +30,15 @@ EXPECTED_PASSES = {
     # observability (PR #162 review round 3): fires on register()/reload,
     # bounded timeout, failure observable and non-fatal, decoupled from the
     # publish daemon's spawn hook, and ledger_sync surfaced both ways.
-    "test_plugin_index.js": 44,
+    # +4 for the P0 approve-reply row.map fix (rows-of-rows normalization,
+    # a host-faithful buildInlineKeyboard never throwing, reject/revise/back
+    # unchanged, publish-callback unchanged).
+    # +4 for the P0 texbrif namespace collision fix (still exactly one
+    # registration with the real draft-bridge sibling loaded, draft actions
+    # delegated and reachable, a missing draft runner failing closed via
+    # draft-bridge's own text, and approve/reject/revise/back/publish
+    # routing unaffected by the delegation).
+    "test_plugin_index.js": 52,
     "test_plugin_link.js": 16,
     "test_approval_route.js": 15,
     "test_approval_durable.js": 11,

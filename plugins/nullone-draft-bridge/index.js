@@ -1,13 +1,28 @@
 /**
  * NullOne draft-bridge plugin entry (OpenClaw 2026.8.2, issue #142).
  *
- * Registers ONE interactive handler (channel telegram, namespace texbrif).
  * `draft:<MANIFEST_ID>` callbacks take the deterministic route: fixed-argv
  * one-shot spawn of the reviewed Python action core
  * (`nullone_draft_bridge_action.py handle --manifest-id <id>`), zero LLM
  * involvement. Any other `texbrif:*` callback returns handled:false so
  * existing flows (approval first-stage, publish, acceptance) are
  * byte-for-byte unchanged.
+ *
+ * REGISTRATION (P0, texbrif namespace collision fix): this plugin does NOT
+ * call `api.registerInteractiveHandler` itself. The installed host allows
+ * exactly one registered handler per (channel, namespace) pair; this
+ * plugin and nullone-final-publish both used to independently register
+ * {channel:"telegram", namespace:"texbrif"}, and this plugin always lost
+ * that race in production (every retained Gateway boot logged the
+ * collision warning), silently stranding every `texbrif:draft:*` callback
+ * in generic agent flow. nullone-final-publish is now the sole registrant
+ * and delegates `texbrif:draft:*` here via `buildHandler` directly (see
+ * its `loadDraftBridge` doc comment), so `register()` below is now an
+ * intentional no-op: this module is loaded purely as a library.
+ * `routeCallback`, `buildHandler`, `spawnRunner`, `resolveControllerPath`,
+ * `outcomeText`, and `SAFE_TEXT` remain the reviewed, independently tested
+ * contract that nullone-final-publish (and this file's own offline tests)
+ * call directly.
  *
  * CREDENTIALS: the Zernio drafts bearer flows via the inherited Gateway
  * process environment only (issue #61 branch A, the runtime source the
@@ -258,36 +273,19 @@ const entry = definePluginEntry({
   name: "NullOne Draft Bridge Action",
   description:
     "Claims texbrif:draft callbacks on Telegram and routes them to the deterministic NullOne draft-bridge action core (#142). All other texbrif:* callbacks fall through to existing flows.",
-  register(api, ctx) {
-    // ctx is a TEST/DEV-ONLY override hook. The real Gateway calls
-    // register(api) with exactly one argument.
-    const pythonBin = (ctx && ctx.pythonBin) || "python3";
-    const override =
-      ctx && ctx.controllerPath ? ctx.controllerPath : undefined;
-    const spawnOverride = (ctx && ctx.spawnRunner) || undefined;
-    let runner = null;
-    try {
-      // Supported installed 2026.8.2 API for the served production
-      // workspace (same resolution as nullone-final-publish).
-      const workspace = api.runtime.agent.resolveAgentWorkspaceDir(
-        api.config,
-        "main"
-      );
-      const controllerPath = resolveControllerPath(workspace, override);
-      runner =
-        spawnOverride || spawnRunner(pythonBin, controllerPath, workspace);
-    } catch {
-      // Fail closed at registration: the handler below stays installed but
-      // every draft callback is consumed safely with zero side effects
-      // and zero LLM fallback.
-      runner = null;
-    }
-
-    api.registerInteractiveHandler({
-      channel: "telegram",
-      namespace: "texbrif",
-      handler: buildHandler(runner),
-    });
+  register() {
+    // P0 texbrif namespace collision fix: this plugin no longer calls
+    // api.registerInteractiveHandler itself. The installed host allows
+    // exactly one registered handler per (channel, namespace) pair;
+    // nullone-final-publish is now the sole registrant of "texbrif" and
+    // delegates texbrif:draft:* to this module's buildHandler(...) and
+    // spawnRunner(...) directly (see its loadDraftBridge doc comment).
+    // Registering here too would just recreate the exact collision this
+    // fix removes, with whichever plugin loads second silently losing
+    // again -- so register() is now intentionally a no-op, and this
+    // module is used purely as an imported library of pure functions
+    // (routeCallback, buildHandler, spawnRunner, resolveControllerPath,
+    // outcomeText, SAFE_TEXT), all still exported below unchanged.
   },
 });
 

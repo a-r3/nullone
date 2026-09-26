@@ -99,12 +99,20 @@ before(() => {
 
 function registeredHandler(runner) {
   const api = makeApi();
+  // P0 texbrif namespace collision fix: this plugin no longer registers its
+  // own interactive handler (nullone-final-publish is the sole registrant
+  // and delegates to plugin.buildHandler(runner) directly). register() must
+  // still be a safe no-op call, but claims zero registrations.
   plugin.register(api);
-  assert.equal(registrations.length, 1);
-  assert.equal(registrations[0].channel, "telegram");
-  assert.equal(registrations[0].namespace, "texbrif");
+  assert.equal(registrations.length, 0);
   return plugin.buildHandler(runner);
 }
+
+test("NO_REGISTRATION_COLLISION: register() never calls registerInteractiveHandler", () => {
+  const api = makeApi();
+  plugin.register(api);
+  assert.deepEqual(registrations, []);
+});
 
 test("OpenClaw loader sees top-level plugin entry", () => {
   assert.equal(plugin.id, "nullone-draft-bridge");
