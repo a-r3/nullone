@@ -74,6 +74,7 @@ COMMANDS = [
     [sys.executable, "tests/test_publish_receipt.py"],
     [sys.executable, "tests/test_final_publish_controller.py"],
     [sys.executable, "tests/test_zernio_publish_adapter.py"],
+    [sys.executable, "tests/test_publish_reconcile.py"],
     [sys.executable, "tests/test_publish_secret_pipe.py"],
     [sys.executable, "tests/test_plugin_routing.py"],
     [sys.executable, "tests/test_release_cli.py"],
@@ -169,6 +170,16 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone-publish-bridge.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone-publish-reconcile.py",
+        "self-test",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_publish_reconcile_provider_factory.py",
         "self-test",
     ],
     [

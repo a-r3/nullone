@@ -122,9 +122,32 @@ class EnvironmentSecretProviderTests(unittest.TestCase):
     def test_legacy_alias_mapping_not_present(self):
         provider = self._provider()
         self.assertNotIn("zernio.bearer.legacy", provider.ENV_VAR_BY_SECRET_ID)
-        # Two inherited-env bindings: analytics + drafts (#81). The
-        # publication identity (#90) is intentionally NOT env-bound.
-        self.assertEqual(len(provider.ENV_VAR_BY_SECRET_ID), 2)
+        # Three inherited-env bindings: analytics + drafts (#81) + the
+        # read-only publish-reconciliation identity (#169). The
+        # consequential publication identity (#90) is intentionally NOT
+        # env-bound -- see test_publish_bearer_not_env_bound below.
+        self.assertEqual(len(provider.ENV_VAR_BY_SECRET_ID), 3)
+
+    def test_reconcile_bearer_is_env_bound_and_distinct(self):
+        from nullone_secret_provider import (
+            SECRET_ID_ZERNIO_PUBLISH_BEARER,
+            SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER,
+        )
+
+        provider = self._provider()
+        self.assertEqual(
+            provider.bound_env_var(SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER),
+            "ZERNIO_PUBLISH_RECONCILE_API_TOKEN",
+        )
+        self.assertNotEqual(
+            SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER,
+            SECRET_ID_ZERNIO_PUBLISH_BEARER,
+        )
+        # The write-capable publish bearer stays unbound even after this
+        # addition: reconciliation must never widen that boundary.
+        self.assertIsNone(
+            provider.bound_env_var(SECRET_ID_ZERNIO_PUBLISH_BEARER)
+        )
 
 
 class UnavailableSourceTests(unittest.TestCase):

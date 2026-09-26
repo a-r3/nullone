@@ -82,6 +82,7 @@ from nullone_bridge_common import (
 )
 from nullone_secret_provider import (
     SECRET_ID_ZERNIO_PUBLISH_BEARER,
+    SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER,
     SECRET_REDACTED_RENDER,
     EnvironmentSecretProvider,
     SecretNotConfiguredError,
@@ -842,6 +843,45 @@ class ZernioPublishProvider:
 
 
 # ---------------------------------------------------------------------------
+# Read-only reconciliation reader (issue #169)
+# ---------------------------------------------------------------------------
+
+
+class ZernioPublishReadOnlyReconciler:
+    """GET-only Zernio truth reader for post-publish reconciliation.
+
+    Structurally distinct from `ZernioPublishProvider`: this class defines
+    no `promote_once` and no method that issues a PUT/POST. It exposes
+    exactly one operation, `readback`, which delegates to the SAME
+    `_check_remote_draft` validation the primary publish path already
+    uses (never a second parallel definition of remote-draft truth).
+
+    It holds a private `ZernioPublishProvider` internally only to reuse
+    its `readback` method body; nothing on this class's public surface
+    (and nothing in the reconciliation CLI that constructs this class)
+    ever reaches `._delegate.promote_once`. Regression tests assert this
+    directly by spying on the transport's PUT call count.
+    """
+
+    def __init__(
+        self,
+        transport: PublishTransport,
+        *,
+        account_id: str = CANONICAL_ACCOUNT_ID,
+        base_url: str = DEFAULT_BASE_URL,
+    ) -> None:
+        self._delegate = ZernioPublishProvider(
+            transport, account_id=account_id, base_url=base_url
+        )
+
+    def readback(
+        self, post_id: str, expected: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Exactly one read-only GET /v1/posts/{postId}; see readback() above."""
+        return self._delegate.readback(post_id, expected)
+
+
+# ---------------------------------------------------------------------------
 # Truth classification (readback decides; PUT never does)
 # ---------------------------------------------------------------------------
 
@@ -903,6 +943,40 @@ def build_direct_publish_provider(
     transport = build_authenticated_transport(token=token)
 
     return ZernioPublishProvider(transport)
+
+
+def build_direct_reconcile_provider(
+    *,
+    secret_provider: SecretProvider,
+) -> ZernioPublishReadOnlyReconciler:
+    """Construct the read-only reconciliation reader (issue #169).
+
+    `secret_provider` is required and keyword-only, exactly like
+    `build_direct_publish_provider`, but bound to the DISTINCT
+    `zernio.publish.reconcile.bearer` identity -- never
+    `zernio.publish.bearer`, which stays reserved to the daemon-owned
+    write path. Construction performs no network calls and writes
+    nothing to disk. Returns a `ZernioPublishReadOnlyReconciler`, which
+    has no PUT-capable method at all.
+    """
+    provider: SecretProvider = secret_provider
+
+    try:
+        token = provider.get_required(
+            SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER
+        )
+    except SecretNotConfiguredError:
+        raise PublishConnectorUnauthorizedError(
+            SECRET_MISSING_REASON
+        ) from None
+    except SecretUnavailableError:
+        raise PublishConnectorUnavailableError(
+            SECRET_UNAVAILABLE_REASON
+        ) from None
+
+    transport = build_authenticated_transport(token=token)
+
+    return ZernioPublishReadOnlyReconciler(transport)
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1146,42 @@ def self_test() -> int:
         raise AssertionError("blank publish token was accepted")
     except PublishConnectorUnauthorizedError:
         pass
+
+    # Reconciliation credential (#169): distinct id, distinct from
+    # publish/analytics/drafts, and -- unlike publish -- IS env-bindable
+    # (reconciliation runs standalone, no controller pipe).
+    assert (
+        SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER
+        != SECRET_ID_ZERNIO_PUBLISH_BEARER
+    )
+    assert (
+        SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER
+        != SECRET_ID_ZERNIO_ANALYTICS_BEARER
+    )
+    assert (
+        SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER
+        != SECRET_ID_ZERNIO_DRAFTS_BEARER
+    )
+    assert (
+        EnvironmentSecretProvider.bound_env_var(
+            SECRET_ID_ZERNIO_PUBLISH_RECONCILE_BEARER
+        )
+        == "ZERNIO_PUBLISH_RECONCILE_API_TOKEN"
+    )
+
+    # The reconciler has structurally no PUT-capable method: proven by
+    # attribute absence, not by a promise never to call one.
+    reconcile_env = EnvironmentSecretProvider(
+        {"ZERNIO_PUBLISH_RECONCILE_API_TOKEN": marker}
+    )
+    reconcile_provider = build_direct_reconcile_provider(
+        secret_provider=reconcile_env
+    )
+    assert isinstance(reconcile_provider, ZernioPublishReadOnlyReconciler)
+    assert not hasattr(reconcile_provider, "promote_once")
+    assert not hasattr(reconcile_provider, "put")
+    assert marker not in repr(reconcile_provider._delegate)
+    assert marker not in repr(reconcile_provider._delegate._transport)
 
     print("ZERNIO_PUBLISH_ADAPTER_SELF_TEST=PASS")
     print("SECRET_REDACTED=TRUE")
