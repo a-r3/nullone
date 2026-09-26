@@ -316,6 +316,121 @@ test("registration claims telegram/texbrif exactly once", () => {
   assert.equal(typeof registrations[0].handler, "function");
 });
 
+test("NO_REGISTRATION_COLLISION: loading the real nullone-draft-bridge sibling never produces a second registration", () => {
+  // No draftBridge override: register() resolves the REAL sibling package
+  // at plugins/nullone-draft-bridge (loadDraftBridge's sibling-path
+  // resolution), exactly as production does. Before the fix this ran
+  // alongside draft-bridge's OWN register() independently calling
+  // registerInteractiveHandler a second time; now draft-bridge never calls
+  // it at all (see test_draft_bridge_index.js), so there is only ever one
+  // registration to begin with -- this asserts nullone-final-publish's own
+  // side of that contract.
+  const api = makeApi();
+  plugin.register(api);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].namespace, "texbrif");
+});
+
+test("DRAFT_BRIDGE_ACTION_REACHABLE: texbrif:draft:* is delegated to nullone-draft-bridge's own handler", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner();
+  const draftCalls = [];
+  const fakeDraftBridge = {
+    routeCallback: (data) => {
+      const m = /^texbrif:draft:(.+)$/.exec(data || "");
+      return m ? { decision: "draft", manifestId: m[1] } : { decision: "fallthrough" };
+    },
+    resolveControllerPath: (workspace) => `${workspace}/social/ops/scripts/nullone_draft_bridge_action.py`,
+    spawnRunner: () => {
+      throw new Error("spawnRunner must not be called when draftSpawnFn override is supplied");
+    },
+    buildHandler: (draftRunner) => async (handlerCtx) => {
+      draftCalls.push({ draftRunner, data: handlerCtx.callback.data });
+      await handlerCtx.respond.reply({ text: "✅ Qaralama yaradıldı. İnsan təsdiqi gözlənilir." });
+      return { handled: true };
+    },
+  };
+  const fakeDraftRunner = async () => "ACTION_STATUS=COMPLETED\n";
+  const api = makeApi();
+  plugin.register(api, makeCtx({ draftBridge: fakeDraftBridge, draftSpawnFn: fakeDraftRunner }));
+  assert.equal(registrations.length, 1, "still exactly one registration with draftBridge present");
+  const handler = registrations[0].handler;
+  const ctx = makeHandlerCtx({ callback: {
+    data: "texbrif:draft:2026-09-16-example-manifest",
+    namespace: "texbrif",
+    payload: "draft:2026-09-16-example-manifest",
+    messageId: 1,
+    chatId: "770011",
+  }});
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(draftCalls.length, 1);
+  assert.equal(draftCalls[0].data, "texbrif:draft:2026-09-16-example-manifest");
+  assert.equal(draftCalls[0].draftRunner, fakeDraftRunner);
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /Qaralama yaradıldı/);
+  // Delegating to draft never touches the publish daemon or the approval runner.
+  assert.equal(link.calls.length, 0);
+});
+
+test("DRAFT_BRIDGE_ACTION_REACHABLE: a missing draft-bridge runner fails closed via draft-bridge's own unavailable text (not agent flow)", async () => {
+  const realDraftBridge = require("../../plugins/nullone-draft-bridge/index.js");
+  const api = makeApi();
+  // draftControllerPath override that resolveControllerPath rejects (wrong
+  // basename) forces draftRunner resolution to fail, exercising the
+  // draftBridge.buildHandler(null) fail-closed path with the REAL module.
+  plugin.register(api, makeCtx({
+    draftBridge: realDraftBridge,
+    draftControllerPath: "/tmp/not-the-right-basename.py",
+  }));
+  const handler = registrations[0].handler;
+  const ctx = makeHandlerCtx({ callback: {
+    data: "texbrif:draft:2026-09-16-example-manifest",
+    namespace: "texbrif",
+    payload: "draft:2026-09-16-example-manifest",
+    messageId: 1,
+    chatId: "770011",
+  }});
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(ctx._replies.length, 1);
+  assert.match(ctx._replies[0], /Qaralama xidməti hazır deyil/);
+});
+
+test("ALL_EXISTING_CALLBACKS_ROUTE_CORRECTLY / FINAL_PUBLISH_ROUTE_REACHABLE: approve/reject/revise/back/publish are unaffected by draft delegation", async () => {
+  const realDraftBridge = require("../../plugins/nullone-draft-bridge/index.js");
+  const link = makeLink({ reply: { t: "result", outcome: "SETTLED", code: 0, publication_state: "PUBLISHED" } });
+  const { runner } = makeApprovalRunner();
+  const api = makeApi();
+  plugin.register(api, makeCtx({ draftBridge: realDraftBridge }));
+  assert.equal(registrations.length, 1);
+  // Rebuild with test fakes for link/approvalRunner exactly like
+  // registeredHandler() does, but keep the real draftBridge module wired in
+  // through the same buildHandler signature registration used.
+  const handler = plugin.buildHandler(link, runner, realDraftBridge, async () => "ACTION_STATUS=COMPLETED\n");
+  for (const action of ["approve", "reject", "revise", "back"]) {
+    const post = "0123456789abcdef01234567";
+    const ctx = makeHandlerCtx({ callback: {
+      data: `texbrif:${action}:${post}`,
+      namespace: "texbrif",
+      payload: `${action}:${post}`,
+      messageId: 424242,
+      chatId: "770011",
+    }});
+    const result = await handler(ctx);
+    assert.deepEqual(result, { handled: true }, action);
+    assert.equal(ctx._replies.length, 1, action);
+  }
+  assert.equal(link.calls.length, 0, "first-stage actions never touch the publish daemon");
+  // FINAL_PUBLISH_ROUTE_REACHABLE: publish still reaches the daemon link.
+  const publishCtx = makeHandlerCtx();
+  const publishResult = await handler(publishCtx);
+  assert.deepEqual(publishResult, { handled: true });
+  assert.equal(link.calls.length, 1);
+  assert.equal(link.calls[0].post_id, POST);
+  assert.match(publishCtx._replies[0], /Nəşr tamamlandı/);
+});
+
 test("exact valid handlerCtx produces the expected envelope", async () => {
   const link = makeLink();
   const handler = registeredHandler(link);
@@ -435,10 +550,116 @@ test("approve reply carries the second-confirmation button values", async () => 
   assert.deepEqual(result, { handled: true });
   assert.equal(sent.length, 1);
   assert.match(sent[0].text, /son təsdiqdən sonra/);
+  // Rows-of-rows (P0 row.map fix): the host's buildInlineKeyboard requires
+  // an array of rows, each row itself an array of button objects -- a flat
+  // array crashes with "row.map is not a function" (confirmed 3x in prod).
   assert.ok(Array.isArray(sent[0].buttons), "approve card must carry buttons");
-  const values = sent[0].buttons.map((b) => b.value).sort();
+  assert.ok(
+    sent[0].buttons.every((row) => Array.isArray(row)),
+    "approve card buttons must be rows-of-rows, not a flat array"
+  );
+  const values = sent[0].buttons.flat().map((b) => b.value).sort();
   assert.deepEqual(values, [`texbrif:back:${POST}`, `texbrif:publish:${POST}`]);
   assert.equal(link.calls.length, 0);
+});
+
+test("APPROVE_REPLY_BUTTONS_ROWS_OF_ROWS: toButtonRows wraps a flat array into one row", () => {
+  const flat = [
+    { label: "🚀 Paylaş", value: `texbrif:publish:${POST}`, style: "success" },
+    { label: "↩️ Geri", value: `texbrif:back:${POST}` },
+  ];
+  const rows = plugin.toButtonRows(flat);
+  assert.deepEqual(rows, [flat]);
+  // Already-nested input passes through unchanged (idempotent).
+  assert.deepEqual(plugin.toButtonRows(rows), rows);
+  // No buttons stays no buttons.
+  assert.equal(plugin.toButtonRows(null), null);
+  assert.equal(plugin.toButtonRows([]), null);
+});
+
+test("APPROVE_REPLY_NO_ROW_MAP_FAILURE: a host-faithful buildInlineKeyboard never throws on the approve reply", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
+  const sent = [];
+  // Mirrors the installed host's real bug shape: buildInlineKeyboard expects
+  // rows-of-rows and calls row.map on each element it's given.
+  const buildInlineKeyboardLikeHost = (buttons) => {
+    if (!buttons) return undefined;
+    return {
+      inline_keyboard: buttons.map((row) =>
+        row.map((button) => ({ text: button.label, callback_data: button.value }))
+      ),
+    };
+  };
+  const ctx = makeHandlerCtx({ callback: {
+    data: `texbrif:approve:${POST}`,
+    namespace: "texbrif",
+    payload: `approve:${POST}`,
+    messageId: 424242,
+    chatId: "770011",
+  }});
+  ctx.respond.reply = async ({ text, buttons }) => {
+    const reply_markup = buildInlineKeyboardLikeHost(buttons);
+    sent.push({ text, reply_markup });
+    return undefined;
+  };
+  // Must not throw/reject -- this is exactly the call that crashed with
+  // "row.map is not a function" in production before the fix.
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].reply_markup.inline_keyboard.length, 1);
+  assert.deepEqual(
+    sent[0].reply_markup.inline_keyboard[0].map((b) => b.callback_data).sort(),
+    [`texbrif:back:${POST}`, `texbrif:publish:${POST}`]
+  );
+});
+
+test("REJECT_REPLY_UNCHANGED / REVISE_REPLY_UNCHANGED / BACK_REPLY_UNCHANGED: no-button replies are untouched", async () => {
+  const link = makeLink();
+  const { runner } = makeApprovalRunner();
+  const handler = registeredHandler(link, runner);
+  const cases = [
+    { action: "reject", post: "aaaaaaaaaaaaaaaaaaaaaaaa", expect: /İmtina edildi/ },
+    { action: "revise", post: "bbbbbbbbbbbbbbbbbbbbbbbb", expect: /hansı dəyişikliyi/ },
+    { action: "back", post: "cccccccccccccccccccccccc", expect: /ləğv edildi/ },
+  ];
+  for (const { action, post, expect } of cases) {
+    const sent = [];
+    const ctx = makeHandlerCtx({ callback: {
+      data: `texbrif:${action}:${post}`,
+      namespace: "texbrif",
+      payload: `${action}:${post}`,
+      messageId: 424242,
+      chatId: "770011",
+    }});
+    ctx.respond.reply = async (payload) => {
+      sent.push(payload);
+      return undefined;
+    };
+    const result = await handler(ctx);
+    assert.deepEqual(result, { handled: true }, action);
+    assert.equal(sent.length, 1, action);
+    assert.match(sent[0].text, expect, action);
+    assert.equal("buttons" in sent[0], false, `${action}: no buttons key when there are no buttons`);
+  }
+});
+
+test("PUBLISH_CALLBACK_UNCHANGED: the second-stage publish reply never carries buttons", async () => {
+  const link = makeLink({ reply: { t: "result", outcome: "SETTLED", code: 0, publication_state: "PUBLISHED" } });
+  const handler = registeredHandler(link);
+  const sent = [];
+  const ctx = makeHandlerCtx();
+  ctx.respond.reply = async (payload) => {
+    sent.push(payload);
+    return undefined;
+  };
+  const result = await handler(ctx);
+  assert.deepEqual(result, { handled: true });
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Nəşr tamamlandı/);
+  assert.equal("buttons" in sent[0], false);
 });
 
 test("duplicate approve is idempotent with zero daemon contact", async () => {

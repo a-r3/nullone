@@ -1,12 +1,19 @@
 /**
  * NullOne final-publish plugin entry (OpenClaw 2026.8.2).
  *
- * Registers ONE interactive handler (channel telegram, namespace texbrif).
+ * Registers ONE interactive handler (channel telegram, namespace texbrif) --
+ * the SOLE registrant of that namespace (P0, texbrif registration collision
+ * fix: the installed host allows exactly one handler per channel+namespace,
+ * and this plugin already won that race in every retained production boot).
  * `publish:<POST_ID>` callbacks take the deterministic route: envelope +
  * HMAC over the private daemon pipe, zero LLM involvement.
  * `approve|reject|revise|back:<POST_ID>` callbacks take the deterministic
  * first-stage control route (issue #132): authenticated validation +
  * per-post state transition + bounded reply, zero LLM involvement.
+ * `draft:<MANIFEST_ID>` callbacks are delegated verbatim to the
+ * nullone-draft-bridge sibling plugin's own handler (see `loadDraftBridge`)
+ * so its deterministic action core stays reachable now that it no longer
+ * attempts its own (losing) registration.
  * Any other `texbrif:*` callback returns handled:false so existing agent
  * flow is byte-for-byte unchanged.
  *
@@ -664,6 +671,41 @@ function outcomeText(reply) {
 }
 
 /**
+ * Adapt a NullOne-internal button payload to the installed Telegram
+ * channel's inline-keyboard contract (P0, row.map incident).
+ *
+ * `approvalReply()` (approval-route.js) and the durable Python
+ * controller's `reply_for()` both return `buttons` as a FLAT array of
+ * button objects: `[publishButton, backButton]`. The installed host's
+ * keyboard builder (`buildInlineKeyboard`, dist
+ * telegram-ingress-drain-factory) requires rows-of-rows instead --
+ * `rows.map((row) => row.map(...))` -- so a flat array makes it call
+ * `.map` on a plain button object and throw "row.map is not a function".
+ * Confirmed 3/3 times in production on every `approve` action (the only
+ * first-stage reply that ever carries real buttons; reject/revise/back
+ * always pass `buttons: null` and never hit this path).
+ *
+ * This is the one adaptation point both reply sources flow through
+ * (`sendReply` below): it changes nothing about callback values, labels,
+ * or the approval reply contract -- only the array nesting the host
+ * requires. Already-nested input (rows-of-rows) passes through
+ * unchanged, so this stays correct if a future reply source starts
+ * emitting proper rows itself.
+ *
+ * @param {unknown} buttons
+ * @returns {Array<Array<object>>|null} rows-of-rows, or null for "no buttons"
+ */
+function toButtonRows(buttons) {
+  if (!Array.isArray(buttons) || buttons.length === 0) {
+    return null;
+  }
+  if (buttons.every((row) => Array.isArray(row))) {
+    return buttons;
+  }
+  return [buttons];
+}
+
+/**
  * Deterministic first-stage approval handler (P0, issue #132).
  *
  * Consumes `texbrif:approve|reject|revise|back:<POST_ID>` with zero LLM
@@ -707,8 +749,9 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, approvalRunn
 
   async function sendReply(text, buttons) {
     try {
-      if (Array.isArray(buttons) && buttons.length > 0) {
-        await handlerCtx.respond.reply({ text, buttons });
+      const rows = toButtonRows(buttons);
+      if (rows) {
+        await handlerCtx.respond.reply({ text, buttons: rows });
       } else {
         await handlerCtx.respond.reply({ text });
       }
@@ -780,6 +823,46 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, approvalRunn
   return { handled: true };
 }
 
+const DRAFT_BRIDGE_SIBLING_RELATIVE = ["..", "nullone-draft-bridge"];
+
+/**
+ * Load nullone-draft-bridge's pure routing/runner exports as a sibling
+ * plugin package (P0, texbrif namespace registration collision).
+ *
+ * The installed host allows exactly ONE registered interactive handler per
+ * (channel, namespace) pair. Both plugins used to independently call
+ * `api.registerInteractiveHandler({channel:"telegram", namespace:"texbrif"})`,
+ * and nullone-draft-bridge always lost that race in production (confirmed:
+ * every retained Gateway boot logs `"texbrif" namespace already registered
+ * by plugin "nullone-final-publish"` for `plugin=nullone-draft-bridge`),
+ * silently stranding `texbrif:draft:<manifestId>` callbacks in generic
+ * agent flow instead of the deterministic draft-bridge action core.
+ *
+ * Resolution: nullone-final-publish is the SOLE registrant of "texbrif"
+ * (it already wins the race today, so this is zero behavior change for
+ * existing approve/reject/revise/back/publish callbacks) and delegates
+ * `texbrif:draft:*` to nullone-draft-bridge's own reviewed, independently
+ * tested module, loaded from its sibling plugin directory (both plugins
+ * are installed side by side under the same plugins root -- confirmed in
+ * production and mirrored by this repo's layout). This never changes the
+ * `"texbrif:"` callback_data wire format and never duplicates
+ * draft-bridge's routing/spawn logic: it reuses draft-bridge's own
+ * `routeCallback` and `buildHandler` verbatim. If the sibling package is
+ * ever missing, this returns null and `buildHandler`'s fallthrough branch
+ * preserves today's existing (pre-fix) behavior for `texbrif:draft:*` --
+ * generic agent flow -- rather than inventing new behavior for a
+ * deployment shape that has never existed in production.
+ *
+ * @returns {object|null} the required draft-bridge module, or null
+ */
+function loadDraftBridge() {
+  try {
+    return require(path.join(__dirname, ...DRAFT_BRIDGE_SIBLING_RELATIVE));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Build the interactive handler with an injected daemon link (production
  * constructs the real link; offline tests inject a fake). A null link
@@ -791,8 +874,15 @@ async function handleApprovalFirstStage(handlerCtx, callback, data, approvalRunn
  * the durable first-stage authority. A null approvalRunner (failed
  * registration) consumes every approve/reject/revise/back callback safely
  * with a fail-closed reply -- never falls back to an in-memory decision.
+ *
+ * `draftBridge` (production: the required nullone-draft-bridge module;
+ * offline tests inject a fake with the same shape) plus `draftRunner`
+ * (production: nullone-draft-bridge's own `spawnRunner(...)` output; offline
+ * tests inject a fake) delegate `texbrif:draft:*` to draft-bridge's own
+ * handler (P0, namespace collision fix). A null draftBridge or draftRunner
+ * fails closed exactly as draft-bridge's own registration failure would.
  */
-function buildHandler(link, approvalRunner) {
+function buildHandler(link, approvalRunner, draftBridge, draftRunner) {
   return async (handlerCtx) => {
     const callback =
       handlerCtx && typeof handlerCtx.callback === "object" && handlerCtx.callback !== null
@@ -801,6 +891,24 @@ function buildHandler(link, approvalRunner) {
     const data = typeof callback.data === "string" ? callback.data : "";
     const routed = routeCallback(data);
     if (routed.decision === "fallthrough") {
+      if (draftBridge && typeof draftBridge.routeCallback === "function") {
+        const draftRouted = draftBridge.routeCallback(data);
+        if (draftRouted.decision !== "fallthrough") {
+          // texbrif:draft:* (claimed or malformed-shaped): hand off to
+          // draft-bridge's own handler verbatim -- byte-identical to what
+          // draft-bridge's own registration would have produced had it won
+          // the (now-removed) registration race. A null draftRunner (e.g.
+          // draft-bridge's own workspace resolution failed) fails closed
+          // via draft-bridge's OWN SAFE_TEXT.unavailable -- unchanged from
+          // its pre-collision-fix behavior.
+          return draftBridge.buildHandler(draftRunner)(handlerCtx);
+        }
+      }
+      // draftBridge itself unavailable (sibling package missing entirely,
+      // not merely a resolution failure) preserves today's existing
+      // behavior for texbrif:draft:*: falls through to generic agent flow,
+      // same as before this fix for any deployment that installs
+      // nullone-final-publish without its nullone-draft-bridge sibling.
       // P0 deterministic first-stage: approve/reject/revise/back are
       // consumed here with zero LLM involvement. Unknown texbrif:*
       // subcommands still fall through to existing agent behavior.
@@ -978,6 +1086,33 @@ const entry = definePluginEntry({
         approvalRunnerError = error;
       }
     }
+
+    // texbrif namespace collision fix: nullone-final-publish is the sole
+    // registrant below and delegates texbrif:draft:* to nullone-draft-bridge's
+    // own module (see loadDraftBridge doc comment). Independent fail-closed
+    // boundary, same pattern as link/approvalRunner above -- a problem here
+    // never affects publish or approve/reject/revise/back.
+    const draftBridge = (ctx && ctx.draftBridge) || loadDraftBridge();
+    let draftRunner = null;
+    if (draftBridge && workspace !== null) {
+      try {
+        const draftOverride =
+          ctx && ctx.draftControllerPath ? ctx.draftControllerPath : undefined;
+        const draftControllerPath = draftBridge.resolveControllerPath(
+          workspace,
+          draftOverride
+        );
+        const draftSpawnFn = (ctx && ctx.draftSpawnFn) || undefined;
+        draftRunner =
+          draftSpawnFn ||
+          draftBridge.spawnRunner(pythonBin, draftControllerPath, workspace);
+      } catch {
+        // Fail closed: draftBridge.buildHandler(null) replies with
+        // draft-bridge's own SAFE_TEXT.unavailable and zero side effects.
+        draftRunner = null;
+      }
+    }
+
     if (approvalRunnerError) {
       // Observable registration failure: previously nothing recorded why
       // the first-stage durable path came up unavailable.
@@ -1047,7 +1182,7 @@ const entry = definePluginEntry({
     api.registerInteractiveHandler({
       channel: "telegram",
       namespace: "texbrif",
-      handler: buildHandler(link, approvalRunner),
+      handler: buildHandler(link, approvalRunner, draftBridge, draftRunner),
     });
   },
 });
@@ -1058,6 +1193,9 @@ Object.assign(entry, {
   approvalReply,
   createApprovalStore,
   handleApprovalFirstStage,
+  toButtonRows,
+  loadDraftBridge,
+  DRAFT_BRIDGE_SIBLING_RELATIVE,
   canonicalStringify,
   buildFrame,
   buildStartupFrame,
