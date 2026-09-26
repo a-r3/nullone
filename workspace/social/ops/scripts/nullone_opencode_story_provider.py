@@ -90,6 +90,56 @@ _POLICY_PATTERN = _re.compile(
     r"\b403\b|policy violation|content policy|blocked by.+policy|moderation blocked",
     _re.IGNORECASE,
 )
+
+# Safe, fixed enum values for WHICH policy sub-signal matched (issue #171).
+# Never the matched text itself -- only one of these five labels is ever
+# persisted. `HTTP_403` is explicitly the generic/least-specific signal:
+# per the #171 forensic, a bare 403 alone proves nothing about WHY (it can
+# legitimately mean entitlement/access denial, an unavailable free-tier
+# model, account permission, auth scope, provider policy, or actual content
+# moderation) -- it is deliberately never labeled as, or treated as
+# evidence for, any of those specific causes.
+POLICY_SIGNAL_POLICY_VIOLATION = "POLICY_VIOLATION"
+POLICY_SIGNAL_CONTENT_POLICY = "CONTENT_POLICY"
+POLICY_SIGNAL_BLOCKED_BY_POLICY = "BLOCKED_BY_POLICY"
+POLICY_SIGNAL_MODERATION_BLOCKED = "MODERATION_BLOCKED"
+POLICY_SIGNAL_HTTP_403 = "HTTP_403"
+POLICY_SIGNAL_UNKNOWN = "UNKNOWN"
+
+# Deterministic precedence, most-specific phrase first, bare HTTP code
+# last: if a response happens to carry both an explicit phrase and a 403
+# status, the more specific phrase wins the label. Order is explicit and
+# fixed so the same combined output always classifies identically.
+_POLICY_SIGNAL_PRECEDENCE: tuple[tuple[str, "_re.Pattern[str]"], ...] = (
+    (POLICY_SIGNAL_POLICY_VIOLATION, _re.compile(r"policy violation", _re.IGNORECASE)),
+    (POLICY_SIGNAL_CONTENT_POLICY, _re.compile(r"content policy", _re.IGNORECASE)),
+    (
+        POLICY_SIGNAL_BLOCKED_BY_POLICY,
+        _re.compile(r"blocked by.+policy", _re.IGNORECASE),
+    ),
+    (
+        POLICY_SIGNAL_MODERATION_BLOCKED,
+        _re.compile(r"moderation blocked", _re.IGNORECASE),
+    ),
+    (POLICY_SIGNAL_HTTP_403, _re.compile(r"\b403\b", _re.IGNORECASE)),
+)
+
+
+def classify_policy_signal(combined: str) -> str:
+    """Deterministic, ordered classification of the matched policy signal.
+
+    Returns exactly one of the fixed `POLICY_SIGNAL_*` enum values --
+    never the raw matched text, never a slice of `combined`. Callers must
+    never persist `combined` itself; only this function's return value is
+    safe to carry into diagnostics. `POLICY_SIGNAL_UNKNOWN` is a defensive
+    fallback only (unreachable in practice: callers only invoke this after
+    `_POLICY_PATTERN.search(combined)` already matched one of the same
+    five alternatives checked here).
+    """
+    for signal, pattern in _POLICY_SIGNAL_PRECEDENCE:
+        if pattern.search(combined):
+            return signal
+    return POLICY_SIGNAL_UNKNOWN
 from nullone_opencode_binary import (
     OpenCodeBinaryResolutionError,
     resolve_opencode_binary,
@@ -130,7 +180,25 @@ class StoryWriterRateLimitedError(BridgeError):
 
 
 class StoryWriterPolicyBlockedError(BridgeError):
-    """The OpenCode Story writer run failed with a policy-block signature."""
+    """The OpenCode Story writer run failed with a policy-block signature.
+
+    Carries `policy_signal` (one of the fixed `POLICY_SIGNAL_*` enum
+    values above, never raw matched text) and `process_exit_code` (the
+    subprocess's own return code) as safe structured attributes -- never
+    embedded in the exception message string, which stays the fixed
+    generic phrase it always was.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        policy_signal: str,
+        process_exit_code: int,
+    ) -> None:
+        super().__init__(message)
+        self.policy_signal = policy_signal
+        self.process_exit_code = process_exit_code
 
 
 def resolve_story_model(raw: str | None = None) -> str:
@@ -303,7 +371,9 @@ class OpenCodeStoryWriter:
                 )
             if _POLICY_PATTERN.search(combined):
                 raise StoryWriterPolicyBlockedError(
-                    "OpenCode Story writer failed: provider policy block"
+                    "OpenCode Story writer failed: provider policy block",
+                    policy_signal=classify_policy_signal(combined),
+                    process_exit_code=cp.returncode,
                 )
             raise BridgeError(
                 f"OpenCode Story writer failed (exit={cp.returncode})"

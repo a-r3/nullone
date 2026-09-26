@@ -260,6 +260,7 @@ def classify_story_writer_error(exc: BaseException, *, writer: Any = None) -> di
         "model": identity["model"],
         "timeout_seconds": identity["timeout_seconds"],
         "process_exit_code": None,
+        "policy_signal": None,
     }
     if name == "StoryWriterTimeoutError":
         error_class = "STORY_PROVIDER_TIMEOUT"
@@ -281,6 +282,16 @@ def classify_story_writer_error(exc: BaseException, *, writer: Any = None) -> di
         error_class = "STORY_PROVIDER_POLICY_BLOCKED"
         stage = "writer-execution"
         safe = "Story writer provider policy block"
+        # Safe structured attributes carried by the typed exception itself
+        # (issue #171) -- never raw matched text, never the exception
+        # message. `policy_signal` is one of the fixed
+        # nullone_opencode_story_provider.POLICY_SIGNAL_* enum values.
+        signal = getattr(exc, "policy_signal", None)
+        if isinstance(signal, str) and signal:
+            diagnostics["policy_signal"] = signal
+        exit_code = getattr(exc, "process_exit_code", None)
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            diagnostics["process_exit_code"] = exit_code
     elif name == "OpenCodeBinaryResolutionError":
         error_class = "STORY_PROVIDER_STARTUP_ERROR"
         stage = "writer-spawn"
@@ -309,12 +320,18 @@ def format_writer_diagnostic_tag(diagnostics: dict[str, Any]) -> str:
     """Compact single-line diagnostic tag for the 240-char reason_text budget."""
 
     exit_code = diagnostics.get("process_exit_code")
+    signal = diagnostics.get("policy_signal")
+    # `signal=` only appears for STORY_PROVIDER_POLICY_BLOCKED (issue #171);
+    # omitted for every other error_class to keep the tag short and avoid
+    # implying a policy signal exists where none was ever detected.
+    signal_part = f"|signal={signal}" if signal else ""
     return (
         f"[{diagnostics.get('error_class')}"
         f"|transport={diagnostics.get('transport')}"
         f"|model={diagnostics.get('model')}"
         f"|timeout={diagnostics.get('timeout_seconds')}"
         f"|exit={exit_code if exit_code is not None else 'n/a'}"
+        f"{signal_part}"
         f"|retryable={str(bool(diagnostics.get('retryable'))).lower()}]"
     )
 
