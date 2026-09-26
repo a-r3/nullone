@@ -54,6 +54,7 @@ COMMANDS = [
     [sys.executable, "tests/test_morning_workflow.py"],
     [sys.executable, "tests/test_morning_deterministic_persistence.py"],
     [sys.executable, "tests/test_morning_claude_route.py"],
+    [sys.executable, "tests/test_story_writer_diagnostics.py"],
     [sys.executable, "tests/test_analytics_workflow.py"],
     [sys.executable, "tests/test_analytics_provider_factory.py"],
     [sys.executable, "tests/test_secret_provider.py"],

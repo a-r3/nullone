@@ -180,6 +180,146 @@ class StorySpecBlocked(StoryPipelineError):
 
 
 # ---------------------------------------------------------------------------
+# Deterministic writer-failure diagnostics (issue #157)
+# ---------------------------------------------------------------------------
+#
+# `_load_or_persist_story_spec` used to collapse every writer exception to
+# bare `WRITER_FAILED` + the exception class name, dropping timeout vs
+# unreachable vs exit-code vs auth/policy/rate-limit distinctions the
+# adapters already make. This section classifies deterministically (no
+# model reasoning) and persists a compact, secret-free diagnostic tag.
+#
+# Layering: classification is name-based so this module imports NO vendor
+# transport module (matching the existing lazy `nullone_claude` import
+# below). Only fixed template strings and parsed exit codes are ever
+# persisted -- never raw stdout/stderr, which may echo prompt fragments.
+
+STORY_WRITER_ERROR_CLASSES = frozenset(
+    {
+        "STORY_PROVIDER_AUTH_ERROR",
+        "STORY_PROVIDER_POLICY_BLOCKED",
+        "STORY_PROVIDER_RATE_LIMITED",
+        "STORY_PROVIDER_UNAVAILABLE",
+        "STORY_PROVIDER_TIMEOUT",
+        "STORY_PROVIDER_PROCESS_ERROR",
+        "STORY_PROVIDER_STARTUP_ERROR",
+        "STORY_OUTPUT_MISSING",
+        "STORY_OUTPUT_INVALID_JSON",
+        "STORY_OUTPUT_CONTRACT_INVALID",
+        "STORY_SOURCE_GATE_BLOCKED",
+        "STORY_INTERNAL_ERROR",
+    }
+)
+
+_RETRYABLE_WRITER_ERRORS = frozenset(
+    {
+        "STORY_PROVIDER_UNAVAILABLE",
+        "STORY_PROVIDER_RATE_LIMITED",
+    }
+)
+
+_EXIT_CODE_RE = re.compile(r"failed \(exit=(\d+)\)")
+
+
+def _writer_identity(writer: Any) -> dict[str, Any]:
+    """Best-effort transport/model/timeout labels from a writer object.
+
+    Duck-typed (never imports vendor modules): unknown shapes report
+    "unknown" rather than guessing.
+    """
+
+    type_name = type(writer).__name__ if writer is not None else ""
+    if "OpenCode" in type_name:
+        transport: Any = "opencode"
+    elif "Haiku" in type_name or "Claude" in type_name:
+        transport = "claude"
+    else:
+        transport = "unknown"
+    model = getattr(writer, "model", None)
+    if not isinstance(model, str) or not model.strip():
+        model = "unknown"
+    timeout = getattr(writer, "_timeout", getattr(writer, "timeout_seconds", None))
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        timeout = "unknown"
+    return {"transport": transport, "model": model, "timeout_seconds": timeout}
+
+
+def classify_story_writer_error(exc: BaseException, *, writer: Any = None) -> dict[str, Any]:
+    """Classify a Story writer failure into stable diagnostics.
+
+    Returns a JSON-safe dict with `error_class`, `failure_stage`,
+    `transport`, `model`, `timeout_seconds`, `process_exit_code`,
+    `retryable`, and `safe_error_text`. `safe_error_text` uses fixed
+    template strings only -- raw exception text is never persisted.
+    """
+
+    identity = _writer_identity(writer)
+    name = type(exc).__name__
+    diagnostics: dict[str, Any] = {
+        "transport": identity["transport"],
+        "model": identity["model"],
+        "timeout_seconds": identity["timeout_seconds"],
+        "process_exit_code": None,
+    }
+    if name == "StoryWriterTimeoutError":
+        error_class = "STORY_PROVIDER_TIMEOUT"
+        stage = "writer-execution"
+        safe = "Story writer exceeded its execution deadline"
+    elif name == "StoryWriterUnreachableError":
+        error_class = "STORY_PROVIDER_UNAVAILABLE"
+        stage = "writer-execution"
+        safe = "Story writer provider unreachable"
+    elif name == "StoryWriterAuthError":
+        error_class = "STORY_PROVIDER_AUTH_ERROR"
+        stage = "writer-execution"
+        safe = "Story writer provider auth error"
+    elif name == "StoryWriterRateLimitedError":
+        error_class = "STORY_PROVIDER_RATE_LIMITED"
+        stage = "writer-execution"
+        safe = "Story writer provider rate limited"
+    elif name == "StoryWriterPolicyBlockedError":
+        error_class = "STORY_PROVIDER_POLICY_BLOCKED"
+        stage = "writer-execution"
+        safe = "Story writer provider policy block"
+    elif name == "OpenCodeBinaryResolutionError":
+        error_class = "STORY_PROVIDER_STARTUP_ERROR"
+        stage = "writer-spawn"
+        safe = "Story writer executable unavailable"
+    elif "non-JSON output" in str(exc) or "not an object" in str(exc):
+        error_class = "STORY_OUTPUT_INVALID_JSON"
+        stage = "output-parse"
+        safe = "Story writer returned non-JSON output"
+    elif (match := _EXIT_CODE_RE.search(str(exc))) is not None:
+        error_class = "STORY_PROVIDER_PROCESS_ERROR"
+        stage = "writer-execution"
+        diagnostics["process_exit_code"] = int(match.group(1))
+        safe = "Story writer provider process failed"
+    else:
+        error_class = "STORY_INTERNAL_ERROR"
+        stage = "writer-execution"
+        safe = "Story writer failed with an unclassified error"
+    diagnostics["error_class"] = error_class
+    diagnostics["failure_stage"] = stage
+    diagnostics["retryable"] = error_class in _RETRYABLE_WRITER_ERRORS
+    diagnostics["safe_error_text"] = safe
+    return diagnostics
+
+
+def format_writer_diagnostic_tag(diagnostics: dict[str, Any]) -> str:
+    """Compact single-line diagnostic tag for the 240-char reason_text budget."""
+
+    exit_code = diagnostics.get("process_exit_code")
+    return (
+        f"[{diagnostics.get('error_class')}"
+        f"|transport={diagnostics.get('transport')}"
+        f"|model={diagnostics.get('model')}"
+        f"|timeout={diagnostics.get('timeout_seconds')}"
+        f"|exit={exit_code if exit_code is not None else 'n/a'}"
+        f"|retryable={str(bool(diagnostics.get('retryable'))).lower()}]"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Typed pipeline result
 # ---------------------------------------------------------------------------
 
@@ -775,11 +915,16 @@ def _load_or_persist_story_spec(
     try:
         raw_spec = writer(editorial_context)
     except Exception as e:
+        diagnostics = classify_story_writer_error(e, writer=writer)
         return None, _result(
             "WRITER_FAILED",
-            "Story writer provider failed.",
+            "Story writer provider failed. "
+            f"{format_writer_diagnostic_tag(diagnostics)}",
             story_request_id=story_request_id,
-            context={"error_type": type(e).__name__},
+            context={
+                "error_type": type(e).__name__,
+                "writer_diagnostics": diagnostics,
+            },
         )
 
     try:
@@ -793,10 +938,23 @@ def _load_or_persist_story_spec(
                 "writer requested source imagery but no valid source image is available"
             )
     except StoryWriterOutputInvalid as e:
+        missing = raw_spec is None or raw_spec == {}
         return None, _result(
             "WRITER_OUTPUT_INVALID",
             str(e),
             story_request_id=story_request_id,
+            context={
+                "writer_diagnostics": {
+                    "error_class": (
+                        "STORY_OUTPUT_MISSING"
+                        if missing
+                        else "STORY_OUTPUT_CONTRACT_INVALID"
+                    ),
+                    "failure_stage": "output-validation",
+                    "retryable": False,
+                    "safe_error_text": "Story writer output failed contract validation",
+                },
+            },
         )
 
     try:
