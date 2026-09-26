@@ -33,6 +33,7 @@ from nullone_opencode_story_provider import (  # noqa: E402
     StoryWriterRateLimitedError,
     StoryWriterTimeoutError,
     StoryWriterUnreachableError,
+    classify_policy_signal,
 )
 from support.morning_artifacts import (  # noqa: E402
     write_morning_artifacts,
@@ -104,9 +105,28 @@ class WriterDiagnosticsCase(unittest.TestCase):
 
     def test_policy_block_classified(self):
         result = self.run_pipeline(
-            OpenCodeFakeWriter(StoryWriterPolicyBlockedError("x")))
-        self.assert_diagnostics(
-            result, "STORY_PROVIDER_POLICY_BLOCKED", retryable=False)
+            OpenCodeFakeWriter(
+                StoryWriterPolicyBlockedError(
+                    "x", policy_signal="CONTENT_POLICY", process_exit_code=1
+                )
+            )
+        )
+        diag = self.assert_diagnostics(
+            result, "STORY_PROVIDER_POLICY_BLOCKED", retryable=False,
+            policy_signal="CONTENT_POLICY", process_exit_code=1,
+        )
+        tag = pipeline.format_writer_diagnostic_tag(diag)
+        self.assertIn("|signal=CONTENT_POLICY|", tag)
+
+    def test_policy_block_signal_absent_when_not_set(self):
+        """Every OTHER error class must never carry a policy_signal, and
+        the tag must never mention `signal=` for them (issue #171)."""
+        result = self.run_pipeline(
+            OpenCodeFakeWriter(StoryWriterAuthError("x")))
+        diag = self.assert_diagnostics(
+            result, "STORY_PROVIDER_AUTH_ERROR", policy_signal=None)
+        tag = pipeline.format_writer_diagnostic_tag(diag)
+        self.assertNotIn("signal=", tag)
 
     def test_rate_limit_classified_retryable(self):
         result = self.run_pipeline(
@@ -215,8 +235,61 @@ class AdapterSignalTests(unittest.TestCase):
             self._run(stderr="429 too many requests")
 
     def test_policy_signal(self):
-        with self.assertRaises(StoryWriterPolicyBlockedError):
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
             self._run(stderr="blocked by content policy")
+        # "blocked by content policy" matches both CONTENT_POLICY and
+        # BLOCKED_BY_POLICY; precedence puts CONTENT_POLICY first.
+        self.assertEqual(ctx.exception.policy_signal, "CONTENT_POLICY")
+        self.assertEqual(ctx.exception.process_exit_code, 1)
+
+    def test_policy_signal_http_403(self):
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
+            self._run(returncode=1, stderr="request failed: 403 Forbidden")
+        self.assertEqual(ctx.exception.policy_signal, "HTTP_403")
+        self.assertEqual(ctx.exception.process_exit_code, 1)
+
+    def test_policy_signal_policy_violation(self):
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
+            self._run(stderr="Error: policy violation detected")
+        self.assertEqual(ctx.exception.policy_signal, "POLICY_VIOLATION")
+
+    def test_policy_signal_blocked_by_policy_alone(self):
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
+            self._run(stderr="blocked by usage policy")
+        self.assertEqual(ctx.exception.policy_signal, "BLOCKED_BY_POLICY")
+
+    def test_policy_signal_moderation_blocked(self):
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
+            self._run(stderr="moderation blocked this request")
+        self.assertEqual(ctx.exception.policy_signal, "MODERATION_BLOCKED")
+
+    def test_policy_signal_exit_code_survives_nonzero(self):
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
+            self._run(returncode=7, stderr="content policy")
+        self.assertEqual(ctx.exception.process_exit_code, 7)
+
+    def test_policy_signal_never_leaks_secret_or_prompt(self):
+        """The exception's own attributes/message must never carry the
+        raw combined output, even when it contains a fake secret or a
+        prompt fragment (issue #171 -- raw stdout/stderr never persisted,
+        never inspectable off the typed exception)."""
+        fake_key = "sk-FAKE-DO-NOT-LOG-abcdef123456"
+        prompt_fragment = "Write a Story about the quarterly earnings call"
+        with self.assertRaises(StoryWriterPolicyBlockedError) as ctx:
+            self._run(
+                stderr=(
+                    f"content policy violation; key={fake_key}; "
+                    f"prompt was: {prompt_fragment}"
+                )
+            )
+        exc = ctx.exception
+        # "content policy violation" contains both phrases; POLICY_VIOLATION
+        # has higher precedence.
+        self.assertEqual(exc.policy_signal, "POLICY_VIOLATION")
+        for leaked in (fake_key, prompt_fragment):
+            self.assertNotIn(leaked, str(exc))
+            self.assertNotIn(leaked, exc.policy_signal)
+            self.assertNotIn(leaked, repr(exc.process_exit_code))
 
     def test_reachability_still_first(self):
         with self.assertRaises(StoryWriterUnreachableError):
@@ -254,6 +327,64 @@ class AdapterSignalTests(unittest.TestCase):
             writer({})
         argv = run.call_args[0][0]
         self.assertEqual(argv[argv.index("--model") + 1], writer.model)
+
+
+class PolicySignalClassifierTests(unittest.TestCase):
+    """Direct unit coverage of classify_policy_signal's deterministic
+    precedence (issue #171) -- no subprocess, no writer, pure function."""
+
+    def test_policy_violation(self):
+        self.assertEqual(
+            classify_policy_signal("Error: policy violation"), "POLICY_VIOLATION"
+        )
+
+    def test_content_policy(self):
+        self.assertEqual(
+            classify_policy_signal("blocked: content policy"), "CONTENT_POLICY"
+        )
+
+    def test_blocked_by_policy(self):
+        self.assertEqual(
+            classify_policy_signal("blocked by our usage policy"),
+            "BLOCKED_BY_POLICY",
+        )
+
+    def test_moderation_blocked(self):
+        self.assertEqual(
+            classify_policy_signal("moderation blocked"), "MODERATION_BLOCKED"
+        )
+
+    def test_http_403(self):
+        self.assertEqual(classify_policy_signal("HTTP 403"), "HTTP_403")
+
+    def test_precedence_explicit_phrase_beats_bare_403(self):
+        # Contains both an explicit phrase and a 403 code -- the phrase
+        # must win, not the generic code.
+        self.assertEqual(
+            classify_policy_signal("403: policy violation"), "POLICY_VIOLATION"
+        )
+
+    def test_precedence_order_matches_declared_order(self):
+        from nullone_opencode_story_provider import _POLICY_SIGNAL_PRECEDENCE
+
+        self.assertEqual(
+            [signal for signal, _pattern in _POLICY_SIGNAL_PRECEDENCE],
+            [
+                "POLICY_VIOLATION",
+                "CONTENT_POLICY",
+                "BLOCKED_BY_POLICY",
+                "MODERATION_BLOCKED",
+                "HTTP_403",
+            ],
+        )
+
+    def test_unknown_fallback_is_defensive_only(self):
+        self.assertEqual(classify_policy_signal("nothing policy-shaped here"), "UNKNOWN")
+
+    def test_case_insensitive(self):
+        self.assertEqual(
+            classify_policy_signal("MODERATION BLOCKED"), "MODERATION_BLOCKED"
+        )
 
 
 class SourceGateUnchangedTests(unittest.TestCase):
