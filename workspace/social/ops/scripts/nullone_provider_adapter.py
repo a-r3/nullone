@@ -257,11 +257,59 @@ def self_test() -> int:
     from nullone_provider_router import (
         ROLE_DRAFT_FACTORY,
         ROLE_MORNING_EDITORIAL,
+        ROLE_STORY_WRITER,
+        describe_profile,
         resolve_provider_profile,
     )
 
     # Registry shape only; no subprocess, no model calls.
     assert set(_ADAPTERS) == {TRANSPORT_OPENCODE, TRANSPORT_CLAUDE}
+
+    # Story Writer production migration off OpenCode (#172-era
+    # FreeTierError: OpenCode root-cause debugging closed as an
+    # engineering direction). The checked-in routing config alone
+    # (no env override) must resolve Story to the Claude transport
+    # and build exactly a HaikuStoryWriter -- never OpenCodeStoryWriter
+    # -- so there is no silent fallback and no OpenCode subprocess
+    # path is reachable for Story at all.
+    from nullone_opencode_story_provider import OpenCodeStoryWriter
+    from nullone_story_pipeline import HaikuStoryWriter
+
+    story_profile = resolve_provider_profile(ROLE_STORY_WRITER, env={})
+    assert story_profile.transport == TRANSPORT_CLAUDE, story_profile
+    assert story_profile.model == "haiku", story_profile
+    assert story_profile.timeout_seconds == 300, story_profile
+
+    story_writer = make_story_writer(story_profile)
+    assert isinstance(story_writer, HaikuStoryWriter), story_writer
+    assert not isinstance(story_writer, OpenCodeStoryWriter), story_writer
+    assert story_writer.model == "haiku", story_writer.model
+
+    # Prompt/output contract parity: the Claude and OpenCode Story
+    # writers both build from the identical shared prompt (the
+    # OpenCode adapter appends only its own transport-framing
+    # suffix). This must stay true regardless of which transport is
+    # configured live, so a future rollback never silently diverges
+    # the two writers' contracts.
+    from nullone_opencode_story_provider import (
+        _TRANSPORT_SUFFIX,
+        build_writer_prompt as build_opencode_writer_prompt,
+    )
+    from nullone_story_pipeline import _writer_prompt
+
+    fixture_context = {"probe": "self-test-only"}
+    assert (
+        build_opencode_writer_prompt(fixture_context)
+        == _writer_prompt(fixture_context) + _TRANSPORT_SUFFIX
+    )
+
+    # Diagnostics stay safe post-migration: role/transport/model only,
+    # never prompt/output content.
+    diag = describe_profile(story_profile)
+    assert diag == (
+        "role-provider-profile role=story_writer transport=claude "
+        "model=haiku timeout=300 fallback=none"
+    ), diag
 
     # Caller-owned surface is exactly role/prompt/workspace: no
     # agent/timeout override is representable.

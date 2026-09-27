@@ -376,12 +376,14 @@ def describe_profile(profile: ProviderProfile) -> str:
 
 def self_test() -> int:
     mapping = load_routing_config()
-    # Reviewed per-role transports (issue #155): Morning runs the
-    # validated Claude/Sonnet route; every other role stays on OpenCode.
+    # Reviewed per-role transports (issue #155; Story moved off
+    # OpenCode in the #172-era FreeTierError migration): Morning and
+    # Story Writer run the validated Claude route; Draft Factory,
+    # Breaking Radar, and Weekly Strategy stay on OpenCode.
     expected_transports = {
         ROLE_MORNING_EDITORIAL: TRANSPORT_CLAUDE,
         ROLE_DRAFT_FACTORY: TRANSPORT_OPENCODE,
-        ROLE_STORY_WRITER: TRANSPORT_OPENCODE,
+        ROLE_STORY_WRITER: TRANSPORT_CLAUDE,
         ROLE_BREAKING_RADAR: TRANSPORT_OPENCODE,
         ROLE_WEEKLY_STRATEGY: TRANSPORT_OPENCODE,
     }
@@ -400,6 +402,14 @@ def self_test() -> int:
         ROLE_MORNING_EDITORIAL, config=mapping, env={}
     )
     assert morning.model == CLAUDE_DEFAULT_MODEL, morning
+
+    # Story Writer production transport (checked-in config, no env
+    # override): exact reviewed Haiku model, not Sonnet/Opus, and the
+    # timeout budget is unchanged by the transport migration.
+    story = resolve_provider_profile(ROLE_STORY_WRITER, config=mapping, env={})
+    assert story.transport == TRANSPORT_CLAUDE, story
+    assert story.model == HAIKU_DEFAULT_MODEL, story
+    assert story.timeout_seconds == 300, story
 
     for bad_role in ("morning", "analytics", "", "MORNING_EDITORIAL"):
         try:

@@ -315,7 +315,19 @@ class FailureClassificationTests(unittest.TestCase):
 
 class FactorySelectionTests(unittest.TestCase):
     def test_selects_opencode_when_configured(self):
-        with mock.patch.dict(os.environ, {story_factory.STORY_PROVIDER_ENV_VAR: "opencode"}):
+        # #172-era migration: the checked-in mapping's transport is
+        # no longer opencode for this role, so OpenCode's own
+        # "model must be explicit configuration" rule (never
+        # defaulted) now applies to this override too -- pin the
+        # model alongside the transport, exactly as a real rollback
+        # would.
+        with mock.patch.dict(
+            os.environ,
+            {
+                story_factory.STORY_PROVIDER_ENV_VAR: "opencode",
+                story_adapter.OPENCODE_MODEL_ENV_VAR: "opencode/muse-spark-1.3-contributor-free",
+            },
+        ):
             name, writer = story_factory.get_story_writer()
         self.assertEqual(name, "opencode")
         self.assertIsInstance(writer, story_adapter.OpenCodeStoryWriter)
@@ -327,9 +339,13 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertIsInstance(writer, HaikuStoryWriter)
 
     def test_repo_default_is_router_checked_in_mapping(self):
-        # Issue #111 migration M1: the no-env default moved from the
-        # legacy factory shim (claude) to the checked-in role-router
-        # mapping (opencode + Muse Spark), matching live production.
+        # Issue #111 migration M1 moved the no-env default from the
+        # legacy factory shim to the checked-in role-router mapping.
+        # #172-era migration (operator decision, FreeTierError
+        # root-cause debugging closed as an engineering direction):
+        # that checked-in mapping now routes Story to Claude/haiku,
+        # not OpenCode/Muse Spark -- so both the shim default and the
+        # router default agree on Claude again, this time for real.
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(story_factory.STORY_PROVIDER_ENV_VAR, None)
             os.environ.pop("NULLONE_OPENCODE_MODEL", None)
@@ -339,10 +355,12 @@ class FactorySelectionTests(unittest.TestCase):
             self.assertEqual(story_factory.resolve_story_provider_name(), "claude")
             name, writer = story_factory.get_story_writer()
             profile = story_factory.get_story_profile()
-        self.assertEqual(name, "opencode")
-        self.assertEqual(profile.transport, "opencode")
-        self.assertIsInstance(writer, story_adapter.OpenCodeStoryWriter)
-        self.assertEqual(writer.model, "opencode/muse-spark-1.3-contributor-free")
+        self.assertEqual(name, "claude")
+        self.assertEqual(profile.transport, "claude")
+        self.assertEqual(profile.model, "haiku")
+        self.assertIsInstance(writer, HaikuStoryWriter)
+        self.assertNotIsInstance(writer, story_adapter.OpenCodeStoryWriter)
+        self.assertEqual(writer.model, "haiku")
 
     def test_unknown_provider_fails_closed_without_fallback(self):
         for bad in ("auto", "haiku", "openclaw", "both"):
@@ -374,9 +392,13 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
         self.assertEqual(result.context.get("story_provider"), "claude")
 
-    def test_dispatch_default_opencode_context_shows_muse_spark(self):
-        # Issue #111 migration M1: clean-env default is the router
-        # mapping (opencode + Muse Spark), not the legacy claude shim.
+    def test_dispatch_default_claude_context_shows_haiku(self):
+        # Issue #111 migration M1 made the clean-env default follow
+        # the router mapping rather than the legacy claude shim.
+        # #172-era migration then moved that checked-in mapping to
+        # Claude/haiku (operator decision; FreeTierError root-cause
+        # debugging closed), so the clean-env default now surfaces
+        # Claude/haiku in scheduled dispatch metadata too.
         import nullone_scheduled_run_dispatch as dispatch
 
         with mock.patch.dict(os.environ, {}, clear=False):
@@ -387,11 +409,8 @@ class FactorySelectionTests(unittest.TestCase):
                     del os.environ[key]
             result = dispatch.run_story_trigger({"workflow_id": "story"})
         self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
-        self.assertEqual(result.context.get("story_provider"), "opencode")
-        self.assertEqual(
-            result.context.get("story_model"),
-            "opencode/muse-spark-1.3-contributor-free",
-        )
+        self.assertEqual(result.context.get("story_provider"), "claude")
+        self.assertEqual(result.context.get("story_model"), "haiku")
 
     def test_dispatch_opencode_override_context_is_accurate(self):
         import nullone_scheduled_run_dispatch as dispatch
@@ -408,18 +427,48 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(result.context.get("story_provider"), "opencode")
         self.assertEqual(result.context.get("story_model"), "nvidia/meta/llama-3.1-8b-instruct")
 
-    def test_dispatch_opencode_default_context_is_muse_spark(self):
+    def test_dispatch_explicit_opencode_rollback_with_pinned_model_shows_muse_spark(self):
+        # #172-era migration: the checked-in mapping's transport for
+        # this role is no longer opencode, so the exact pre-migration
+        # production route (opencode + Muse Spark) is only reproduced
+        # by pinning BOTH the transport and the model explicitly --
+        # "flip the JSON entry back" (see commit) is the primary
+        # rollback path; this is the equivalent env-only rollback.
+        import nullone_scheduled_run_dispatch as dispatch
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                story_factory.STORY_PROVIDER_ENV_VAR: "opencode",
+                story_adapter.OPENCODE_MODEL_ENV_VAR: "opencode/muse-spark-1.3-contributor-free",
+            },
+        ):
+            result = dispatch.run_story_trigger({"workflow_id": "story"})
+        self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
+        self.assertEqual(result.context.get("story_provider"), "opencode")
+        self.assertEqual(
+            result.context.get("story_model"), "opencode/muse-spark-1.3-contributor-free"
+        )
+
+    def test_dispatch_opencode_rollback_without_pinned_model_fails_closed(self):
+        # #172-era migration side effect, now pinned by test: since
+        # the checked-in JSON transport for this role is claude, not
+        # opencode, OpenCode's own "the model MUST come from explicit
+        # configuration" rule (nullone_provider_router._transport_
+        # default_model returns None for opencode) applies to this
+        # legacy override too. Selecting opencode transport alone, with
+        # no model, is a routing misconfiguration -- it must fail
+        # closed, never silently guess Muse Spark or fall back to
+        # Claude.
         import nullone_scheduled_run_dispatch as dispatch
 
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(story_adapter.OPENCODE_MODEL_ENV_VAR, None)
             with mock.patch.dict(os.environ, {story_factory.STORY_PROVIDER_ENV_VAR: "opencode"}):
                 result = dispatch.run_story_trigger({"workflow_id": "story"})
-        self.assertEqual(result.reason_code, "TRIGGER_REJECTED")
-        self.assertEqual(result.context.get("story_provider"), "opencode")
-        self.assertEqual(
-            result.context.get("story_model"), "opencode/muse-spark-1.3-contributor-free"
-        )
+        self.assertEqual(result.reason_code, "STORY_PROVIDER_MISCONFIGURED")
+        self.assertEqual(result.context.get("story_provider"), "unknown")
+        self.assertNotIn("story_model", result.context)
 
     def test_misconfigured_provider_claims_no_model(self):
         import nullone_scheduled_run_dispatch as dispatch
