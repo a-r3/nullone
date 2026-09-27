@@ -151,10 +151,10 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(profile.model, "sonnet")
         self.assertEqual(profile.fallback_policy, router.FALLBACK_NONE)
         self.assertEqual(profile.timeout_seconds, 600)
-        # Check other roles unchanged via router
+        # Check Draft/Breaking/Weekly unchanged via router (still
+        # reviewed OpenCode/Muse Spark).
         for role, expected_model in [
             (router.ROLE_DRAFT_FACTORY, "opencode/muse-spark-1.3-contributor-free"),
-            (router.ROLE_STORY_WRITER, "opencode/muse-spark-1.3-contributor-free"),
             (router.ROLE_BREAKING_RADAR, "opencode/muse-spark-1.3-contributor-free"),
             (router.ROLE_WEEKLY_STRATEGY, "opencode/muse-spark-1.3-contributor-free"),
         ]:
@@ -164,6 +164,19 @@ class FactorySelectionTests(unittest.TestCase):
             self.assertEqual(p.fallback_policy, router.FALLBACK_NONE)
             self.assertEqual(p.timeout_seconds, router.ROLE_TIMEOUTS[role])
             self.assertEqual(p.capabilities, router.ROLE_CAPABILITIES[role])
+        # Story moved off OpenCode in the #172-era FreeTierError
+        # migration: its checked-in default is now Claude/haiku, not
+        # unchanged like the other three roles above.
+        story_p = router.resolve_provider_profile(router.ROLE_STORY_WRITER)
+        self.assertEqual(story_p.transport, "claude")
+        self.assertEqual(story_p.model, router.HAIKU_DEFAULT_MODEL)
+        self.assertEqual(story_p.fallback_policy, router.FALLBACK_NONE)
+        self.assertEqual(
+            story_p.timeout_seconds, router.ROLE_TIMEOUTS[router.ROLE_STORY_WRITER]
+        )
+        self.assertEqual(
+            story_p.capabilities, router.ROLE_CAPABILITIES[router.ROLE_STORY_WRITER]
+        )
 
     def test_selection_is_case_and_whitespace_insensitive(self):
         self.assertEqual(_resolve_with_env("OpEnCoDe"), "opencode")

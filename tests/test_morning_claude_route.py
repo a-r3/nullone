@@ -4,6 +4,13 @@
 Benchmark-validated: transport=claude, `--model sonnet` resolving to
 claude-sonnet-5, timeout 600, agent nullone-editorial, no fallback.
 
+Also covers the Story Writer Claude/Haiku route (#172-era migration
+off OpenCode, FreeTierError root-cause debugging closed as an
+engineering direction): transport=claude, model=haiku, timeout 300
+unchanged, agent nullone-story-writer, no fallback. Draft Factory,
+Breaking Radar, and Weekly Strategy remain on the reviewed OpenCode
+route.
+
 NO model invocation. NO network. Checked-in config + router only.
 """
 from __future__ import annotations
@@ -86,14 +93,60 @@ class MorningClaudeRouteTests(unittest.TestCase):
         )
 
 
+class StoryClaudeRouteTests(unittest.TestCase):
+    """Story resolves to the exact reviewed Claude/Haiku route.
+
+    #172-era migration off OpenCode: config-only change, the
+    HaikuStoryWriter dispatch path and its wiring into
+    make_story_writer() already existed and were already reviewed.
+    """
+
+    def test_story_transport_is_claude(self):
+        profile = router.resolve_provider_profile(
+            router.ROLE_STORY_WRITER, env={}
+        )
+        self.assertEqual(profile.transport, "claude")
+
+    def test_story_model_is_haiku_selector(self):
+        profile = router.resolve_provider_profile(
+            router.ROLE_STORY_WRITER, env={}
+        )
+        # Reviewed Haiku selector for this role -- never Sonnet/Opus.
+        self.assertEqual(profile.model, "haiku")
+        self.assertEqual(profile.model, router.HAIKU_DEFAULT_MODEL)
+
+    def test_story_timeout_is_300_unchanged(self):
+        profile = router.resolve_provider_profile(
+            router.ROLE_STORY_WRITER, env={}
+        )
+        self.assertEqual(profile.timeout_seconds, 300)
+        self.assertEqual(
+            profile.timeout_seconds,
+            router.ROLE_TIMEOUTS[router.ROLE_STORY_WRITER],
+        )
+
+    def test_story_agent_is_nullone_story_writer(self):
+        self.assertEqual(
+            router.role_agent(router.ROLE_STORY_WRITER),
+            "nullone-story-writer",
+        )
+
+    def test_story_has_no_fallback(self):
+        profile = router.resolve_provider_profile(
+            router.ROLE_STORY_WRITER, env={}
+        )
+        self.assertEqual(profile.fallback_policy, "none")
+        self.assertEqual(profile.fallback_policy, router.FALLBACK_NONE)
+
+
 class OtherRolesUnchangedTests(unittest.TestCase):
-    """F-I: every non-Morning role stays on its reviewed OpenCode route."""
+    """F-I: every non-Morning, non-Story role stays on its reviewed
+    OpenCode route."""
 
     def test_other_roles_unchanged(self):
         mapping = checked_in_mapping()
         for role in (
             router.ROLE_BREAKING_RADAR,
-            router.ROLE_STORY_WRITER,
             router.ROLE_DRAFT_FACTORY,
             router.ROLE_WEEKLY_STRATEGY,
         ):

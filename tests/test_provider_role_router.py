@@ -208,12 +208,19 @@ class RouterFailClosedTests(unittest.TestCase):
 
 class PerRoleRoutingTests(unittest.TestCase):
     def test_checked_in_mapping_routes_all_roles_to_reviewed_default(self):
+        # Story moved off OpenCode in the #172-era FreeTierError
+        # migration: its checked-in default is now the same Claude
+        # transport as Morning, with the reviewed Haiku selector
+        # (never Sonnet/Opus). Draft/Breaking/Weekly stay on OpenCode.
         mapping = checked_in_mapping()
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
             if role == router.ROLE_MORNING_EDITORIAL:
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, MORNING_CLAUDE_MODEL)
+            elif role == router.ROLE_STORY_WRITER:
+                self.assertEqual(profile.transport, "claude")
+                self.assertEqual(profile.model, router.HAIKU_DEFAULT_MODEL)
             else:
                 self.assertEqual(profile.transport, "opencode")
                 self.assertEqual(profile.model, MUSE_SPARK)
@@ -226,16 +233,22 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("RADAR_PROFILE_ROUTING=PASS")
         print("WEEKLY_PROFILE_ROUTING=PASS")
 
-    def test_checked_in_morning_claude_route_is_role_only(self):
+    def test_checked_in_morning_and_story_claude_routes_are_role_only(self):
+        # Morning (issue #155) and Story (#172-era migration) are the
+        # only roles on the checked-in Claude route; Draft/Breaking/
+        # Weekly remain untouched on OpenCode/Muse Spark.
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         roles = raw["roles"]
         self.assertEqual(
             roles["morning_editorial"],
             {"transport": "claude", "model": MORNING_CLAUDE_MODEL},
         )
+        self.assertEqual(
+            roles["story_writer"],
+            {"transport": "claude", "model": router.HAIKU_DEFAULT_MODEL},
+        )
         for role in (
             "draft_factory",
-            "story_writer",
             "breaking_radar",
             "weekly_strategy",
         ):
@@ -244,8 +257,9 @@ class PerRoleRoutingTests(unittest.TestCase):
             )
         print("MORNING_MODEL_RESOLVES_TO_TARGET=PASS")
         print("MORNING_TRANSPORT_IS_CLAUDE=PASS")
+        print("STORY_MODEL_RESOLVES_TO_HAIKU=PASS")
+        print("STORY_TRANSPORT_IS_CLAUDE=PASS")
         print("DRAFT_FACTORY_ROUTE_UNCHANGED=PASS")
-        print("STORY_WRITER_ROUTE_UNCHANGED=PASS")
         print("BREAKING_RADAR_ROUTE_UNCHANGED=PASS")
         print("WEEKLY_STRATEGY_ROUTE_UNCHANGED=PASS")
 
@@ -434,7 +448,24 @@ class RoleAuthorityTests(unittest.TestCase):
 
 
 class StoryClaudeTruthTests(unittest.TestCase):
+    def test_checked_in_default_is_claude_no_override_needed(self):
+        # #172-era migration: the checked-in mapping alone (a
+        # completely empty env, no per-role or legacy override) must
+        # already resolve Story to Claude/haiku -- this is the live
+        # production route now, not an opt-in override.
+        mapping = checked_in_mapping()
+        profile = router.resolve_provider_profile(
+            router.ROLE_STORY_WRITER, config=mapping, env={},
+        )
+        self.assertEqual(profile.transport, "claude")
+        self.assertEqual(profile.model, "haiku")
+        self.assertEqual(profile.timeout_seconds, 300)
+        print("STORY_CHECKED_IN_DEFAULT_IS_CLAUDE=PASS")
+
     def test_default_claude_story_model_is_haiku(self):
+        # Explicit per-role override still resolves identically to
+        # the (now identical) checked-in default -- the override knob
+        # keeps working even though it is no longer required.
         mapping = checked_in_mapping()
         profile = router.resolve_provider_profile(
             router.ROLE_STORY_WRITER, config=mapping,
