@@ -118,6 +118,25 @@ WRITER_CONTEXT_CANDIDATE_FIELDS = (
     "operator_revision_instruction",
 )
 
+# Numeric evidence authority is narrower than writer-visible context. A
+# candidate field being safe to *show* the writer for editorial framing
+# does not make it authoritative *factual support* for a numeric claim.
+# `topic_cluster` and `content_type` are classification labels, not facts.
+# `operator_revision_instruction` is unverified human revision text -- an
+# operator writing "make it 99%" must NOT make digit "99" numeric-verified
+# just because the writer legitimately sees that instruction (issue: the
+# writer-context field list and the numeric-support field list must not be
+# the same list). Keep this list strictly narrower than
+# WRITER_CONTEXT_CANDIDATE_FIELDS.
+WRITER_FACTUAL_SCOPE_FIELDS = (
+    "topic",
+    "claims",
+    "limitations",
+    "product_version_region",
+    "evidence_refs",
+    "factual_inputs",
+)
+
 STORY_PIPELINE_OUTCOMES = frozenset(
     {
         "DRAFT_CREATED",
@@ -479,19 +498,22 @@ def _candidate_source_image(candidate: dict[str, Any]) -> str | None:
 
 
 def writer_authorized_factual_scope(candidate: dict[str, Any]) -> dict[str, Any]:
-    """The exact candidate field values the writer is authorized to see.
+    """The candidate field values that are authoritative FACTUAL SUPPORT
+    for a numeric claim -- used only by numeric_scope_verifier().
 
-    Single source of truth for "writer-visible factual context", shared by
-    build_writer_context() (constructs the writer's editorial context) and
-    numeric_scope_verifier() (derives which numeric tokens are legitimately
-    writer-visible), so the two scopes cannot drift apart. Deliberately
-    excludes candidate metadata the writer never sees: rank, timestamps,
-    IDs, filesystem paths, cadence metadata and publication state.
+    This is deliberately NARROWER than WRITER_CONTEXT_CANDIDATE_FIELDS /
+    build_writer_context(): a field being safe to *show* the writer for
+    editorial framing does not make it authoritative factual support for a
+    number. In particular this excludes `topic_cluster` and `content_type`
+    (classification labels, not facts) and `operator_revision_instruction`
+    (unverified human revision text -- an operator writing "make it 99%"
+    must never make digit "99" numeric-verified just because the writer
+    legitimately sees that instruction). See WRITER_FACTUAL_SCOPE_FIELDS.
     """
 
     return {
         field_name: candidate.get(field_name)
-        for field_name in WRITER_CONTEXT_CANDIDATE_FIELDS
+        for field_name in WRITER_FACTUAL_SCOPE_FIELDS
         if candidate.get(field_name) is not None
     }
 
@@ -502,9 +524,17 @@ def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
     Deliberately excludes cadence arithmetic, publication state, hashes,
     filesystem mechanics, render dimensions, manifest construction,
     Telegram/Zernio mechanics and unrelated research history.
+
+    Uses the full WRITER_CONTEXT_CANDIDATE_FIELDS (not
+    writer_authorized_factual_scope(), which is numeric-evidence-only and
+    narrower) -- the writer-visible context contract is unchanged here.
     """
 
-    context = writer_authorized_factual_scope(candidate)
+    context = {
+        field_name: candidate.get(field_name)
+        for field_name in WRITER_CONTEXT_CANDIDATE_FIELDS
+        if candidate.get(field_name) is not None
+    }
     # Candidate provenance reaches the writer ONLY under this input-only
     # key. It must never collide with the writer-output namespace
     # (_WRITER_SPEC_FIELDS): the model previously echoed the
@@ -720,9 +750,12 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?%?")
 
 def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """Deterministic, narrow verifier: every number in the spec must be
-    verbatim-supported by the same writer-authorized factual scope the
-    writer itself was given (writer_authorized_factual_scope()) -- not a
-    narrower, drifting subset of it.
+    verbatim-supported by writer_authorized_factual_scope(candidate) --
+    the candidate's authoritative factual fields (topic, claims,
+    limitations, product_version_region, evidence_refs, factual_inputs).
+    This is intentionally narrower than the full writer-visible context:
+    classification labels (topic_cluster, content_type) and unverified
+    operator revision text are never treated as numeric evidence.
 
     This is intentionally narrow (numbers only) -- it is not a substitute
     for real fact verification, only a concrete example of the injectable

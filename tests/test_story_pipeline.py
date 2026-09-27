@@ -568,6 +568,60 @@ class NumericScopeAlignmentTests(unittest.TestCase):
         result = pipeline.numeric_scope_verifier(spec, candidate)
         self.assertEqual(result["status"], "BLOCKED")
 
+    def test_operator_revision_instruction_numbers_do_not_expand_scope(self):
+        # Unverified human revision text is not factual evidence: an
+        # operator writing "change it to 99%" must not authorize digit
+        # "99" as numeric-verified.
+        candidate = make_candidate(
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+            operator_revision_instruction="Statistikanı 99%-ə dəyiş",
+        )
+        spec = _bare_spec(headline="Nəticə 99% oldu")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_topic_cluster_numbers_do_not_expand_scope(self):
+        # `topic_cluster` is a classification label, not factual support.
+        candidate = make_candidate(
+            topic_cluster="cluster-2026",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Hadisə 2026-cı ildə baş verdi")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_content_type_is_excluded_from_numeric_scope_fields(self):
+        # `content_type` is a classification label, not factual support.
+        # Prove the field-set exclusion directly, and behaviorally: even
+        # a (non-standard, test-only) numeric-looking value must not leak
+        # into numeric evidence.
+        self.assertNotIn("content_type", pipeline.WRITER_FACTUAL_SCOPE_FIELDS)
+        candidate = make_candidate(
+            content_type="NEWS-2030",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Proqnoz 2030-cu il üçündür")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_writer_context_contract_unchanged_for_labels_and_revision_text(self):
+        # build_writer_context() must keep showing the writer
+        # topic_cluster, content_type and operator_revision_instruction
+        # exactly as before -- only numeric EVIDENCE scope narrowed.
+        candidate = make_candidate(
+            topic_cluster="cluster-2026",
+            operator_revision_instruction="Statistikanı 99%-ə dəyiş",
+        )
+        context = pipeline.build_writer_context(candidate)
+        self.assertEqual(context["topic_cluster"], "cluster-2026")
+        self.assertEqual(context["content_type"], candidate["content_type"])
+        self.assertEqual(
+            context["operator_revision_instruction"], "Statistikanı 99%-ə dəyiş"
+        )
+
     def test_existing_unsupported_number_case_still_blocked(self):
         # G: the pre-existing unsupported-number regression still holds.
         candidate = make_candidate(evidence_refs=["Model daha sürətlidir, amma faiz açıqlanmayıb."])
