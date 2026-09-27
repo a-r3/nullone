@@ -478,6 +478,24 @@ def _candidate_source_image(candidate: dict[str, Any]) -> str | None:
     return relative if path.is_file() else None
 
 
+def writer_authorized_factual_scope(candidate: dict[str, Any]) -> dict[str, Any]:
+    """The exact candidate field values the writer is authorized to see.
+
+    Single source of truth for "writer-visible factual context", shared by
+    build_writer_context() (constructs the writer's editorial context) and
+    numeric_scope_verifier() (derives which numeric tokens are legitimately
+    writer-visible), so the two scopes cannot drift apart. Deliberately
+    excludes candidate metadata the writer never sees: rank, timestamps,
+    IDs, filesystem paths, cadence metadata and publication state.
+    """
+
+    return {
+        field_name: candidate.get(field_name)
+        for field_name in WRITER_CONTEXT_CANDIDATE_FIELDS
+        if candidate.get(field_name) is not None
+    }
+
+
 def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
     """Minimum editorial context sent to the writer -- the Haiku boundary.
 
@@ -486,11 +504,7 @@ def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
     Telegram/Zernio mechanics and unrelated research history.
     """
 
-    context = {
-        field_name: candidate.get(field_name)
-        for field_name in WRITER_CONTEXT_CANDIDATE_FIELDS
-        if candidate.get(field_name) is not None
-    }
+    context = writer_authorized_factual_scope(candidate)
     # Candidate provenance reaches the writer ONLY under this input-only
     # key. It must never collide with the writer-output namespace
     # (_WRITER_SPEC_FIELDS): the model previously echoed the
@@ -633,6 +647,8 @@ You may use ONLY the exact supported facts below. Do not invent, broaden,
 or add any claim, number, date, geography, price, capability or
 comparison beyond what is given.
 
+Numeric tokens are strict: any digit-bearing numeric token you output must be copied verbatim from the factual context below. Never convert a number written as a word into digits -- for example, if the context says "seven-year", do not write "7"; write the Azerbaijani word form instead (such as "yeddi illik") unless the digit "7" is itself already present in the factual context. Never normalize, round, or invent numeric precision.
+
 {json.dumps(editorial_context, ensure_ascii=False, indent=2)}
 
  Leave any field that does not apply to the chosen layout as an empty
@@ -704,17 +720,19 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?%?")
 
 def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """Deterministic, narrow verifier: every number in the spec must be
-    verbatim-supported by the candidate's evidence text.
+    verbatim-supported by the same writer-authorized factual scope the
+    writer itself was given (writer_authorized_factual_scope()) -- not a
+    narrower, drifting subset of it.
 
     This is intentionally narrow (numbers only) -- it is not a substitute
     for real fact verification, only a concrete example of the injectable
-    verifier interface the issue requires.
+    verifier interface the issue requires. Generated writer output and
+    external data are never treated as evidence.
     """
 
-    evidence_blob = " ".join(
-        str(item) for item in candidate.get("evidence_refs", [])
+    evidence_blob = json.dumps(
+        writer_authorized_factual_scope(candidate), ensure_ascii=False
     )
-    evidence_blob += " " + json.dumps(candidate.get("factual_inputs", {}), ensure_ascii=False)
 
     spec_text = " ".join(
         str(spec.get(field_name, ""))

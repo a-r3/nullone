@@ -462,6 +462,132 @@ class VerificationTests(StoryPipelineTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Numeric verifier scope alignment with the writer contract
+#
+# The numeric verifier must accept exactly the numeric tokens present in
+# the fields the writer is authorized to use (WRITER_CONTEXT_CANDIDATE_
+# FIELDS / writer_authorized_factual_scope()) -- no narrower, drifting
+# subset, and no broader unrelated candidate metadata.
+# ---------------------------------------------------------------------------
+
+
+def _bare_spec(**overrides) -> dict:
+    spec = {
+        "layout": "big-stat",
+        "headline": "",
+        "body": "",
+        "stat": "",
+        "source_name": "Rəsmi mənbə",
+        "use_source_image": False,
+        "cta": "",
+        "left_stat": "",
+        "right_stat": "",
+        "left_label": "",
+        "right_label": "",
+    }
+    spec.update(overrides)
+    return spec
+
+
+class NumericScopeAlignmentTests(unittest.TestCase):
+    def test_topic_numbers_are_supported(self):
+        # A: numbers appearing only in `topic` (a writer-authorized field),
+        # not in evidence_refs/factual_inputs, must be supported.
+        candidate = make_candidate(
+            topic=(
+                "Akamai signs a record $11.6B, seven-year cloud-infrastructure "
+                "agreement with Anthropic (option to expand to ~$20B)"
+            ),
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Razılaşma 11.6 milyard, genişlənmə 20 milyarda qədər")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_unsupported_digit_still_blocked(self):
+        # B: an invented number not present anywhere in the authorized
+        # scope must still be blocked.
+        candidate = make_candidate(
+            topic="Akamai signs a record $11.6B, seven-year agreement (~$20B option)",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Sövdə 11.6 milyard, lakin 12.4 faiz artım gözlənilir")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_word_to_digit_conversion_is_blocked(self):
+        # C: the writer may not turn a number word into a digit that is
+        # nowhere present as a digit in the authorized factual scope.
+        candidate = make_candidate(
+            topic="Company signs a seven-year cloud-infrastructure agreement",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="7 illik razılaşma imzalandı")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_word_preserving_output_passes(self):
+        # D: preserving the word form (no digit token at all) passes.
+        candidate = make_candidate(
+            topic="Company signs a seven-year cloud-infrastructure agreement",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Yeddi illik razılaşma imzalandı")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_claims_limitations_and_version_region_numbers_are_supported(self):
+        # E: numbers in claims / limitations / product_version_region are
+        # accepted when present verbatim.
+        candidate = make_candidate(
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+            claims="Performans 42.7% artıb",
+            limitations="Yalnız v3.2 versiyasında mövcuddur",
+            product_version_region="EU / v3.2",
+        )
+        spec = _bare_spec(headline="Artım 42.7%, versiya 3.2")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_unrelated_metadata_numbers_do_not_expand_scope(self):
+        # F: candidate_id / rank / timestamps / IDs are never
+        # writer-authorized fields and must not expand numeric support.
+        candidate = make_candidate(
+            candidate_id="cand-999",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        candidate["rank"] = 3
+        candidate["created_at"] = "2026-09-27T18:30:00Z"
+        spec = _bare_spec(headline="999 baxış qeydə alındı")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_existing_unsupported_number_case_still_blocked(self):
+        # G: the pre-existing unsupported-number regression still holds.
+        candidate = make_candidate(evidence_refs=["Model daha sürətlidir, amma faiz açıqlanmayıb."])
+        spec = dict(DEFAULT_SPEC)
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_existing_supported_number_case_still_passes(self):
+        candidate = make_candidate()
+        spec = dict(DEFAULT_SPEC)
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_writer_prompt_contains_exact_number_form_rule(self):
+        # H: the writer prompt states the exact-number-form rule.
+        prompt = pipeline._writer_prompt({})
+        self.assertIn("Never convert a number written as a word into digits", prompt)
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
