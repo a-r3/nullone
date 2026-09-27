@@ -642,6 +642,135 @@ class NumericScopeAlignmentTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Numeric verifier: safe decimal comma/dot locale equivalence
+#
+# The verifier must tolerate ONLY a presentation-level decimal-separator
+# localization of the exact same number (e.g. "11,6" vs "11.6") -- never
+# rounding, precision changes, digit changes, percent changes, or
+# thousands-grouping ambiguity. PR #176 field authority is unaffected.
+# ---------------------------------------------------------------------------
+
+
+class NumericScopeDecimalLocaleTests(unittest.TestCase):
+    def test_dot_to_comma_is_supported(self):
+        # 1: evidence uses a dot, spec localizes to a comma.
+        candidate = make_candidate(
+            topic="$11.6B cloud-infrastructure agreement",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Sövdə 11,6 milyard")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_percent_dot_to_comma_is_supported(self):
+        # 2: same for a percentage value.
+        candidate = make_candidate(
+            claims="Performans 41.6% artıb",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Artım 41,6%")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_comma_to_dot_is_supported_symmetrically(self):
+        # 3: the equivalence is symmetric -- evidence in comma form,
+        # spec in dot form, also passes.
+        candidate = make_candidate(
+            topic="Razılaşma 11,6 milyard",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Agreement worth 11.6")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "PASS")
+
+    def test_different_fractional_digits_still_blocked(self):
+        # 4: same integer part, different fractional digits -- not the
+        # same number, must not be localized away.
+        candidate = make_candidate(
+            topic="$11.6B cloud-infrastructure agreement",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Sövdə 11,7 milyard")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_percent_presence_mismatch_still_blocked(self):
+        # 5: dropping/adding the '%' sign is a claim change, not a
+        # locale difference.
+        candidate = make_candidate(
+            claims="Performans 41.6% artıb",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Artım 41,6")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_thousands_grouping_ambiguity_still_blocked(self):
+        # 6: a 3-digit "fractional" part is thousands-grouping-shaped,
+        # not a decimal locale difference -- must not be normalized.
+        candidate = make_candidate(
+            topic="Investment of $1.000 units",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Investisiya 1,000")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_word_to_digit_conversion_still_blocked(self):
+        # 7: no digit "7" anywhere in evidence (only the word form) --
+        # decimal-locale tolerance must not paper over this.
+        candidate = make_candidate(
+            topic="Company signs a seven-year cloud-infrastructure agreement",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="7 illik razılaşma imzalandı")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_arbitrary_unsupported_number_still_blocked(self):
+        # 8: an invented number unrelated to any evidence value.
+        candidate = make_candidate(
+            topic="$11.6B cloud-infrastructure agreement",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Sövdə 99,9 milyard")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_field_authority_unaffected_by_decimal_tolerance(self):
+        # 9: PR #176 field authority remains exact -- topic_cluster,
+        # content_type and operator_revision_instruction numbers still
+        # never become numeric-supported, decimal locale form or not.
+        candidate = make_candidate(
+            topic_cluster="cluster-2026",
+            operator_revision_instruction="Statistikanı 99,9%-ə dəyiş",
+            evidence_refs=["Rəsmi elan dərc edilib."],
+            factual_inputs={},
+        )
+        spec = _bare_spec(headline="Nəticə 99,9% oldu")
+        result = pipeline.numeric_scope_verifier(spec, candidate)
+        self.assertEqual(result["status"], "BLOCKED")
+
+    def test_decimal_locale_equivalent_helper_direct_cases(self):
+        # 10: direct unit coverage of the helper's decision table.
+        equivalent = pipeline._decimal_locale_equivalent
+        self.assertTrue(equivalent("11,6", "11.6"))
+        self.assertTrue(equivalent("41,6%", "41.6%"))
+        self.assertFalse(equivalent("11,7", "11.6"))
+        self.assertFalse(equivalent("41,6", "41.6%"))
+        self.assertFalse(equivalent("1,000", "1.000"))
+        self.assertFalse(equivalent("7", "11.6"))
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 

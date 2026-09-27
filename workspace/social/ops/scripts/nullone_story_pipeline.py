@@ -747,6 +747,41 @@ class StoryVerifier(Protocol):
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?%?")
 
+# Full-string parse of one _NUMBER_RE token: integer part, optional decimal
+# separator + fractional part, optional percent sign.
+_DECIMAL_LOCALE_TOKEN_RE = re.compile(r"^(\d+)(?:([.,])(\d+))?(%)?$")
+
+
+def _decimal_locale_equivalent(spec_token: str, evidence_token: str) -> bool:
+    """True only for a safe comma/dot decimal-separator localization of the
+    same number (e.g. "11,6" vs "11.6"; "41,6%" vs "41.6%").
+
+    Requires identical digits on both sides of a single decimal separator, a
+    1-2 digit fractional part, and matching '%' presence. A 3+ digit
+    "fractional" part (e.g. "1,000" vs "1.000") is thousands-grouping-shaped
+    and deliberately NOT treated as decimal-equivalent -- that would confuse
+    locale formatting with a different number. A token with no separator at
+    all is never decimal-equivalent to anything (word-to-digit conversion,
+    e.g. bare "7", is a different, unrelated failure mode).
+    """
+
+    spec_match = _DECIMAL_LOCALE_TOKEN_RE.match(spec_token)
+    evidence_match = _DECIMAL_LOCALE_TOKEN_RE.match(evidence_token)
+    if not spec_match or not evidence_match:
+        return False
+
+    spec_int, _spec_sep, spec_frac, spec_pct = spec_match.groups()
+    evidence_int, _evidence_sep, evidence_frac, evidence_pct = evidence_match.groups()
+
+    if spec_pct != evidence_pct:
+        return False
+    if not spec_frac or not evidence_frac:
+        return False
+    if len(spec_frac) not in (1, 2) or len(evidence_frac) not in (1, 2):
+        return False
+
+    return spec_int == evidence_int and spec_frac == evidence_frac
+
 
 def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """Deterministic, narrow verifier: every number in the spec must be
@@ -757,6 +792,12 @@ def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> d
     classification labels (topic_cluster, content_type) and unverified
     operator revision text are never treated as numeric evidence.
 
+    A spec number that fails the exact-substring check may still be
+    supported via _decimal_locale_equivalent() against a number actually
+    present in the evidence -- this tolerates only presentation-level
+    comma/dot decimal localization (e.g. writer output "11,6" against
+    evidence "$11.6B"), never rounding, precision, digit or unit changes.
+
     This is intentionally narrow (numbers only) -- it is not a substitute
     for real fact verification, only a concrete example of the injectable
     verifier interface the issue requires. Generated writer output and
@@ -766,6 +807,7 @@ def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> d
     evidence_blob = json.dumps(
         writer_authorized_factual_scope(candidate), ensure_ascii=False
     )
+    evidence_numeric_tokens = _NUMBER_RE.findall(evidence_blob)
 
     spec_text = " ".join(
         str(spec.get(field_name, ""))
@@ -777,6 +819,10 @@ def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> d
             token
             for token in _NUMBER_RE.findall(spec_text)
             if token not in evidence_blob
+            and not any(
+                _decimal_locale_equivalent(token, evidence_token)
+                for evidence_token in evidence_numeric_tokens
+            )
         }
     )
 
