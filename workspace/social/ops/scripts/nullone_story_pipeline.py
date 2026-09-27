@@ -118,6 +118,25 @@ WRITER_CONTEXT_CANDIDATE_FIELDS = (
     "operator_revision_instruction",
 )
 
+# Numeric evidence authority is narrower than writer-visible context. A
+# candidate field being safe to *show* the writer for editorial framing
+# does not make it authoritative *factual support* for a numeric claim.
+# `topic_cluster` and `content_type` are classification labels, not facts.
+# `operator_revision_instruction` is unverified human revision text -- an
+# operator writing "make it 99%" must NOT make digit "99" numeric-verified
+# just because the writer legitimately sees that instruction (issue: the
+# writer-context field list and the numeric-support field list must not be
+# the same list). Keep this list strictly narrower than
+# WRITER_CONTEXT_CANDIDATE_FIELDS.
+WRITER_FACTUAL_SCOPE_FIELDS = (
+    "topic",
+    "claims",
+    "limitations",
+    "product_version_region",
+    "evidence_refs",
+    "factual_inputs",
+)
+
 STORY_PIPELINE_OUTCOMES = frozenset(
     {
         "DRAFT_CREATED",
@@ -478,12 +497,37 @@ def _candidate_source_image(candidate: dict[str, Any]) -> str | None:
     return relative if path.is_file() else None
 
 
+def writer_authorized_factual_scope(candidate: dict[str, Any]) -> dict[str, Any]:
+    """The candidate field values that are authoritative FACTUAL SUPPORT
+    for a numeric claim -- used only by numeric_scope_verifier().
+
+    This is deliberately NARROWER than WRITER_CONTEXT_CANDIDATE_FIELDS /
+    build_writer_context(): a field being safe to *show* the writer for
+    editorial framing does not make it authoritative factual support for a
+    number. In particular this excludes `topic_cluster` and `content_type`
+    (classification labels, not facts) and `operator_revision_instruction`
+    (unverified human revision text -- an operator writing "make it 99%"
+    must never make digit "99" numeric-verified just because the writer
+    legitimately sees that instruction). See WRITER_FACTUAL_SCOPE_FIELDS.
+    """
+
+    return {
+        field_name: candidate.get(field_name)
+        for field_name in WRITER_FACTUAL_SCOPE_FIELDS
+        if candidate.get(field_name) is not None
+    }
+
+
 def build_writer_context(candidate: dict[str, Any]) -> dict[str, Any]:
     """Minimum editorial context sent to the writer -- the Haiku boundary.
 
     Deliberately excludes cadence arithmetic, publication state, hashes,
     filesystem mechanics, render dimensions, manifest construction,
     Telegram/Zernio mechanics and unrelated research history.
+
+    Uses the full WRITER_CONTEXT_CANDIDATE_FIELDS (not
+    writer_authorized_factual_scope(), which is numeric-evidence-only and
+    narrower) -- the writer-visible context contract is unchanged here.
     """
 
     context = {
@@ -633,6 +677,8 @@ You may use ONLY the exact supported facts below. Do not invent, broaden,
 or add any claim, number, date, geography, price, capability or
 comparison beyond what is given.
 
+Numeric tokens are strict: any digit-bearing numeric token you output must be copied verbatim from the factual context below. Never convert a number written as a word into digits -- for example, if the context says "seven-year", do not write "7"; write the Azerbaijani word form instead (such as "yeddi illik") unless the digit "7" is itself already present in the factual context. Never normalize, round, or invent numeric precision.
+
 {json.dumps(editorial_context, ensure_ascii=False, indent=2)}
 
  Leave any field that does not apply to the chosen layout as an empty
@@ -704,17 +750,22 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?%?")
 
 def numeric_scope_verifier(spec: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
     """Deterministic, narrow verifier: every number in the spec must be
-    verbatim-supported by the candidate's evidence text.
+    verbatim-supported by writer_authorized_factual_scope(candidate) --
+    the candidate's authoritative factual fields (topic, claims,
+    limitations, product_version_region, evidence_refs, factual_inputs).
+    This is intentionally narrower than the full writer-visible context:
+    classification labels (topic_cluster, content_type) and unverified
+    operator revision text are never treated as numeric evidence.
 
     This is intentionally narrow (numbers only) -- it is not a substitute
     for real fact verification, only a concrete example of the injectable
-    verifier interface the issue requires.
+    verifier interface the issue requires. Generated writer output and
+    external data are never treated as evidence.
     """
 
-    evidence_blob = " ".join(
-        str(item) for item in candidate.get("evidence_refs", [])
+    evidence_blob = json.dumps(
+        writer_authorized_factual_scope(candidate), ensure_ascii=False
     )
-    evidence_blob += " " + json.dumps(candidate.get("factual_inputs", {}), ensure_ascii=False)
 
     spec_text = " ".join(
         str(spec.get(field_name, ""))
