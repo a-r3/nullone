@@ -72,7 +72,10 @@ class EmptyFrameTests(RenderTestCase):
         # either the flat editorial background or text ink -- never the
         # translucent panel-edge shade the old code produced by treating
         # a placeholder canvas as if it were a real photo.
-        bg = (15, 15, 15)
+        # #0E0E0F per social/references/visual-rules.md (the renderer's
+        # editorial-band fill previously drifted to (15,15,15) / #0F0F0F;
+        # fixed under the Visual V2 brand-compliance gate work).
+        bg = (14, 14, 15)
         px = img.load()
         w, h = img.size
         for x in range(0, w, 15):

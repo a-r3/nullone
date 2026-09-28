@@ -65,6 +65,32 @@ render_dispatcher = _load_hyphenated("packaging_render_dispatcher", "nullone-pac
 dispatcher = render_dispatcher
 
 
+def _write_fake_brand_metadata(out: Path) -> None:
+    """Sidecar a mocked SINGLE_POST renderer stub must also emit now that
+    the real render_texbrif_v2.py always writes one (Visual V2 brand-
+    compliance gate). These wiring tests fake the renderer subprocess to
+    stay offline/fast; stat_present=False keeps the gate vacuously PASS
+    regardless of each test's own `stat` value, since none of them are
+    testing brand compliance itself (see tests/test_v2_brand_compliance.py
+    for that)."""
+    metadata_path = out.with_suffix(out.suffix + ".brand.json")
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema": "nullone.render-brand-metadata.v1",
+                "stat_present": False,
+                "stat_color": None,
+                "margin_px": 90,
+                "brand_mark_count": 1,
+                "brand_mark_position": "bottom_right",
+                "brand_mark_opacity": 170,
+                "text_bounds_valid": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _request(**overrides):
     candidate = {
         "content_type": "NEWS",
@@ -545,6 +571,7 @@ class RenderDispatcherTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
+                _write_fake_brand_metadata(out)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
@@ -944,6 +971,7 @@ class SourcePropagationTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
+                _write_fake_brand_metadata(out)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             args = _argparse.Namespace(
@@ -971,6 +999,7 @@ class SourcePropagationTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
+                _write_fake_brand_metadata(out)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             args = _argparse.Namespace(
@@ -1986,6 +2015,7 @@ class VisualGroundingTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
+                _write_fake_brand_metadata(out)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
@@ -2018,6 +2048,7 @@ class VisualGroundingTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
+                _write_fake_brand_metadata(out)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
@@ -2046,6 +2077,7 @@ class VisualGroundingTests(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 calls.append(cmd)
                 out.write_text("png", encoding="utf-8")
+                _write_fake_brand_metadata(out)
                 return subprocess.CompletedProcess(cmd, 0, "VALID=true", "")
 
             with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
