@@ -44,11 +44,24 @@ openclaw automations create "45 11,14,17,20,23 * * *" \
   --name "nullone-breaking-consumer" \
   --command "python3 <repo>/workspace/social/ops/scripts/nullone-breaking-consume.py sweep" \
   --command-cwd "<repo>" \
-  --tz "Asia/Baku"
+  --tz "Asia/Baku" \
+  --no-deliver
 ```
 
 Fifteen minutes after each scan bounds latency while leaving the ~1min
 agent run ample room. No arguments, no dynamic interpolation, no secret.
+
+Delivery contract (issue #183): the consumer is an internal
+deterministic sweep, so the desired recipe pins `--no-deliver`
+(`delivery.mode=none`) explicitly and never relies on OpenClaw's
+default delivery. Proven live defect: without this flag the job
+inherited `mode=announce, channel=last`, and every run ended
+`completionStatus=failed` with `Refusing implicit isolated cron
+delivery` even though the sweep itself completed with exit 0 -- the
+execution was healthy, the runner fallback-delivery configuration was
+the defect. `--announce`, `--channel`, `--to`, and best-effort
+delivery must not appear in this recipe. The consumer's own
+#30/domain notifier behavior is separate and unchanged by this.
 
 ## 3. Radar slots and scan identity
 
