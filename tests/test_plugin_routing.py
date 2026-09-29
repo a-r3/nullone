@@ -38,7 +38,9 @@ EXPECTED_PASSES = {
     # delegated and reachable, a missing draft runner failing closed via
     # draft-bridge's own text, and approve/reject/revise/back/publish
     # routing unaffected by the delegation).
-    "test_plugin_index.js": 52,
+    # +1 for the #132 second-confirmation button remap (label/value ->
+    # text/callback_data transport adapter with malformed-input fail-closed).
+    "test_plugin_index.js": 53,
     "test_plugin_link.js": 16,
     "test_approval_route.js": 15,
     "test_approval_durable.js": 11,
