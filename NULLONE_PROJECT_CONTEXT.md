@@ -1,7 +1,135 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-12 Asia/Baku
+Last updated: 2026-09-29 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
+
+## Current production state — 2026-09-29 Asia/Baku (VERIFIED)
+
+GitHub main: `f8bfa0650e937a03ef50ffe1cc1f38854f22e0a8`.
+GitHub desired state != live production actual state. Selective
+deployments have occurred; merge alone never implies deployment.
+
+### PR #179 — second-confirmation buttons (PROVEN IN PRODUCTION)
+
+- Button adapter fix, merged as
+  `a22d3db013f1fbce57abcfd9ea91f620561e7ca1`.
+- Selectively deployed to
+  `/home/oem/.openclaw/plugins/nullone-final-publish/index.js`;
+  Gateway restarted, plugin loaded.
+- Natural production proof completed 2026-09-29: first approval
+  transitioned the current NVIDIA Carousel to
+  `AWAITING_PUBLISH_CONFIRMATION` while `first_stage=True`,
+  `final_publish=False`, `publication.state=NOT_REQUESTED`,
+  `attempts=0`.
+- Telegram showed the real second-stage buttons (🚀 Paylaş / ↩️ Geri).
+- Only the second human confirmation started publication.
+- The two-stage human publication boundary is therefore
+  production-proven. Preserve it; do not collapse or bypass it.
+
+### PR #170 — GET-only reconciliation (DEPLOYED, MANUAL)
+
+- Later reconciliation for async Zernio publish completion; runtime
+  code selectively deployed to production.
+- Dedicated read-only credential provisioned locally at
+  `~/.config/nullone/secrets/zernio-publish-reconcile.env`. It is NOT
+  globally/Gateway environment-bound.
+- Reconciliation is explicit/manual at this stage: no scheduler
+  wiring, no PUT/POST capability, publication attempts never
+  increment.
+
+### PR #181 — audience publication time (issue #180; DEPLOYED)
+
+- Merged as `f8bfa0650e937a03ef50ffe1cc1f38854f22e0a8`.
+- Selectively deployed runtime files:
+  `nullone-publish-bridge.py`, `nullone-publish-reconcile.py`,
+  `nullone_cadence_state_adapter.py`, `nullone_state.py`,
+  `nullone_zernio_publish_adapter.py`.
+- Authoritative audience publication time now comes from the
+  validated Instagram `platforms[0].publishedAt`; `platformPostId`
+  and `platformPostUrl` are captured from the validated platform
+  entry. Reconciliation observation time is stored separately.
+- Missing/unparseable `publishedAt` fails closed (no invented time).
+- Append-only `PUBLISHED_CORRECTED` repair exists for previously
+  contaminated reconciliation rows; cadence deduplicates by
+  `live_zernio_post_id` / `manifest_id` (no topic/title/time
+  heuristics).
+
+### Amazon correction proof (VERIFIED)
+
+- `review_post_id: 6ab5c068f1c2af7c30f89020`
+- Authoritative `published_at: 2026-09-25T00:51:43.366000+00:00`
+- Instagram post id: `17971836657139183`
+- Permalink: `https://www.instagram.com/p/DdsNtIXjErv/`
+- Append-only correction recorded; cadence stopped counting it as a
+  Sep-29 publication.
+
+### Old PUBLISHING backlog reconciled (VERIFIED, attempts=1 each)
+
+- Anthropic misuse: `6aa4e7949bb37ec74d6ebfde`
+- GitSpawn: `6aa53baba38741db50628134`
+- OpenAI DNS sandbox: `6ab902c5fb449387ac348182`
+- NVIDIA Story: `6abb5b07fd4ca672c7fff91c`
+
+All resolved to platform-proven PUBLISHED with `attempts=1`.
+
+### Current NVIDIA Carousel natural E2E proof (VERIFIED)
+
+- `review_post_id: 6abb50ffeb0e60c6c5e62420`
+- Before second confirmation: `stage=AWAITING_PUBLISH_CONFIRMATION`,
+  `first_stage=True`, `final_publish=False`,
+  `publication.state=NOT_REQUESTED`, `attempts=0`.
+- After second confirmation: publication entered PUBLISHING,
+  `attempts=1`.
+- After GET-only reconciliation: `state=PUBLISHED`, `attempts=1`,
+  `published_at=2026-09-29T13:40:58.514000+00:00`,
+  `platform_post_id=18484723396129569`,
+  `permalink=https://www.instagram.com/p/Dd346b6jAWk/`.
+
+### Current production reconciliation state
+
+- `PUBLISHING_COUNT=0`.
+
+### Cadence observations after cleanup
+
+- Historical reconciliations no longer contaminate today's
+  publication count.
+- NVIDIA Story on Sep 29 correctly counts as today's Story
+  publication.
+- The current main pending item was the NVIDIA Carousel before
+  human approval; it was a legitimate pending review item, not a
+  cadence bug.
+
+### Semantic clarification (do not over-repair)
+
+- `approval.stage` values belong to the durable first-stage
+  approval state machine.
+- `AWAITING_PUBLISH_CONFIRMATION` combined with
+  `final_publish=True` and PUBLISHED is not automatically
+  corruption.
+- Legacy manifests may have `approval.stage` absent.
+- Do not open a repair just for that without a separate proven bug.
+
+### Still unresolved / separate issues (unchanged ownership)
+
+- Breaking Consumer delivery observability bug.
+- Breaking dependency-recheck fail-closed behavior remains
+  intentional.
+- `IDENTITY_UNRESOLVED` fail-closed remains intentional.
+- Notifier allowlist/time gaps.
+- Weekly Strategy old transport issue.
+- Zernio reconciliation is not yet scheduled automatically.
+- Laptop availability remains a structural risk.
+- Visual V2 remains temporary; Visual V3 later.
+- Overall M0 reliability work continues; the whole system is NOT
+  claimed finished.
+
+### Current priority
+
+- Preserve the now-proven publication path; do not destabilize
+  healthy production.
+- Next fixes proceed one at a time through the GitHub workflow.
+- This context must keep distinguishing GitHub desired state vs
+  live production actual state.
 
 ## Identity
 Public brand: NullOne
