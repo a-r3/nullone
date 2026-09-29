@@ -5,7 +5,8 @@ Status: canonical project context for repository/project continuity. Production 
 
 ## Current production state — 2026-09-29 Asia/Baku (VERIFIED)
 
-GitHub main: `f8bfa0650e937a03ef50ffe1cc1f38854f22e0a8`.
+Runtime code baseline represented by this 2026-09-29 production snapshot:
+`f8bfa0650e937a03ef50ffe1cc1f38854f22e0a8`.
 GitHub desired state != live production actual state. Selective
 deployments have occurred; merge alone never implies deployment.
 
