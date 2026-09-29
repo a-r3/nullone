@@ -558,39 +558,86 @@ test("approve reply carries the second-confirmation button values", async () => 
     sent[0].buttons.every((row) => Array.isArray(row)),
     "approve card buttons must be rows-of-rows, not a flat array"
   );
-  const values = sent[0].buttons.flat().map((b) => b.value).sort();
+  const values = sent[0].buttons.flat().map((b) => b.callback_data).sort();
   assert.deepEqual(values, [`texbrif:back:${POST}`, `texbrif:publish:${POST}`]);
+  // Runtime-facing shape (#132): exactly the installed host vocabulary --
+  // `text` + `callback_data`, no legacy-only `label`/`value` object may
+  // reach respond.reply, otherwise the host silently drops the buttons.
+  assert.equal(sent[0].buttons.flat().length, 2);
+  for (const b of sent[0].buttons.flat()) {
+    assert.equal(typeof b.text, "string");
+    assert.equal(typeof b.callback_data, "string");
+    assert.equal("label" in b, false, "legacy label must not reach respond.reply");
+    assert.equal("value" in b, false, "legacy value must not reach respond.reply");
+  }
+  const labels = sent[0].buttons.flat().map((b) => b.text).sort();
+  assert.deepEqual(labels, ["↩️ Geri", "🚀 Paylaş"]);
   assert.equal(link.calls.length, 0);
 });
 
-test("APPROVE_REPLY_BUTTONS_ROWS_OF_ROWS: toButtonRows wraps a flat array into one row", () => {
+test("APPROVE_REPLY_BUTTONS_ROWS_OF_ROWS: toButtonRows wraps and adapts a flat array into one runtime row", () => {
   const flat = [
     { label: "🚀 Paylaş", value: `texbrif:publish:${POST}`, style: "success" },
     { label: "↩️ Geri", value: `texbrif:back:${POST}` },
   ];
   const rows = plugin.toButtonRows(flat);
-  assert.deepEqual(rows, [flat]);
-  // Already-nested input passes through unchanged (idempotent).
+  assert.deepEqual(rows, [[
+    { text: "🚀 Paylaş", callback_data: `texbrif:publish:${POST}`, style: "success" },
+    { text: "↩️ Geri", callback_data: `texbrif:back:${POST}` },
+  ]]);
+  // Already-nested input is adapted the same way (idempotent shape).
   assert.deepEqual(plugin.toButtonRows(rows), rows);
   // No buttons stays no buttons.
   assert.equal(plugin.toButtonRows(null), null);
   assert.equal(plugin.toButtonRows([]), null);
+  // All-malformed input fails closed to text-only (null), never a wrong keyboard.
+  assert.equal(plugin.toButtonRows([{ label: "x" }, { value: "y" }, null, "s"]), null);
+  assert.equal(plugin.toButtonRows([[null, 42]]), null);
 });
 
-test("APPROVE_REPLY_NO_ROW_MAP_FAILURE: a host-faithful buildInlineKeyboard never throws on the approve reply", async () => {
+test("TO_RUNTIME_BUTTON_MALFORMED: never emit missing/changed callback_data", () => {
+  const good = plugin.toRuntimeButton({ label: "🚀 Paylaş", value: `texbrif:publish:${POST}`, style: "success" });
+  assert.deepEqual(good, { text: "🚀 Paylaş", callback_data: `texbrif:publish:${POST}`, style: "success" });
+  const noStyle = plugin.toRuntimeButton({ label: "↩️ Geri", value: `texbrif:back:${POST}` });
+  assert.deepEqual(noStyle, { text: "↩️ Geri", callback_data: `texbrif:back:${POST}` });
+  for (const bad of [null, undefined, 42, "s", [], { label: "", value: "v" }, { label: "l", value: "" }, { label: 1, value: "v" }, { label: "l" }, { value: "v" }, {}]) {
+    assert.equal(plugin.toRuntimeButton(bad), null, JSON.stringify(bad));
+  }
+  // Non-string style is dropped, never invented into a runtime field.
+  assert.deepEqual(
+    plugin.toRuntimeButton({ label: "l", value: "v", style: 7 }),
+    { text: "l", callback_data: "v" }
+  );
+  // Already-adapted runtime shape passes through unchanged (idempotent).
+  assert.deepEqual(
+    plugin.toRuntimeButton({ text: "🚀 Paylaş", callback_data: `texbrif:publish:${POST}`, style: "success" }),
+    { text: "🚀 Paylaş", callback_data: `texbrif:publish:${POST}`, style: "success" }
+  );
+});
+
+test("APPROVE_REPLY_NO_ROW_MAP_FAILURE: the installed host keyboard builder keeps both approve buttons", async () => {
   const link = makeLink();
   const { runner } = makeApprovalRunner();
   const handler = registeredHandler(link, runner);
   const sent = [];
-  // Mirrors the installed host's real bug shape: buildInlineKeyboard expects
-  // rows-of-rows and calls row.map on each element it's given.
+  // Byte-faithful to the installed OpenClaw 2026.8.2 host
+  // (dist text-chunk-limit toInlineKeyboardButton + buildInlineKeyboard):
+  // a button without `text` is dropped; url/callback_data/web_app select
+  // the kind; a row left empty is removed; no rows left means no keyboard.
+  const toInlineKeyboardButtonLikeHost = (button) => {
+    if (!button?.text) return undefined;
+    if (button.url) return { text: button.text, url: button.url };
+    if (button.callback_data) return { text: button.text, callback_data: button.callback_data };
+    if (button.web_app?.url) return { text: button.text, web_app: button.web_app };
+    return undefined;
+  };
   const buildInlineKeyboardLikeHost = (buttons) => {
-    if (!buttons) return undefined;
-    return {
-      inline_keyboard: buttons.map((row) =>
-        row.map((button) => ({ text: button.label, callback_data: button.value }))
-      ),
-    };
+    if (!buttons?.length) return undefined;
+    const rows = buttons
+      .map((row) => row.map(toInlineKeyboardButtonLikeHost).filter(Boolean))
+      .filter((row) => row.length > 0);
+    if (rows.length === 0) return undefined;
+    return { inline_keyboard: rows };
   };
   const ctx = makeHandlerCtx({ callback: {
     data: `texbrif:approve:${POST}`,
@@ -604,15 +651,21 @@ test("APPROVE_REPLY_NO_ROW_MAP_FAILURE: a host-faithful buildInlineKeyboard neve
     sent.push({ text, reply_markup });
     return undefined;
   };
-  // Must not throw/reject -- this is exactly the call that crashed with
-  // "row.map is not a function" in production before the fix.
+  // Must not throw/reject, and -- the actual #132 regression -- the
+  // installed host builder must KEEP both buttons (before the remap fix
+  // it dropped every label/value button and delivered text-only).
   const result = await handler(ctx);
   assert.deepEqual(result, { handled: true });
   assert.equal(sent.length, 1);
+  assert.ok(sent[0].reply_markup, "host builder must produce a keyboard, not text-only");
   assert.equal(sent[0].reply_markup.inline_keyboard.length, 1);
   assert.deepEqual(
     sent[0].reply_markup.inline_keyboard[0].map((b) => b.callback_data).sort(),
     [`texbrif:back:${POST}`, `texbrif:publish:${POST}`]
+  );
+  assert.deepEqual(
+    sent[0].reply_markup.inline_keyboard[0].map((b) => b.text).sort(),
+    ["↩️ Geri", "🚀 Paylaş"]
   );
 });
 

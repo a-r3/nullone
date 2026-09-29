@@ -671,13 +671,68 @@ function outcomeText(reply) {
 }
 
 /**
+ * Adapt one NullOne-internal button object to the installed OpenClaw
+ * callback-reply inline-button contract (issue #132, second-stage buttons).
+ *
+ * Domain vocabulary (approval-route.js `approvalReply()`, Python
+ * controller `reply_for()`): `{label, value, style?}`.
+ * Installed host vocabulary (dist `toInlineKeyboardButton`, confirmed
+ * read-only on the production host's OpenClaw 2026.8.2): the button MUST
+ * carry `text`, and a callback button MUST carry `callback_data` (`style`
+ * is passed through when present). A `{label, value}` object satisfies
+ * neither requirement, so the host maps it to `undefined`, filters it
+ * out, and delivers a text-only reply with no error -- exactly the
+ * production symptom (second-stage text arrives, Paylaş/Geri missing).
+ *
+ * Mapping: `label -> text`, `value -> callback_data`, string `style`
+ * preserved verbatim (cosmetic only, never affects callback correctness).
+ * Already-adapted `{text, callback_data}` input passes through unchanged,
+ * so repeated adaptation is idempotent and a future reply source emitting
+ * the runtime shape stays correct. When both vocabularies are present the
+ * domain (`label`/`value`) contract takes precedence.
+ * Malformed input returns null so the caller drops the button instead of
+ * emitting a missing/changed callback_data. Never invents values.
+ *
+ * @param {unknown} button
+ * @returns {{text: string, callback_data: string, style?: string}|null}
+ */
+function toRuntimeButton(button) {
+  if (!button || typeof button !== "object" || Array.isArray(button)) {
+    return null;
+  }
+  let text = null;
+  let callbackData = null;
+  if (typeof button.label === "string" && button.label.length > 0) {
+    text = button.label;
+  }
+  if (typeof button.value === "string" && button.value.length > 0) {
+    callbackData = button.value;
+  }
+  if (text === null && typeof button.text === "string" && button.text.length > 0) {
+    text = button.text;
+  }
+  if (callbackData === null && typeof button.callback_data === "string" && button.callback_data.length > 0) {
+    callbackData = button.callback_data;
+  }
+  if (text === null || callbackData === null) {
+    return null;
+  }
+  const adapted = { text, callback_data: callbackData };
+  if (typeof button.style === "string" && button.style.length > 0) {
+    adapted.style = button.style;
+  }
+  return adapted;
+}
+
+/**
  * Adapt a NullOne-internal button payload to the installed Telegram
- * channel's inline-keyboard contract (P0, row.map incident).
+ * channel's inline-keyboard contract (P0, row.map incident; #132
+ * label/value incident).
  *
  * `approvalReply()` (approval-route.js) and the durable Python
  * controller's `reply_for()` both return `buttons` as a FLAT array of
- * button objects: `[publishButton, backButton]`. The installed host's
- * keyboard builder (`buildInlineKeyboard`, dist
+ * domain-vocabulary button objects: `[publishButton, backButton]`. The
+ * installed host's keyboard builder (`buildInlineKeyboard`, dist
  * telegram-ingress-drain-factory) requires rows-of-rows instead --
  * `rows.map((row) => row.map(...))` -- so a flat array makes it call
  * `.map` on a plain button object and throw "row.map is not a function".
@@ -685,12 +740,20 @@ function outcomeText(reply) {
  * first-stage reply that ever carries real buttons; reject/revise/back
  * always pass `buttons: null` and never hit this path).
  *
+ * Additionally, every button is adapted through `toRuntimeButton`
+ * (`label -> text`, `value -> callback_data`): without this the host's
+ * `toInlineKeyboardButton` (which requires `text` + `callback_data`)
+ * silently drops all buttons and delivers text-only -- the missing
+ * second-stage Paylaş/Geri symptom. Malformed buttons are dropped
+ * (fail closed); a row left empty is removed; no buttons left means
+ * null (text-only reply, never a wrong keyboard).
+ *
  * This is the one adaptation point both reply sources flow through
  * (`sendReply` below): it changes nothing about callback values, labels,
- * or the approval reply contract -- only the array nesting the host
- * requires. Already-nested input (rows-of-rows) passes through
- * unchanged, so this stays correct if a future reply source starts
- * emitting proper rows itself.
+ * or the approval reply contract -- only the transport shape the host
+ * requires. Already-nested input (rows-of-rows) is normalized the same
+ * way, so this stays correct if a future reply source starts emitting
+ * proper rows itself.
  *
  * @param {unknown} buttons
  * @returns {Array<Array<object>>|null} rows-of-rows, or null for "no buttons"
@@ -699,10 +762,13 @@ function toButtonRows(buttons) {
   if (!Array.isArray(buttons) || buttons.length === 0) {
     return null;
   }
-  if (buttons.every((row) => Array.isArray(row))) {
-    return buttons;
-  }
-  return [buttons];
+  const nested = buttons.every((row) => Array.isArray(row))
+    ? buttons
+    : [buttons];
+  const adapted = nested
+    .map((row) => row.map(toRuntimeButton).filter((b) => b !== null))
+    .filter((row) => row.length > 0);
+  return adapted.length > 0 ? adapted : null;
 }
 
 /**
@@ -1194,6 +1260,7 @@ Object.assign(entry, {
   createApprovalStore,
   handleApprovalFirstStage,
   toButtonRows,
+  toRuntimeButton,
   loadDraftBridge,
   DRAFT_BRIDGE_SIBLING_RELATIVE,
   canonicalStringify,
