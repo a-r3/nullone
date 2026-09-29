@@ -204,8 +204,15 @@ def make_receipt(root: Path, review_post_id: str, *, state: str = "SETTLED_PUBLI
 PUBLISHED_TRUTH = {
     "live_status": "published",
     "platform_status": "published",
-    "platform_post_url": None,
+    "platform_post_url": "https://www.instagram.com/p/DdsNtIXjErv/",
+    "platform_published_at": "2026-09-25T00:51:43.366Z",
+    "platform_post_id": "17971836657139183",
 }
+# Normalized audience time for PUBLISHED_TRUTH (issue #180): provider
+# "Z" suffix parses to an aware datetime; isoformat() renders +00:00
+# with microseconds. Locked here so the ledger/cadence contract cannot
+# silently drift back to observation time.
+PUBLISHED_TRUTH_AUDIENCE_ISO = "2026-09-25T00:51:43.366000+00:00"
 STILL_PUBLISHING_TRUTH = {
     "live_status": "scheduled",
     "platform_status": "",
@@ -251,7 +258,17 @@ class ReconcileToPublishedTests(unittest.TestCase):
             self.assertEqual(
                 current["publication"]["live_zernio_post_id"], POST_ID
             )
-            self.assertIsNone(current["publication"]["platform_post_id"])
+            self.assertEqual(
+                current["publication"]["platform_post_id"], "17971836657139183"
+            )
+            self.assertEqual(
+                current["publication"]["permalink"],
+                "https://www.instagram.com/p/DdsNtIXjErv/",
+            )
+            self.assertEqual(
+                current["publication"]["published_at"],
+                PUBLISHED_TRUTH_AUDIENCE_ISO,
+            )
 
             rec = receipts.read_receipt(root, POST_ID, instance_id)
             self.assertEqual(rec["state"], "SETTLED_PUBLISHED")
@@ -736,6 +753,322 @@ class AmazonOfflineRegressionFixtureTests(unittest.TestCase):
             self.assertEqual(
                 nullone_state.QUEUE.read_text(encoding="utf-8"), queue_after_first
             )
+class AudienceTimeTests(unittest.TestCase):
+    """Issue #180: a stale PUBLISHING -> PUBLISHED reconciliation must
+    record the provider-proven audience time, never observation time."""
+
+    def test_stale_reconcile_records_audience_time_not_observation_time(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            path, m = make_manifest(
+                root,
+                state="PUBLISHING",
+                attempts=1,
+                live_zernio_post_id=POST_ID,
+                last_checked_at="2026-09-25T00:51:31.483642+00:00",
+            )
+            provider = FakeReconcileProvider(readback_responses=[dict(PUBLISHED_TRUTH)])
+
+            result = reconcile.reconcile_one(
+                POST_ID, provider_factory=lambda: provider
+            )
+
+            self.assertEqual(result["outcome"], "RECONCILED_PUBLISHED")
+            self.assertEqual(provider.put_calls, 0)
+            self.assertEqual(provider.promote_once_calls, 0)
+
+            _p, current = common.load_manifest(path)
+            self.assertEqual(current["publication"]["attempts"], 1)
+            self.assertEqual(
+                current["publication"]["published_at"],
+                PUBLISHED_TRUTH_AUDIENCE_ISO,
+            )
+            self.assertEqual(
+                current["publication"]["platform_post_id"], "17971836657139183"
+            )
+            self.assertEqual(
+                current["publication"]["permalink"],
+                "https://www.instagram.com/p/DdsNtIXjErv/",
+            )
+            self.assertTrue(current["publication"]["observed_at"])
+
+            ledger_rows = nullone_state.read_jsonl(nullone_state.PUBLISH_LEDGER)
+            published_rows = [r for r in ledger_rows if r.get("event") == "PUBLISHED"]
+            self.assertEqual(len(published_rows), 1)
+            # Audience time is the ledger timestamp; observation time is
+            # preserved separately and must differ from it here.
+            self.assertEqual(
+                published_rows[0]["timestamp"], PUBLISHED_TRUTH_AUDIENCE_ISO
+            )
+            self.assertTrue(published_rows[0]["observed_at"])
+            self.assertNotEqual(
+                published_rows[0]["observed_at"], PUBLISHED_TRUTH_AUDIENCE_ISO
+            )
+            self.assertEqual(
+                published_rows[0]["platform_post_id"], "17971836657139183"
+            )
+            self.assertEqual(
+                published_rows[0]["permalink"],
+                "https://www.instagram.com/p/DdsNtIXjErv/",
+            )
+
+    def test_missing_audience_time_fails_closed(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            path, m = make_manifest(
+                root,
+                state="PUBLISHING",
+                attempts=1,
+                live_zernio_post_id=POST_ID,
+                last_checked_at=common.now_iso(),
+            )
+            truth = dict(PUBLISHED_TRUTH)
+            truth["platform_published_at"] = None
+            provider = FakeReconcileProvider(readback_responses=[truth])
+
+            result = reconcile.reconcile_one(
+                POST_ID, provider_factory=lambda: provider
+            )
+
+            self.assertEqual(result["outcome"], "CHECK_REQUIRED")
+            self.assertIn("AUDIENCE_TIME_UNPROVEN", result["reason"])
+            self.assertEqual(provider.put_calls, 0)
+            self.assertEqual(provider.promote_once_calls, 0)
+
+            _p, current = common.load_manifest(path)
+            self.assertEqual(current["publication"]["state"], "PUBLISHING")
+            self.assertEqual(current["publication"]["attempts"], 1)
+            ledger_rows = nullone_state.read_jsonl(nullone_state.PUBLISH_LEDGER)
+            self.assertEqual(len(ledger_rows), 0)
+
+    def test_malformed_audience_time_fails_closed(self):
+        reconcile = load_reconcile()
+        for bad in ("not-a-time", "2026-09-25T00:51:43", "", 12345):
+            with IsolatedWorkspace() as root:
+                path, m = make_manifest(
+                    root,
+                    state="PUBLISHING",
+                    attempts=1,
+                    live_zernio_post_id=POST_ID,
+                    last_checked_at=common.now_iso(),
+                )
+                truth = dict(PUBLISHED_TRUTH)
+                truth["platform_published_at"] = bad
+                provider = FakeReconcileProvider(readback_responses=[truth])
+
+                result = reconcile.reconcile_one(
+                    POST_ID, provider_factory=lambda: provider
+                )
+
+                self.assertEqual(result["outcome"], "CHECK_REQUIRED", bad)
+                _p, current = common.load_manifest(path)
+                self.assertEqual(current["publication"]["state"], "PUBLISHING")
+                self.assertEqual(
+                    len(nullone_state.read_jsonl(nullone_state.PUBLISH_LEDGER)), 0
+                )
+
+
+class RepairPublishedTests(unittest.TestCase):
+    """Issue #180 append-only repair for an already-PUBLISHED manifest
+    whose ledger row carries observation time (the contaminated Amazon
+    shape)."""
+
+    AMAZON_POST_ID = "6ab5c068f1c2af7c30f89020"
+    CONTAMINATED_TS = "2026-09-29T12:27:27.385827+00:00"
+
+    def _contaminated_state(self, root, reconcile):
+        """PUBLISHED manifest + one Sep-29 PUBLISHED ledger row, exactly
+        the production contamination shape."""
+        path, m = make_manifest(
+            root,
+            state="PUBLISHED",
+            attempts=1,
+            review_post_id=self.AMAZON_POST_ID,
+            live_zernio_post_id=self.AMAZON_POST_ID,
+            last_checked_at="2026-09-29T12:27:27.385827+00:00",
+            manifest_id="2026-09-25-amazon-seller-assistant-claude",
+        )
+        nullone_state.PUBLISH_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with nullone_state.PUBLISH_LEDGER.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "timestamp": self.CONTAMINATED_TS,
+                        "event": "PUBLISHED",
+                        "manifest_id": "2026-09-25-amazon-seller-assistant-claude",
+                        "format": "FEED",
+                        "review_post_id": self.AMAZON_POST_ID,
+                        "live_zernio_post_id": self.AMAZON_POST_ID,
+                        "platform_post_id": None,
+                        "permalink": None,
+                        "result": "PUBLISHED",
+                    }
+                )
+                + "\n"
+            )
+        return path
+
+    def _amazon_truth(self):
+        return {
+            "live_status": "published",
+            "platform_status": "published",
+            "platform_post_url": "https://www.instagram.com/p/DdsNtIXjErv/",
+            "platform_published_at": "2026-09-25T00:51:43.366Z",
+            "platform_post_id": "17971836657139183",
+        }
+
+    def test_repair_corrects_time_without_rewriting_history(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            path = self._contaminated_state(root, reconcile)
+            provider = FakeReconcileProvider(
+                readback_responses=[self._amazon_truth()]
+            )
+
+            result = reconcile.repair_published_one(
+                self.AMAZON_POST_ID, provider_factory=lambda: provider
+            )
+
+            self.assertEqual(result["outcome"], "REPAIRED_PUBLISHED_TIME")
+            self.assertEqual(
+                result["audience_published_at"], PUBLISHED_TRUTH_AUDIENCE_ISO
+            )
+            self.assertEqual(
+                result["platform_post_id"], "17971836657139183"
+            )
+            self.assertEqual(
+                result["permalink"], "https://www.instagram.com/p/DdsNtIXjErv/"
+            )
+            self.assertTrue(result["correction_appended"])
+            self.assertEqual(provider.put_calls, 0)
+            self.assertEqual(provider.promote_once_calls, 0)
+
+            # Manifest: descriptive metadata converged; settlement untouched.
+            _p, current = common.load_manifest(path)
+            self.assertEqual(current["publication"]["state"], "PUBLISHED")
+            self.assertEqual(current["publication"]["attempts"], 1)
+            self.assertIsNone(current["publication"]["error"])
+            self.assertEqual(
+                current["publication"]["published_at"],
+                PUBLISHED_TRUTH_AUDIENCE_ISO,
+            )
+            self.assertEqual(
+                current["publication"]["platform_post_id"], "17971836657139183"
+            )
+
+            # Ledger: original contaminated row byte-preserved + exactly
+            # one correction row carrying audience time.
+            rows = nullone_state.read_jsonl(nullone_state.PUBLISH_LEDGER)
+            originals = [r for r in rows if r.get("event") == "PUBLISHED"]
+            self.assertEqual(len(originals), 1)
+            self.assertEqual(originals[0]["timestamp"], self.CONTAMINATED_TS)
+            corrections = [
+                r for r in rows if r.get("event") == "PUBLISHED_CORRECTED"
+            ]
+            self.assertEqual(len(corrections), 1)
+            self.assertEqual(
+                corrections[0]["timestamp"], PUBLISHED_TRUTH_AUDIENCE_ISO
+            )
+            self.assertEqual(
+                corrections[0]["live_zernio_post_id"], self.AMAZON_POST_ID
+            )
+            self.assertEqual(
+                corrections[0]["platform_post_id"], "17971836657139183"
+            )
+            self.assertEqual(
+                corrections[0]["permalink"],
+                "https://www.instagram.com/p/DdsNtIXjErv/",
+            )
+            self.assertTrue(corrections[0]["observed_at"])
+
+    def test_repair_is_idempotent_without_second_get(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            self._contaminated_state(root, reconcile)
+            provider = FakeReconcileProvider(
+                readback_responses=[self._amazon_truth()]
+            )
+            first = reconcile.repair_published_one(
+                self.AMAZON_POST_ID, provider_factory=lambda: provider
+            )
+            self.assertEqual(first["outcome"], "REPAIRED_PUBLISHED_TIME")
+
+            rows_after_first = nullone_state.read_jsonl(
+                nullone_state.PUBLISH_LEDGER
+            )
+
+            provider_2 = FakeReconcileProvider(readback_responses=[])
+            second = reconcile.repair_published_one(
+                self.AMAZON_POST_ID, provider_factory=lambda: provider_2
+            )
+            self.assertEqual(second["outcome"], "ALREADY_CORRECTED")
+            self.assertEqual(len(provider_2.readback_calls), 0)
+            self.assertEqual(provider_2.put_calls, 0)
+            self.assertEqual(provider_2.promote_once_calls, 0)
+            self.assertEqual(
+                nullone_state.read_jsonl(nullone_state.PUBLISH_LEDGER),
+                rows_after_first,
+            )
+
+    def test_repair_refuses_non_published_manifest(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            make_manifest(
+                root,
+                state="PUBLISHING",
+                attempts=1,
+                live_zernio_post_id=POST_ID,
+                last_checked_at=common.now_iso(),
+            )
+            provider = FakeReconcileProvider(readback_responses=[])
+
+            result = reconcile.repair_published_one(
+                POST_ID, provider_factory=lambda: provider
+            )
+
+            self.assertEqual(result["outcome"], "BLOCKED")
+            self.assertEqual(len(provider.readback_calls), 0)
+            self.assertEqual(provider.put_calls, 0)
+
+    def test_repair_refuses_unproven_readback(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            path = self._contaminated_state(root, reconcile)
+            truth = self._amazon_truth()
+            truth["platform_status"] = "scheduled"
+            truth["live_status"] = "scheduled"
+            provider = FakeReconcileProvider(readback_responses=[truth])
+
+            result = reconcile.repair_published_one(
+                self.AMAZON_POST_ID, provider_factory=lambda: provider
+            )
+
+            self.assertEqual(result["outcome"], "CHECK_REQUIRED")
+            rows = nullone_state.read_jsonl(nullone_state.PUBLISH_LEDGER)
+            self.assertEqual(
+                [r for r in rows if r.get("event") == "PUBLISHED_CORRECTED"], []
+            )
+            _p, current = common.load_manifest(path)
+            self.assertNotIn("published_at", current["publication"])
+
+    def test_repair_requires_identity_never_guessed(self):
+        reconcile = load_reconcile()
+        with IsolatedWorkspace() as root:
+            path, m = make_manifest(
+                root,
+                state="PUBLISHED",
+                attempts=1,
+                live_zernio_post_id=None,
+                last_checked_at=common.now_iso(),
+            )
+            provider = FakeReconcileProvider(readback_responses=[])
+            result = reconcile.repair_published_one(
+                POST_ID, provider_factory=lambda: provider
+            )
+            self.assertEqual(result["outcome"], "BLOCKED")
+            self.assertEqual(len(provider.readback_calls), 0)
+
+
 
 
 if __name__ == "__main__":

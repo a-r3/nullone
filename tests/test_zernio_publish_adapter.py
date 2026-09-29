@@ -1444,5 +1444,116 @@ class MediaUrlIdentityPreflightTests(unittest.TestCase):
             provider.readback(POST_ID, expected)
 
 
+# ---------------------------------------------------------------------------
+# Issue #180: platform-level audience metadata from the validated entry
+# ---------------------------------------------------------------------------
+
+AMAZON_PLATFORM_PUBLISHED_AT = "2026-09-25T00:51:43.366Z"
+AMAZON_PLATFORM_POST_ID = "17971836657139183"
+AMAZON_PLATFORM_URL = "https://www.instagram.com/p/DdsNtIXjErv/"
+
+
+def amazon_entry_doc(
+    *,
+    published_at=AMAZON_PLATFORM_PUBLISHED_AT,
+    platform_post_id=AMAZON_PLATFORM_POST_ID,
+    platform_post_url=AMAZON_PLATFORM_URL,
+    root_post_url=None,
+    live_status="published",
+    platform_status="published",
+    post_id=POST_ID,
+):
+    """Amazon-proof-shaped readback body: root post carries no useful
+    metadata (status published, publishedAt null, platformPostUrl
+    null); the validated single platforms[] entry carries it all."""
+    doc = readback_doc(
+        live_status=live_status,
+        platform_status=platform_status,
+        post_id=post_id,
+        platform_post_url=root_post_url,
+    )
+    entry = doc["post"]["platforms"][0]
+    if published_at is None:
+        entry.pop("publishedAt", None)
+    else:
+        entry["publishedAt"] = published_at
+    if platform_post_id is None:
+        entry.pop("platformPostId", None)
+    else:
+        entry["platformPostId"] = platform_post_id
+    if platform_post_url is None:
+        entry.pop("platformPostUrl", None)
+    else:
+        entry["platformPostUrl"] = platform_post_url
+    return doc
+
+
+class PlatformAudienceMetadataTests(unittest.TestCase):
+    def _expected(self):
+        return {
+            "post_id": POST_ID,
+            "caption": CAPTION_TEXT,
+            "media_items": [{"type": "image", "url": MEDIA_URL_1}],
+            "account_id": CANONICAL_ACCOUNT_ID,
+            "format": "FEED",
+        }
+
+    def _readback(self, body):
+        transport = FakePublishTransport(get_responses=[(200, body)])
+        provider = adapter.ZernioPublishReadOnlyReconciler(transport)
+        truth = provider.readback(POST_ID, self._expected())
+        self.assertEqual(transport.put_calls, [])
+        return truth
+
+    def test_amazon_platform_metadata_extracted(self):
+        truth = self._readback(amazon_entry_doc())
+        self.assertEqual(
+            truth["platform_published_at"], AMAZON_PLATFORM_PUBLISHED_AT
+        )
+        self.assertEqual(
+            truth["platform_post_id"], AMAZON_PLATFORM_POST_ID
+        )
+        self.assertEqual(truth["platform_post_url"], AMAZON_PLATFORM_URL)
+
+    def test_root_post_url_absent_does_not_discard_entry_url(self):
+        doc = amazon_entry_doc(root_post_url=None)
+        self.assertNotIn("platformPostUrl", doc["post"])
+        truth = self._readback(doc)
+        self.assertEqual(truth["platform_post_url"], AMAZON_PLATFORM_URL)
+
+    def test_root_post_url_is_fallback_only(self):
+        doc = amazon_entry_doc(
+            platform_post_url=None,
+            root_post_url="https://example.invalid/root-fallback",
+        )
+        truth = self._readback(doc)
+        self.assertEqual(
+            truth["platform_post_url"], "https://example.invalid/root-fallback"
+        )
+
+    def test_missing_platform_fields_stay_empty_never_fabricated(self):
+        truth = self._readback(
+            amazon_entry_doc(
+                published_at=None,
+                platform_post_id=None,
+                platform_post_url=None,
+            )
+        )
+        self.assertIsNone(truth["platform_published_at"])
+        self.assertIsNone(truth["platform_post_id"])
+        self.assertIsNone(truth["platform_post_url"])
+
+    def test_reconciler_has_no_put_capability(self):
+        self.assertFalse(
+            hasattr(adapter.ZernioPublishReadOnlyReconciler, "promote_once")
+        )
+        transport = FakePublishTransport(
+            get_responses=[(200, amazon_entry_doc())]
+        )
+        provider = adapter.ZernioPublishReadOnlyReconciler(transport)
+        provider.readback(POST_ID, self._expected())
+        self.assertEqual(transport.put_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

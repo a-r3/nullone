@@ -447,8 +447,7 @@ def _row_is_decision_relevant(
 ) -> bool:
     """Issue #60 decision-relevance rule for one UNKNOWN-format row.
 
-    Only a `PUBLISHED` row can be decision-relevant: a non-PUBLISHED
-    result never participates in audience-facing count/index logic
+    Only a `PUBLISHED` (or issue #180 `PUBLISHED_CORRECTED`) row can be decision-relevant: a non-audience result never participates in audience-facing count/index logic
     (section 12), so its missing format is compatibility-diagnostic
     only regardless of timing.
 
@@ -461,7 +460,7 @@ def _row_is_decision_relevant(
     left as a compatibility diagnostic only.
     """
 
-    if row.get("result") != "PUBLISHED":
+    if row.get("result") not in AUDIENCE_PUBLISHED_RESULTS:
         return False
 
     ts = _parse_event_timestamp(row["timestamp"], "publish ledger row")
@@ -497,6 +496,15 @@ def _fail_unresolved_decision_relevant(entries: list[dict[str, Any]]) -> None:
     )
 
 
+# Ledger results that prove audience-facing publication. PUBLISHED is
+# the direct/reconciled publication event; PUBLISHED_CORRECTED is an
+# append-only issue #180 correction that supersedes the original row's
+# timestamp/metadata for the same publication identity without
+# double-counting it (STATE_RULES.md: a later reconciliation event may
+# supersede descriptive state, historical rows are never deleted).
+AUDIENCE_PUBLISHED_RESULTS = frozenset({"PUBLISHED", "PUBLISHED_CORRECTED"})
+
+
 def _index_published_ids(classified_rows: list[dict[str, Any]]) -> frozenset[str]:
     """Identifiers that a PUBLISHED row has confirmed as audience-facing.
 
@@ -520,7 +528,7 @@ def _index_published_ids(classified_rows: list[dict[str, Any]]) -> frozenset[str
 
         row = item["row"]
 
-        if row.get("result") != "PUBLISHED":
+        if row.get("result") not in AUDIENCE_PUBLISHED_RESULTS:
             continue
 
         for key in ("manifest_id", "live_zernio_post_id"):
@@ -559,6 +567,23 @@ def _is_manifest_pending(manifest: dict[str, Any]) -> bool:
     )
 
 
+def _publication_identity(row: dict[str, Any]) -> str | None:
+    """Authoritative linkage for one audience publication (issue #180).
+
+    Identity is the exact live_zernio_post_id, falling back to the
+    exact manifest_id. No heuristic matching by topic/title/time --
+    a row carrying neither identifier has no provable identity and is
+    counted on its own, exactly as before.
+    """
+    live_id = row.get("live_zernio_post_id")
+    if isinstance(live_id, str) and live_id:
+        return f"live:{live_id}"
+    manifest_id = row.get("manifest_id")
+    if isinstance(manifest_id, str) and manifest_id:
+        return f"manifest:{manifest_id}"
+    return None
+
+
 def _format_load(
     *,
     classified_rows: list[dict[str, Any]],
@@ -571,22 +596,51 @@ def _format_load(
     published_today = 0
     last_published_at: datetime | None = None
 
+    # One Instagram publication stays one publication: rows sharing an
+    # authoritative identity are grouped, and a PUBLISHED_CORRECTED row
+    # (issue #180 append-only repair) supersedes the original row's
+    # timestamp for that identity instead of adding a second count.
+    # The latest correction by ledger order wins; identities without
+    # any correction keep legacy per-row behavior.
+    by_identity: dict[str, list[dict[str, Any]]] = {}
+    identity_less: list[dict[str, Any]] = []
+
     for item in classified_rows:
         if item["effective_format"] not in formats:
             continue
 
         row = item["row"]
 
-        if row.get("result") != "PUBLISHED":
+        if row.get("result") not in AUDIENCE_PUBLISHED_RESULTS:
             continue
 
-        ts = _parse_event_timestamp(row["timestamp"], "publish ledger row")
+        identity = _publication_identity(row)
+        if identity is None:
+            identity_less.append(item)
+        else:
+            by_identity.setdefault(identity, []).append(item)
 
+    def _note(ts: datetime) -> None:
+        nonlocal published_today, last_published_at
         if last_published_at is None or ts > last_published_at:
             last_published_at = ts
-
         if ts.astimezone(zone).date() == today_local:
             published_today += 1
+
+    for item in identity_less:
+        _note(_parse_event_timestamp(item["row"]["timestamp"], "publish ledger row"))
+
+    for _identity, items in by_identity.items():
+        corrections = [
+            item for item in items if item["row"].get("result") == "PUBLISHED_CORRECTED"
+        ]
+        if corrections:
+            # Latest correction by ledger order is authoritative.
+            winner = max(corrections, key=lambda item: item["lineno"])
+            _note(_parse_event_timestamp(winner["row"]["timestamp"], "publish ledger row"))
+            continue
+        for item in items:
+            _note(_parse_event_timestamp(item["row"]["timestamp"], "publish ledger row"))
 
     pending = 0
     expired_suppressed = 0
