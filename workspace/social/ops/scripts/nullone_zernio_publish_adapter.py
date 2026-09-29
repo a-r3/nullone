@@ -41,9 +41,14 @@ https://zernio.com/api/v1):
   AMBIGUOUS -> UNKNOWN. Never a second PUT.
 - Immediate publish returns platformPostUrl; truth comes from post.status
   + GET readback. The adapter never fabricates platform post ids,
-  permalinks, or provider metadata: permalink is copied ONLY from a
-  documented platformPostUrl string when actually present, and
-  platform_post_id stays empty unless a documented field provides it.
+  permalinks, provider metadata, or publication time: permalink is
+  copied ONLY from a documented platformPostUrl string when actually
+  present (the validated single platforms[] entry first, root
+  post.platformPostUrl only as fallback), platform_post_id ONLY from
+  a documented platforms[] platformPostId string, and
+  platform_published_at ONLY from a documented platforms[]
+  publishedAt string (raw passthrough; the caller must fail closed
+  rather than invent time when it is missing or unparseable).
 
 Transport capability is narrowly allowlisted by construction:
 
@@ -564,7 +569,8 @@ def _check_remote_draft(
     field fails closed.
 
     Returns a summary {"live_status", "platform_status",
-    "platform_post_url"} for truth classification. Never fabricates:
+    "platform_post_url", "platform_published_at", "platform_post_id"}
+    for truth classification. Never fabricates:
     absent fields become "" / None.
     """
     if not isinstance(body, dict):
@@ -631,14 +637,35 @@ def _check_remote_draft(
     if isinstance(raw_platform_status, str):
         platform_status = raw_platform_status.lower()
 
-    platform_post_url = post.get("platformPostUrl")
+    # Platform-level audience metadata from the validated single
+    # Instagram target (issue #180). Root post.platformPostUrl is often
+    # absent while the entry carries the real audience data, so the
+    # entry is authoritative first and the root field is only a
+    # documented fallback for the URL. publishedAt is passed through
+    # as the raw provider string (or None); parsing/validation is the
+    # caller's job, which must fail closed rather than invent time.
+    # platformPostId likewise: only a present non-empty string, else
+    # None -- never fabricated.
+    platform_published_at = entry.get("publishedAt")
+    if not isinstance(platform_published_at, str) or not platform_published_at:
+        platform_published_at = None
+
+    platform_post_id = entry.get("platformPostId")
+    if not isinstance(platform_post_id, str) or not platform_post_id:
+        platform_post_id = None
+
+    platform_post_url = entry.get("platformPostUrl")
     if not isinstance(platform_post_url, str) or not platform_post_url:
-        platform_post_url = None
+        platform_post_url = post.get("platformPostUrl")
+        if not isinstance(platform_post_url, str) or not platform_post_url:
+            platform_post_url = None
 
     return {
         "live_status": live_status,
         "platform_status": platform_status,
         "platform_post_url": platform_post_url,
+        "platform_published_at": platform_published_at,
+        "platform_post_id": platform_post_id,
     }
 
 
@@ -804,7 +831,8 @@ class ZernioPublishProvider:
         """Exactly one GET /v1/posts/{postId} to clarify truth.
 
         Returns the truth summary {"live_status", "platform_status",
-        "platform_post_url"}. Any failure raises
+        "platform_post_url", "platform_published_at", "platform_post_id"}.
+        Any failure raises
         PublishReadbackFailedError. Readback NEVER authorizes another
         PUT -- the provider has no method that could issue one.
         """

@@ -35,6 +35,15 @@ This module is the missing later check, and ONLY that:
   `NOOP_ALREADY_PUBLISHED` before any external call;
 - lock-disciplined: acquires the existing `review_post_lock` and
   re-reads the manifest under the lock before ever acting on it.
+
+Issue #180 repair (`repair-one` subcommand, separate from the above):
+already-`PUBLISHED` manifests whose ledger row carries reconciliation
+observation time instead of provider-proven audience time can be
+corrected append-only: one read-only GET readback, then (only on
+proven PUBLISHED truth with a parseable platforms[] publishedAt) a
+descriptive manifest metadata update plus one PUBLISHED_CORRECTED
+ledger row. State, attempts, error, receipts, and the remote post are
+never touched; reruns short-circuit to ALREADY_CORRECTED.
 """
 from __future__ import annotations
 
@@ -51,13 +60,20 @@ if str(_HERE) not in sys.path:
 
 from nullone_bridge_common import (  # noqa: E402
     BridgeError,
+    atomic_write_json,
     find_manifest_by_review_post_id,
+    now_iso,
     workspace_relative,
 )
 from nullone_publish_reconcile_provider_factory import (  # noqa: E402
     build_production_reconcile_provider,
 )
-from nullone_state import mark_queue_published_exact, record_publication_event  # noqa: E402
+from nullone_state import (  # noqa: E402
+    has_publication_correction,
+    mark_queue_published_exact,
+    record_publication_correction,
+    record_publication_event,
+)
 from nullone_story_supersession import review_post_lock  # noqa: E402
 from nullone_zernio_publish_adapter import (  # noqa: E402
     PublishConnectorUnauthorizedError,
@@ -189,6 +205,27 @@ def _converge_receipts(
     return converged
 
 
+def _parse_audience_time(raw: Any) -> str | None:
+    """Strictly parse a provider platforms[] publishedAt value.
+
+    Returns the normalized ISO string only for a present, parseable,
+    timezone-aware timestamp; anything missing, empty, non-string, or
+    unparseable returns None so the caller fails closed instead of
+    inventing publication time (issue #180).
+    """
+    from datetime import datetime
+
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed.isoformat()
+
+
 def _reconcile_locked(
     review_post_id: str,
     provider_factory: Callable[[], ZernioPublishReadOnlyReconciler],
@@ -301,14 +338,41 @@ def _reconcile_locked(
         }
 
     bridge = _bridge_module()
-    bridge._persist_state(
-        manifest_path,
-        m,
-        state=final_state,
-        error=error,
-        permalink=permalink,
-        live_post_id=post_id,
-    )
+    if final_state == "PUBLISHED":
+        # Issue #180: the ledger/cadence timestamp must be the
+        # authoritative audience publication time proven by the
+        # validated Instagram platform entry -- never the
+        # reconciliation observation time. Missing or unparseable
+        # platform publishedAt fails closed (CHECK_REQUIRED) instead
+        # of inventing time from scheduledFor/mtime/now.
+        audience_at = _parse_audience_time(truth.get("platform_published_at"))
+        if audience_at is None:
+            return {
+                "outcome": "CHECK_REQUIRED",
+                "review_post_id": review_post_id,
+                "reason": "AUDIENCE_TIME_UNPROVEN: platforms[] publishedAt missing or unparseable; never fabricated",
+            }
+
+        bridge._persist_state(
+            manifest_path,
+            m,
+            state=final_state,
+            error=error,
+            permalink=permalink,
+            live_post_id=post_id,
+            platform_post_id=truth.get("platform_post_id"),
+            published_at=audience_at,
+            observed_at=now_iso(),
+        )
+    else:
+        bridge._persist_state(
+            manifest_path,
+            m,
+            state=final_state,
+            error=error,
+            permalink=permalink,
+            live_post_id=post_id,
+        )
 
     record_publication_event(m, final_state)
 
@@ -344,6 +408,177 @@ def reconcile_one(
     factory = provider_factory or build_production_reconcile_provider
     with review_post_lock(review_post_id):
         return _reconcile_locked(review_post_id, factory)
+
+
+def repair_published_one(
+    review_post_id: str,
+    *,
+    provider_factory: Callable[[], ZernioPublishReadOnlyReconciler] | None = None,
+) -> dict[str, Any]:
+    """Append-only correction for an already-PUBLISHED manifest whose
+    recorded publication time/metadata came from reconciliation
+    observation rather than provider-proven audience truth (issue
+    #180).
+
+    Strictly narrower than reconcile: eligible ONLY when the manifest
+    already shows `publication.state == "PUBLISHED"` with
+    `attempts == 1`. Performs exactly one read-only GET readback, then
+    (only on proven PUBLISHED truth with a parseable platforms[]
+    publishedAt) updates the manifest's descriptive metadata fields
+    and appends one PUBLISHED_CORRECTED ledger row -- never touching
+    state, attempts, error, receipts, or the remote post. No PUT, no
+    POST, no retry, no scheduler.
+
+    Idempotent: a manifest whose correction row already exists
+    short-circuits to ALREADY_CORRECTED before any external call, and
+    the ledger dedup key suppresses any repeated correction row.
+    """
+    factory = provider_factory or build_production_reconcile_provider
+    with review_post_lock(review_post_id):
+        return _repair_locked(review_post_id, factory)
+
+
+def _repair_locked(
+    review_post_id: str,
+    provider_factory: Callable[[], ZernioPublishReadOnlyReconciler],
+) -> dict[str, Any]:
+    workspace = workspace_root()
+
+    try:
+        manifest_path, m = find_manifest_by_review_post_id(review_post_id)
+    except BridgeError as exc:
+        return {
+            "outcome": "BLOCKED",
+            "review_post_id": review_post_id,
+            "reason": f"INVALID_MANIFEST: {exc}",
+        }
+
+    pub = m.get("publication", {})
+    state = pub.get("state")
+    attempts = pub.get("attempts", 0)
+
+    if state != "PUBLISHED":
+        return {
+            "outcome": "BLOCKED",
+            "review_post_id": review_post_id,
+            "reason": f"REPAIR_INELIGIBLE_STATE: state={state!r} (repair targets settled PUBLISHED only)",
+        }
+
+    if not isinstance(attempts, int) or attempts != 1:
+        return {
+            "outcome": "BLOCKED",
+            "review_post_id": review_post_id,
+            "reason": f"REPAIR_INELIGIBLE_ATTEMPTS: attempts={attempts!r}",
+        }
+
+    live_id = pub.get("live_zernio_post_id")
+    if not isinstance(live_id, str) or not live_id:
+        return {
+            "outcome": "BLOCKED",
+            "review_post_id": review_post_id,
+            "reason": "REPAIR_IDENTITY_MISSING: no live_zernio_post_id; identity is never guessed",
+        }
+
+    if has_publication_correction(live_id):
+        return {
+            "outcome": "ALREADY_CORRECTED",
+            "review_post_id": review_post_id,
+            "manifest_id": m.get("manifest_id"),
+        }
+
+    try:
+        expected = build_expected_snapshot(m)
+    except PublishPreflightBlockedError as exc:
+        return {
+            "outcome": "BLOCKED",
+            "review_post_id": review_post_id,
+            "reason": f"CANNOT_DERIVE_EXPECTATIONS: {exc}",
+        }
+
+    post_id = expected["post_id"]
+
+    try:
+        provider = provider_factory()
+    except (
+        PublishConnectorUnauthorizedError,
+        PublishConnectorUnavailableError,
+    ) as exc:
+        return {
+            "outcome": "CHECK_REQUIRED",
+            "review_post_id": review_post_id,
+            "reason": f"CREDENTIAL: {exc}",
+        }
+
+    try:
+        truth = provider.readback(post_id, expected)
+    except (
+        PublishConnectorUnauthorizedError,
+        PublishReadbackFailedError,
+    ) as exc:
+        return {
+            "outcome": "CHECK_REQUIRED",
+            "review_post_id": review_post_id,
+            "reason": f"READBACK: {exc}",
+        }
+    except Exception as exc:
+        return {
+            "outcome": "CHECK_REQUIRED",
+            "review_post_id": review_post_id,
+            "reason": f"READBACK_AMBIGUOUS: {exc}",
+        }
+
+    if classify_readback_truth(truth) != "PUBLISHED":
+        return {
+            "outcome": "CHECK_REQUIRED",
+            "review_post_id": review_post_id,
+            "reason": "repair readback does not prove PUBLISHED; correction refused",
+        }
+
+    audience_at = _parse_audience_time(truth.get("platform_published_at"))
+    if audience_at is None:
+        return {
+            "outcome": "CHECK_REQUIRED",
+            "review_post_id": review_post_id,
+            "reason": "AUDIENCE_TIME_UNPROVEN: platforms[] publishedAt missing or unparseable; never fabricated",
+        }
+
+    observed_at = now_iso()
+    platform_post_id = truth.get("platform_post_id")
+    permalink = truth.get("platform_post_url")
+
+    # Descriptive metadata only: state, attempts, and error are
+    # deliberately untouched -- this repair converges truth, it never
+    # re-settles the publication.
+    m["publication"]["platform_post_id"] = platform_post_id
+    m["publication"]["permalink"] = permalink
+    m["publication"]["published_at"] = audience_at
+    m["publication"]["observed_at"] = observed_at
+    m["publication"]["last_checked_at"] = observed_at
+    atomic_write_json(manifest_path, m)
+
+    appended = record_publication_correction(
+        m,
+        audience_iso=audience_at,
+        observed_iso=observed_at,
+        platform_post_id=platform_post_id,
+        permalink=permalink,
+        reason="RECONCILE_AUDIENCE_TIME: provider platforms[] publishedAt supersedes observation time",
+    )
+
+    converged_receipts = _converge_receipts(workspace, post_id, "PUBLISHED")
+
+    return {
+        "outcome": "REPAIRED_PUBLISHED_TIME",
+        "review_post_id": post_id,
+        "manifest_id": m.get("manifest_id"),
+        "manifest_path": workspace_relative(manifest_path),
+        "audience_published_at": audience_at,
+        "observed_at": observed_at,
+        "platform_post_id": platform_post_id,
+        "permalink": permalink,
+        "correction_appended": appended,
+        "converged_receipts": converged_receipts,
+    }
 
 
 def scan_eligible(
@@ -418,6 +653,9 @@ def main() -> int:
     one = sub.add_parser("reconcile-one")
     one.add_argument("--review-post-id", required=True)
 
+    repair = sub.add_parser("repair-one")
+    repair.add_argument("--review-post-id", required=True)
+
     scan = sub.add_parser("scan")
     scan.add_argument("--max-items", type=int, default=5)
     scan.add_argument("--min-stale-seconds", type=float, default=900.0)
@@ -428,6 +666,11 @@ def main() -> int:
 
     if args.command == "reconcile-one":
         result = reconcile_one(args.review_post_id)
+        _print_result(result)
+        return 0
+
+    if args.command == "repair-one":
+        result = repair_published_one(args.review_post_id)
         _print_result(result)
         return 0
 

@@ -376,6 +376,9 @@ def _persist_state(
     error: str | None,
     permalink: str | None,
     live_post_id: str,
+    platform_post_id: str | None = None,
+    published_at: str | None = None,
+    observed_at: str | None = None,
 ) -> None:
     """Persist a terminal publication state.
 
@@ -383,13 +386,27 @@ def _persist_state(
     PUT promotes the SAME post, it never mints a new one). permalink is
     copied ONLY from a documented platformPostUrl string when actually
     present. platform_post_id is never fabricated and stays empty unless
-    a documented provider field supplies it -- no such field exists in
-    the current contract, so it is always None here.
+    a documented provider field supplies it -- the direct publish path
+    passes nothing (no such field on its contract), while the
+    GET-only reconciliation path (issue #180) passes the validated
+    platforms[] platformPostId.
+
+    Audience-time rule (issue #180): published_at, when supplied, is
+    the authoritative audience-facing publication time proven by the
+    provider (platforms[] publishedAt), NOT the local processing time;
+    observed_at records when this process observed it. The direct
+    publish path supplies neither (audience time is effectively now,
+    recorded by the ledger writer as before), so its behavior is
+    unchanged.
     """
     m["publication"]["live_zernio_post_id"] = live_post_id
     m["publication"]["state"] = state
-    m["publication"]["platform_post_id"] = None
+    m["publication"]["platform_post_id"] = platform_post_id
     m["publication"]["permalink"] = permalink
+    if published_at is not None:
+        m["publication"]["published_at"] = published_at
+    if observed_at is not None:
+        m["publication"]["observed_at"] = observed_at
     m["publication"]["last_checked_at"] = now_iso()
     m["publication"]["error"] = error
 

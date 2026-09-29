@@ -165,12 +165,32 @@ def record_publication_event(
     manifest: dict[str, Any],
     event: str,
 ) -> None:
+    """Append one publication ledger row (append-only; never rewrites).
+
+    Audience-time rule (issue #180): the ledger `timestamp` is the
+    authoritative audience-facing publication time. When the manifest
+    carries a provider-proven `publication.published_at` (written only
+    by the GET-only reconciliation path from a validated platforms[]
+    publishedAt), that value is the timestamp; otherwise -- the direct
+    publish path, where audience time is effectively now -- it is the
+    current time, exactly as before. `observed_at` preserves when this
+    process recorded the row, so reconciliation observation time is
+    never silently relabeled as publication time.
+    """
 
     pub = manifest["publication"]
     review = manifest["review"]
 
+    audience_at = pub.get("published_at")
+    if not isinstance(audience_at, str) or not audience_at:
+        audience_at = now_iso()
+    observed_at = pub.get("observed_at")
+    if not isinstance(observed_at, str) or not observed_at:
+        observed_at = audience_at
+
     record = {
-        "timestamp": now_iso(),
+        "timestamp": audience_at,
+        "observed_at": observed_at,
         "event": event,
         "manifest_id": manifest.get("manifest_id"),
         "candidate_id": manifest.get("candidate_id"),
@@ -206,6 +226,85 @@ def record_publication_event(
         TOPIC_LEDGER,
         topic_record,
         ("status", "live_zernio_post_id"),
+    )
+
+
+def record_publication_correction(
+    manifest: dict[str, Any],
+    *,
+    audience_iso: str,
+    observed_iso: str,
+    platform_post_id: str | None,
+    permalink: str | None,
+    reason: str,
+) -> bool:
+    """Append one PUBLISHED_CORRECTED ledger row (issue #180).
+
+    Repairs an already-recorded PUBLISHED row whose timestamp is a
+    reconciliation observation time rather than the authoritative
+    audience publication time -- without deleting or rewriting any
+    historical row (STATE_RULES.md: a later reconciliation event may
+    supersede descriptive state, never delete history).
+
+    The row carries the SAME identity linkage (manifest_id /
+    live_zernio_post_id) with the corrected audience `timestamp` plus
+    the provider-proven platform metadata; `observed_at` preserves
+    when the correction was recorded. Dedup key
+    ("event", "live_zernio_post_id") makes reruns idempotent: a second
+    identical correction is suppressed, never a second daily count.
+    Cadence readers treat the correction as superseding the original
+    row for that identity (one publication stays one publication).
+
+    Returns True when a row was appended, False when already present.
+    """
+
+    pub = manifest["publication"]
+    review = manifest["review"]
+
+    record = {
+        "timestamp": audience_iso,
+        "observed_at": observed_iso,
+        "event": "PUBLISHED_CORRECTED",
+        "correction_reason": reason,
+        "manifest_id": manifest.get("manifest_id"),
+        "candidate_id": manifest.get("candidate_id"),
+        "topic": manifest.get("topic"),
+        "topic_cluster": manifest.get("topic_cluster"),
+        "content_type": manifest.get("content_type"),
+        "format": manifest.get("format"),
+        "account_id": manifest.get("account_id"),
+        "review_post_id": review.get("zernio_draft_id"),
+        "live_zernio_post_id": pub.get("live_zernio_post_id"),
+        "platform_post_id": platform_post_id,
+        "permalink": permalink,
+        "result": "PUBLISHED_CORRECTED",
+    }
+
+    return append_jsonl_once(
+        PUBLISH_LEDGER,
+        record,
+        ("event", "live_zernio_post_id"),
+    )
+
+
+def has_publication_correction(live_zernio_post_id: str | None) -> bool:
+    """True when a PUBLISHED_CORRECTED row already exists for this post.
+
+    Read-only idempotency probe for the issue #180 repair path: the
+    repair command short-circuits before any external call when the
+    correction evidence is already recorded.
+    """
+    if not live_zernio_post_id:
+        return False
+    try:
+        rows = read_jsonl(PUBLISH_LEDGER)
+    except Exception:
+        return False
+    return any(
+        isinstance(row, dict)
+        and row.get("event") == "PUBLISHED_CORRECTED"
+        and row.get("live_zernio_post_id") == live_zernio_post_id
+        for row in rows
     )
 
 

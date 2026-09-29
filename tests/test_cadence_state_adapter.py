@@ -1436,5 +1436,128 @@ class SpacingConfigValidationTests(unittest.TestCase):
             )
 
 
+
+
+class ReconcileCorrectionTests(unittest.TestCase):
+    """Issue #180: an append-only PUBLISHED_CORRECTED row supersedes the
+    contaminated observation-time row for the same publication identity
+    without double-counting it."""
+
+    AMAZON_MANIFEST_ID = "2026-09-25-amazon-seller-assistant-claude"
+    AMAZON_LIVE_ID = "6ab5c068f1c2af7c30f89020"
+    CONTAMINATED_TS = "2026-09-29T12:27:27.385827+00:00"
+    AUDIENCE_TS = "2026-09-25T00:51:43.366000+00:00"
+    # Sep 29 Asia/Baku evaluation moment from the production proof.
+    NOW_SEP29 = datetime(2026, 9, 29, 16, 30, 0, tzinfo=BAKU)
+
+    def _amazon_state(self, root: Path, *, with_correction: bool) -> None:
+        manifest_dir = root / "ops/manifests"
+        write_manifest(
+            manifest_dir,
+            self.AMAZON_MANIFEST_ID,
+            fmt="FEED",
+            review_state="DRAFT_CREATED",
+            first_stage=True,
+            final_publish=True,
+            publication_state="PUBLISHED",
+            live_zernio_post_id=self.AMAZON_LIVE_ID,
+        )
+        ledger_path = root / "state/publish-ledger.jsonl"
+        append_ledger_row(
+            ledger_path,
+            fmt="FEED",
+            result="PUBLISHED",
+            timestamp=self.CONTAMINATED_TS,
+            manifest_id=self.AMAZON_MANIFEST_ID,
+            live_zernio_post_id=self.AMAZON_LIVE_ID,
+        )
+        if with_correction:
+            append_ledger_row(
+                ledger_path,
+                fmt="FEED",
+                result="PUBLISHED_CORRECTED",
+                timestamp=self.AUDIENCE_TS,
+                manifest_id=self.AMAZON_MANIFEST_ID,
+                live_zernio_post_id=self.AMAZON_LIVE_ID,
+            )
+
+    def test_corrected_sep25_publication_is_not_counted_on_sep29(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._amazon_state(root, with_correction=True)
+
+            result = collect_format_loads(
+                state_root=root, now=self.NOW_SEP29
+            )
+
+            main = result["main_load"]
+            self.assertEqual(main["published_today"], 0)
+            self.assertEqual(main["pending"], 0)
+            # Audience time is authoritative; observation time is gone
+            # from the counters (it survives only as observed_at audit
+            # data on the ledger rows themselves).
+            self.assertEqual(main["last_published_at"], self.AUDIENCE_TS)
+
+    def test_uncorrected_contamination_counts_on_wrong_day(self):
+        # Documents the exact production bug shape: without the
+        # correction row, the Sep-25 audience publication looks like a
+        # Sep-29 publication.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._amazon_state(root, with_correction=False)
+
+            result = collect_format_loads(
+                state_root=root, now=self.NOW_SEP29
+            )
+
+            main = result["main_load"]
+            self.assertEqual(main["published_today"], 1)
+            self.assertEqual(main["last_published_at"], self.CONTAMINATED_TS)
+
+    def test_same_day_correction_counts_exactly_once(self):
+        # A correction dated today must count the publication once --
+        # never zero, never twice.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manifest_dir = root / "ops/manifests"
+            write_manifest(
+                manifest_dir,
+                "today-post",
+                fmt="FEED",
+                review_state="DRAFT_CREATED",
+                first_stage=True,
+                final_publish=True,
+                publication_state="PUBLISHED",
+                live_zernio_post_id="a" * 24,
+            )
+            ledger_path = root / "state/publish-ledger.jsonl"
+            append_ledger_row(
+                ledger_path,
+                fmt="FEED",
+                result="PUBLISHED",
+                timestamp="2026-09-29T08:00:00+00:00",
+                manifest_id="today-post",
+                live_zernio_post_id="a" * 24,
+            )
+            append_ledger_row(
+                ledger_path,
+                fmt="FEED",
+                result="PUBLISHED_CORRECTED",
+                timestamp="2026-09-29T10:00:00+00:00",
+                manifest_id="today-post",
+                live_zernio_post_id="a" * 24,
+            )
+
+            result = collect_format_loads(
+                state_root=root, now=self.NOW_SEP29
+            )
+
+            main = result["main_load"]
+            self.assertEqual(main["published_today"], 1)
+            self.assertEqual(
+                main["last_published_at"], "2026-09-29T10:00:00+00:00"
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
