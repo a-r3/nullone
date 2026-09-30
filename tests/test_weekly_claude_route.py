@@ -44,7 +44,7 @@ class WeeklyClaudeTests(unittest.TestCase):
             "morning_editorial": ("claude", "sonnet", 600),
             "story_writer": ("claude", "haiku", 300),
             "draft_factory": ("opencode", "opencode/muse-spark-1.3-contributor-free", 900),
-            "breaking_radar": ("opencode", "opencode/muse-spark-1.3-contributor-free", 600),
+            "breaking_radar": ("claude", "haiku", 600),
         }
         for role, wanted in expected.items():
             profile = router.resolve_provider_profile(role, env={})

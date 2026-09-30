@@ -194,7 +194,7 @@ class RouterFailClosedTests(unittest.TestCase):
 
     def test_claude_unsupported_role_fails_closed(self):
         mapping = checked_in_mapping()
-        for role in (router.ROLE_DRAFT_FACTORY, router.ROLE_BREAKING_RADAR):
+        for role in (router.ROLE_DRAFT_FACTORY,):
             with self.assertRaises(router.ProviderRoutingError):
                 router.resolve_provider_profile(
                     role, config=mapping,
@@ -210,14 +210,15 @@ class PerRoleRoutingTests(unittest.TestCase):
         # Story moved off OpenCode in the #172-era FreeTierError
         # migration: its checked-in default is now the same Claude
         # transport as Morning, with the reviewed Haiku selector
-        # (never Sonnet/Opus). Weekly uses Sonnet; Draft/Breaking stay on OpenCode.
+        # (never Sonnet/Opus). Weekly uses Sonnet; Radar uses Haiku
+        # (#190); Draft stays on OpenCode.
         mapping = checked_in_mapping()
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
             if role in (router.ROLE_MORNING_EDITORIAL, router.ROLE_WEEKLY_STRATEGY):
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, MORNING_CLAUDE_MODEL)
-            elif role == router.ROLE_STORY_WRITER:
+            elif role in (router.ROLE_STORY_WRITER, router.ROLE_BREAKING_RADAR):
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, router.HAIKU_DEFAULT_MODEL)
             else:
@@ -233,7 +234,7 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("WEEKLY_PROFILE_ROUTING=PASS")
 
     def test_checked_in_morning_and_story_claude_routes_are_role_only(self):
-        # Morning, Story, and Weekly have reviewed Claude paths.
+        # Morning, Story, Radar, and Weekly have reviewed Claude paths.
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         roles = raw["roles"]
         self.assertEqual(
@@ -245,12 +246,15 @@ class PerRoleRoutingTests(unittest.TestCase):
             {"transport": "claude", "model": router.HAIKU_DEFAULT_MODEL},
         )
         self.assertEqual(
+            roles["breaking_radar"],
+            {"transport": "claude", "model": router.HAIKU_DEFAULT_MODEL},
+        )
+        self.assertEqual(
             roles["weekly_strategy"],
             {"transport": "claude", "model": "sonnet"},
         )
         for role in (
             "draft_factory",
-            "breaking_radar",
         ):
             self.assertEqual(
                 roles[role], {"transport": "opencode", "model": MUSE_SPARK}
@@ -415,11 +419,6 @@ class RoleAuthorityTests(unittest.TestCase):
         import nullone_provider_adapter as provider_adapter
 
         recorded: dict = {}
-        real_builder = provider_adapter.build_adapter_command
-
-        def spy_builder(profile, **kwargs):
-            recorded["agent_argv"] = real_builder(profile, **kwargs)
-            return recorded["agent_argv"]
 
         profile = router.resolve_provider_profile(
             router.ROLE_BREAKING_RADAR, config=checked_in_mapping(), env={}
@@ -427,22 +426,28 @@ class RoleAuthorityTests(unittest.TestCase):
         call = adapter.AdapterCall(
             role=profile.role, prompt="probe", workspace=Path("/tmp/x")
         )
-        with mock.patch.object(
-            provider_adapter, "build_adapter_command", side_effect=spy_builder
-        ), mock.patch(
-            "nullone_opencode_binary.resolve_opencode_binary",
-            return_value="/tmp/fake-opencode",
-        ), mock.patch.object(
-            provider_adapter.opencode_role, "run_opencode_cycle",
-            side_effect=lambda cmd, **kwargs: recorded.update(kwargs),
+        # Claude Radar has no flat argv: agent/timeout authority is
+        # proven by reaching the dedicated structured provider with
+        # the profile's exact model and timeout.
+        def fake_invoke_radar(*, prompt, workspace, model, timeout):
+            recorded.update(
+                prompt=prompt, workspace=workspace, model=model, timeout=timeout
+            )
+            return {"mode": "NO_MATERIAL_DEVELOPMENT"}
+
+        with mock.patch(
+            "nullone_claude_radar_provider.invoke_radar",
+            side_effect=fake_invoke_radar,
         ):
-            provider_adapter.invoke_adapter(profile, call)
-        argv = recorded["agent_argv"]
-        self.assertEqual(
-            argv[argv.index("--agent") + 1],
-            router.role_agent(router.ROLE_BREAKING_RADAR),
-        )
+            outcome = provider_adapter.invoke_adapter(profile, call)
+        self.assertEqual(recorded["model"], profile.model)
         self.assertEqual(recorded["timeout"], profile.timeout_seconds)
+        self.assertEqual(recorded["timeout"], 600)
+        self.assertEqual(recorded["workspace"], Path("/tmp/x"))
+        self.assertEqual(
+            (outcome.role, outcome.transport, outcome.model),
+            ("breaking_radar", "claude", "haiku"),
+        )
         print("ROUTER_SOLE_AGENT_AUTHORITY=PASS")
         print("ROUTER_SOLE_TIMEOUT_AUTHORITY=PASS")
 

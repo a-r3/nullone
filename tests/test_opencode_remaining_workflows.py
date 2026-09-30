@@ -76,6 +76,13 @@ WRAPPERS = (
     ("breaking-radar", "nullone-breaking-radar", radar_wrapper, 600),
 )
 
+# Wrappers still executing through the OpenCode argv path. Breaking
+# Radar moved to Claude structured invocation (#190) and no longer
+# exposes a flat argv.
+OPENCODE_ARGV_WRAPPERS = (
+    ("draft-factory", "nullone-draft-factory", draft_wrapper, 900),
+)
+
 MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
 WS = "/home/oem/.openclaw/workspace"
 
@@ -182,7 +189,7 @@ class RoleWrapperTests(unittest.TestCase):
         patcher.start()
 
     def test_command_shape_per_role(self):
-        for role, agent, module, timeout in WRAPPERS:
+        for role, agent, module, timeout in OPENCODE_ARGV_WRAPPERS:
             with self.subTest(role=role):
                 argv = module.build_command(workspace=Path("/tmp/nullone-role-check"))
                 self.assertEqual(argv[0:2], ["opencode", "run"])
@@ -196,13 +203,21 @@ class RoleWrapperTests(unittest.TestCase):
                 for forbidden in ("--auto", "--continue", "--session", "--fork", "--share"):
                     self.assertNotIn(forbidden, argv)
 
+    def test_radar_uses_structured_invocation_without_flat_argv(self):
+        # Breaking Radar moved to Claude structured invocation (#190):
+        # no flat argv exists; the adapter refuses to build one.
+        import nullone_provider_adapter as provider_adapter
+
+        with self.assertRaises(provider_adapter.ProviderRoutingError):
+            radar_wrapper.build_command(workspace=Path("/tmp/nullone-role-check"))
+
     def test_per_role_timeout_budgets(self):
         self.assertEqual(draft_wrapper.DRAFT_FACTORY_TIMEOUT_SECONDS, 900)
         self.assertEqual(radar_wrapper.RADAR_TIMEOUT_SECONDS, 600)
         self.assertEqual(weekly_wrapper.WEEKLY_TIMEOUT_SECONDS, 600)
 
     def test_execute_maps_transport_failure_to_blocked(self):
-        for role, agent, module, timeout in WRAPPERS:
+        for role, agent, module, timeout in OPENCODE_ARGV_WRAPPERS:
             with self.subTest(role=role):
                 def effect(cmd, **kwargs):
                     return subprocess.CompletedProcess(cmd, 3, stdout="", stderr="boom")
@@ -210,11 +225,29 @@ class RoleWrapperTests(unittest.TestCase):
                 with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
                     self.assertEqual(module.execute(), 1)
 
-    def test_execute_success_returns_zero(self):
-        def effect(cmd, **kwargs):
-            return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+    def test_radar_execute_maps_provider_failure_to_blocked(self):
+        import nullone_provider_adapter as provider_adapter
 
-        with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
+        def effect(profile, prompt, workspace):
+            raise BridgeError("Claude radar run failed")
+
+        with mock.patch.object(
+            provider_adapter, "invoke_role_cycle", side_effect=effect
+        ):
+            self.assertEqual(radar_wrapper.execute(), 1)
+
+    def test_execute_success_returns_zero(self):
+        import nullone_provider_adapter as provider_adapter
+
+        def effect(profile, prompt, workspace):
+            return provider_adapter.AdapterOutcome(
+                role="breaking_radar", transport="claude", model="haiku",
+                outcome="COMPLETED",
+            )
+
+        with mock.patch.object(
+            provider_adapter, "invoke_role_cycle", side_effect=effect
+        ):
             with mock.patch.object(
                 radar_wrapper, "find_fresh_reports", return_value=[Path("/tmp/fake-report.md")]
             ):

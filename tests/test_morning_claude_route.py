@@ -139,12 +139,12 @@ class StoryClaudeRouteTests(unittest.TestCase):
 
 
 class OtherRolesUnchangedTests(unittest.TestCase):
-    """F-I: Draft and Breaking stay on their reviewed OpenCode route."""
+    """F-I: Draft stays on its reviewed OpenCode route (Radar moved to
+    Claude/Haiku in #190, covered by its own route suite)."""
 
     def test_other_roles_unchanged(self):
         mapping = checked_in_mapping()
         for role in (
-            router.ROLE_BREAKING_RADAR,
             router.ROLE_DRAFT_FACTORY,
         ):
             profile = router.resolve_provider_profile(

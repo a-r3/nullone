@@ -44,8 +44,9 @@ Deprecated compatibility (tested, removal needs review):
 `NULLONE_STORY_PROVIDER` (story transport),
 `NULLONE_OPENCODE_MODEL` (model for opencode-transport roles only).
 The checked-in mapping selects Claude/Sonnet for Morning and Weekly,
-Claude/Haiku for Story, and OpenCode/Muse Spark for Draft and Breaking.
-Production activation remains a separate controlled deployment.
+Claude/Haiku for Story and Breaking Radar, and OpenCode/Muse Spark
+for Draft Factory only. Production activation remains a separate
+controlled deployment.
 
 Timeouts and capabilities are pinned in router code (equal to the
 reviewed per-role constants); the JSON file cannot change execution
@@ -77,7 +78,8 @@ router/adapter boundary.
   continuation, reviewed agents, timeouts, and fixed-string failures
   preserved.
 - Claude transport has reviewed Morning (`claude -p`), Story
-  (`HaikuStoryWriter`), and Weekly structured-result paths, model from
+  (`HaikuStoryWriter`), Weekly structured-result, and Radar
+  structured-result paths, model from
   the profile with truthful transport defaults when unpinned
   (`sonnet` cycle / `haiku` writer -- the exact executed values, so
   reported == executed). Weekly passes the actual workflow prompt and
