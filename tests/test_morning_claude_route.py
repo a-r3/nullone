@@ -8,8 +8,7 @@ Also covers the Story Writer Claude/Haiku route (#172-era migration
 off OpenCode, FreeTierError root-cause debugging closed as an
 engineering direction): transport=claude, model=haiku, timeout 300
 unchanged, agent nullone-story-writer, no fallback. Draft Factory,
-Breaking Radar, and Weekly Strategy remain on the reviewed OpenCode
-route.
+Breaking Radar and Draft Factory remain on the reviewed OpenCode route.
 
 NO model invocation. NO network. Checked-in config + router only.
 """
@@ -140,15 +139,13 @@ class StoryClaudeRouteTests(unittest.TestCase):
 
 
 class OtherRolesUnchangedTests(unittest.TestCase):
-    """F-I: every non-Morning, non-Story role stays on its reviewed
-    OpenCode route."""
+    """F-I: Draft and Breaking stay on their reviewed OpenCode route."""
 
     def test_other_roles_unchanged(self):
         mapping = checked_in_mapping()
         for role in (
             router.ROLE_BREAKING_RADAR,
             router.ROLE_DRAFT_FACTORY,
-            router.ROLE_WEEKLY_STRATEGY,
         ):
             profile = router.resolve_provider_profile(
                 role, config=mapping, env={}

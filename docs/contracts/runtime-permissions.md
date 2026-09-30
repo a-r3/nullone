@@ -68,9 +68,16 @@ Do NOT claim B where only C exists.
 
 ### WEEKLY STRATEGY (review)
 
-- Read analytics/editorial evidence: A.
+- Read analytics/editorial evidence and research the web: A. The reviewed
+  Claude path grants only `Read,WebSearch,WebFetch`, with `--tools ""`
+  default and no session persistence (B). The model receives the Weekly
+  prompt and supplied workspace, not the Morning prompt (B).
 - Write strategy artifact where applicable (weekly report, durable memory
-  findings only): A.
+  findings only): A. Claude has no Write/Edit/Bash/MCP grant; deterministic
+  Python validates structured output and writes only the workspace-contained
+  ISO-week report and, when non-empty, `MEMORY.md` (B). Malformed output
+  fails closed. The existing OpenCode Weekly agent remains a reviewed
+  transport for explicit routing.
 - NO publication authority: D. Prompt declares `DO NOT PUBLISH ANYTHING`
   (C); no publish transport wired (B).
 
@@ -131,6 +138,7 @@ Do NOT claim B where only C exists.
 | `nullone_claude_editorial_provider.py --allowedTools Read,Write,WebSearch,WebFetch` | REQUIRED | Narrow research set for the Claude editorial fallback transport; no Bash/MCP/draft/notify tools. |
 | `nullone_opencode_editorial_provider.py opencode run --agent nullone-editorial --model <provider/model> --format json` (no `--auto`, fresh session per run) | REQUIRED | Narrow research set for the OpenCode editorial transport. The checked-in agent defaults writes to deny and allows only the four Morning artifact/state paths (`**/social/research/daily/*-editorial-board.md`, `**/social/research/daily/*-editorial-candidates.json`, `**/social/state/candidate-queue.md`, `**/social/state/topic-ledger.jsonl`); secret-bearing reads (`.env`-family, keys) denied; shell, task delegation, skills, and outside-worktree access denied. Path scoping proven live against OpenCode 1.18.30 (allowed write succeeds, off-scope write and secret read blocked). |
 | `nullone_claude.py run_structured(allowed_tools, ...)` with schema-bound JSON output, `--tools ""` default, no session persistence | REQUIRED | Callers pass minimal sets; default denies tool use. |
+| `nullone_claude_weekly_provider.py` `Read,WebSearch,WebFetch` and deterministic report/MEMORY persistence | REQUIRED | Weekly reasoning has no write, shell, MCP, or publication grant; schema and fixed destinations bound persistence. |
 | `toolsAllow=['*']` in `docs/deployment/*` preflight records and context | DOCUMENTATION_ONLY | Historical evidence text, not executable config. |
 | `toolsAllow=['*']` on live legacy Daily Analytics OpenClaw job | LEGACY, production-side | Lives only in live OpenClaw config (mutable production state, not in repo). Replacement by the deterministic wrapper invocation is a #37 deployment step; no repo change in this contract can fix it. |
 | Publisher-agent `exec` grant | TOO_BROAD, deployment-gated | Documented in-agent; removal is the #37 deployment hardening step. Not removable from the repository alone. |

@@ -94,6 +94,7 @@ COMMANDS = [
     [sys.executable, "tests/test_recovery_contract.py"],
     [sys.executable, "tests/test_restore_drill.py"],
     [sys.executable, "tests/test_provider_role_router.py"],
+    [sys.executable, "tests/test_weekly_claude_route.py"],
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_provider_router.py",

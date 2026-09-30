@@ -25,7 +25,7 @@ workflow ("I need role X")
   configured without workflow rewrites.
 - CAPABILITIES: frozen least-privilege labels per role. Routing a
   new model NEVER widens them; enforcement stays in the reviewed
-  per-role agents/prompts. Story writer owns no tool capability.
+  per-role adapters, agents, and prompts. Story writer owns no tool capability.
 
 ## Configuration
 
@@ -43,10 +43,9 @@ Deprecated compatibility (tested, removal needs review):
 `NULLONE_EDITORIAL_PROVIDER` (morning transport),
 `NULLONE_STORY_PROVIDER` (story transport),
 `NULLONE_OPENCODE_MODEL` (model for opencode-transport roles only).
-Migration M1: the no-env default moved from the legacy shims
-(`claude`) to the checked-in mapping (`opencode` + Muse Spark),
-matching live production. Live sets explicit env values, so live
-behavior is unchanged.
+The checked-in mapping selects Claude/Sonnet for Morning and Weekly,
+Claude/Haiku for Story, and OpenCode/Muse Spark for Draft and Breaking.
+Production activation remains a separate controlled deployment.
 
 Timeouts and capabilities are pinned in router code (equal to the
 reviewed per-role constants); the JSON file cannot change execution
@@ -77,13 +76,17 @@ router/adapter boundary.
   explicit agent/model, `--format json`, exact `--dir`, no `--auto`/
   continuation, reviewed agents, timeouts, and fixed-string failures
   preserved.
-- Claude transport remains the explicit rollback adapter (Morning
-  cycle via `claude -p`, Story via `HaikuStoryWriter`), model from
+- Claude transport has reviewed Morning (`claude -p`), Story
+  (`HaikuStoryWriter`), and Weekly structured-result paths, model from
   the profile with truthful transport defaults when unpinned
   (`sonnet` cycle / `haiku` writer -- the exact executed values, so
-  reported == executed). Claude supports `morning_editorial` +
-  `story_writer` only; any other role x claude fails closed at
-  resolve time.
+  reported == executed). Weekly passes the actual workflow prompt and
+  workspace to `nullone_claude.run_structured`, grants only Read,
+  WebSearch, and WebFetch, and persists a validated result to the
+  deterministic ISO-week report path and optional `MEMORY.md` update.
+  It grants no model filesystem writes, shell, MCP, or publication tools.
+  Claude supports `morning_editorial`, `story_writer`, and
+  `weekly_strategy` only; other role x claude routes fail closed.
 
 ## Observability
 
@@ -98,11 +101,7 @@ plus the role profile in scheduled result contexts
 
 ## Activation
 
-Merging this PR changes NO production behavior: the checked-in
-mapping equals the current live mapping, and live env overrides
-resolve identically. Any future provider/model switch is an
-explicit routing-config change activated under Issue #37
-(preflight -> controlled config -> natural-run validation ->
-rollback proof), never a side effect of this merge. Rollback =
-previous mapping (Git revert or explicit override); no workflow
-code involved either way.
+This repository change does not deploy or alter the existing Weekly
+schedule. Production routing changes only through a separate controlled
+deployment and natural-run validation under Issue #37. The reviewed
+OpenCode Weekly agent remains available through an explicit route override.

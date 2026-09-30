@@ -88,10 +88,10 @@ TRANSPORT_CLAUDE = "claude"
 KNOWN_TRANSPORTS = (TRANSPORT_OPENCODE, TRANSPORT_CLAUDE)
 
 # Claude transport exists only where a reviewed Claude implementation
-# exists: the Morning cycle (`claude -p`) and the Story writer
-# (`HaikuStoryWriter`). Any other role x claude combination fails
+# exists: the Morning cycle, Story writer, and bounded Weekly strategy
+# cycle. Any other role x claude combination fails
 # closed at resolve time instead of dispatching nowhere.
-CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER)
+CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER, ROLE_WEEKLY_STRATEGY)
 
 FALLBACK_NONE = "none"
 
@@ -376,16 +376,14 @@ def describe_profile(profile: ProviderProfile) -> str:
 
 def self_test() -> int:
     mapping = load_routing_config()
-    # Reviewed per-role transports (issue #155; Story moved off
-    # OpenCode in the #172-era FreeTierError migration): Morning and
-    # Story Writer run the validated Claude route; Draft Factory,
-    # Breaking Radar, and Weekly Strategy stay on OpenCode.
+    # Morning, Story, and Weekly have reviewed Claude routes;
+    # Draft Factory and Breaking Radar stay on OpenCode.
     expected_transports = {
         ROLE_MORNING_EDITORIAL: TRANSPORT_CLAUDE,
         ROLE_DRAFT_FACTORY: TRANSPORT_OPENCODE,
         ROLE_STORY_WRITER: TRANSPORT_CLAUDE,
         ROLE_BREAKING_RADAR: TRANSPORT_OPENCODE,
-        ROLE_WEEKLY_STRATEGY: TRANSPORT_OPENCODE,
+        ROLE_WEEKLY_STRATEGY: TRANSPORT_CLAUDE,
     }
     for role in LOGICAL_ROLES:
         profile = resolve_provider_profile(role, config=mapping, env={})
@@ -410,6 +408,9 @@ def self_test() -> int:
     assert story.transport == TRANSPORT_CLAUDE, story
     assert story.model == HAIKU_DEFAULT_MODEL, story
     assert story.timeout_seconds == 300, story
+    weekly = resolve_provider_profile(ROLE_WEEKLY_STRATEGY, config=mapping, env={})
+    assert weekly.model == CLAUDE_DEFAULT_MODEL, weekly
+    assert weekly.timeout_seconds == 600, weekly
 
     for bad_role in ("morning", "analytics", "", "MORNING_EDITORIAL"):
         try:

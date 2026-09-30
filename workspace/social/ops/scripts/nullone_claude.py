@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from nullone_bridge_common import BridgeError
@@ -56,21 +57,36 @@ def run_structured(
     model: str = "haiku",
     max_turns: int = 8,
     timeout: int = 300,
+    workspace: Path | None = None,
+    weekly_security_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 
     cmd = [
         "claude",
         "-p",
 
-        # No Bash/Read/Edit/Web/etc.
+        # Expose only the caller's reviewed tool set; empty denies all.
         "--tools",
-        "",
+        ",".join(allowed_tools),
     ]
 
     if allowed_tools:
         cmd.extend(
             ["--allowedTools", *allowed_tools]
         )
+
+    if weekly_security_settings is not None:
+        if workspace is None:
+            raise BridgeError("Weekly Claude security requires a workspace")
+        cmd.extend([
+            "--restricted",
+            "--safe-mode",
+            "--strict-mcp-config",
+            "--disallowedTools",
+            "mcp__*,Agent,Bash,Edit,Write,NotebookEdit,PowerShell,REPL",
+            "--settings",
+            json.dumps(weekly_security_settings, separators=(",", ":")),
+        ])
 
     cmd.extend(
         [
@@ -107,6 +123,7 @@ def run_structured(
             capture_output=True,
             timeout=timeout,
             check=False,
+            cwd=workspace,
         )
     except subprocess.TimeoutExpired as e:
         raise BridgeError(
