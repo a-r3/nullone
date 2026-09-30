@@ -1,7 +1,84 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-30 Asia/Baku
+Last updated: 2026-10-01 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
+
+## Breaking Radar Claude/Haiku migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
+
+- Issue #190, "Migrate Breaking Radar from OpenCode to Claude/Haiku",
+  remains OPEN pending natural production proof.
+- PR #191 was exact-head reviewed at
+  `591b1eef36d14a834dca254b7dd1cc8f6b6e44fc`; NullOne CI run
+  `36776742839` completed SUCCESS. Human `REVIEW_RECEIPT` approved
+  that exact head.
+- PR #191 was squash-merged to `main` as
+  `ba57227c5d04c4f42c2b2e8fa34af066da649c4b`.
+- Reviewed target profile:
+  `role=breaking_radar`, `transport=claude`, `model=haiku`,
+  `timeout=600`, `fallback=none`.
+- The dedicated Claude Radar provider preserves the Radar domain
+  boundary: model access is limited to Read/WebSearch/WebFetch;
+  publication/Zernio/Telegram/Git/shell authority is not granted.
+  Structured model output is deep-validated before authoritative
+  report/staging/assessment commit. Duplicate candidate IDs and
+  malformed/deep-invalid batches fail closed before partial
+  authoritative state is committed.
+
+### PR #191 controlled production deployment
+
+- Production backup:
+  `/home/oem/.openclaw/nullone-deploy-backups/pr191-20261001-014953`.
+- Predeploy drift guard PASS.
+- Exactly 6 runtime files were deployed from the reviewed merged-main
+  staged bytes:
+  `social/ops/provider-routing.json`,
+  `social/ops/scripts/nullone-breaking-radar-run.py`,
+  `social/ops/scripts/nullone-breaking-scan.py`,
+  `social/ops/scripts/nullone_claude_radar_provider.py`,
+  `social/ops/scripts/nullone_provider_adapter.py`,
+  `social/ops/scripts/nullone_provider_router.py`.
+- Before deployment, 5 files existed and differed from the reviewed
+  target as expected; `nullone_claude_radar_provider.py` was absent.
+- Postdeploy exact-byte comparison matched staged reviewed bytes 6/6.
+  Live JSON parse and Python compile PASS.
+- Live offline validation PASS:
+  `PROVIDER_ROUTER_SELF_TEST=PASS`,
+  `PROVIDER_ADAPTER_SELF_TEST=PASS`,
+  `BREAKING_RADAR_RUN_SELF_TEST=PASS`,
+  `BREAKING_SCAN_COMMIT_SELF_TEST=PASS`,
+  `RADAR_CLAUDE_PROVIDER_SELF_TEST=PASS`.
+  Those tests reported no external model/network calls where applicable.
+- Direct live routing resolves:
+  `role=breaking_radar transport=claude model=haiku timeout=600 fallback=none`.
+- No Gateway restart, synthetic Radar execution, Zernio action,
+  Telegram action, or publication was triggered by this deployment.
+
+### Live Breaking Radar automation after deploy
+
+- Job `824a054c-4fdb-4201-8926-b0892c2bb1b9`
+  (`texbrif-breaking-radar`) remains enabled.
+- Schedule is unchanged:
+  `30 11,14,17,20,23 * * *`, timezone `Asia/Baku`.
+- Command is unchanged:
+  `python3 social/ops/scripts/nullone-breaking-radar-run.py execute`,
+  cwd `/home/oem/.openclaw/workspace`; `delivery.mode=none`.
+- The automation still contains legacy env
+  `NULLONE_OPENCODE_MODEL=opencode/muse-spark-1.3-contributor-free`.
+  It is INERT for the reviewed Claude Radar route. This was directly
+  verified in live production by resolving the provider profile while
+  that exact env value was present; result remained
+  `transport=claude model=haiku timeout=600 fallback=none`.
+  Do not remove the stale env merely for cleanup during stabilization.
+- Existing run-history entries showing
+  `transport=opencode / Muse Spark` are historical pre-deployment runs,
+  including the 2026-09-30 23:30 Asia/Baku occurrence. They are not
+  evidence that the new deployment is using OpenCode.
+- Natural production proof is PENDING. The first normal scheduled
+  occurrence after deployment is 2026-10-01 11:30 Asia/Baku.
+  Do not force-run or create a synthetic production Radar cycle.
+- Natural proof requires the scheduled run to truthfully show the
+  Claude/Haiku route and successful role/scheduler completion. Keep
+  issue #190 OPEN until that proof exists.
 
 ## Carousel V2 source images — 2026-09-30 Asia/Baku (VERIFIED)
 
