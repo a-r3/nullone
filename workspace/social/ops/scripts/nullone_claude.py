@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from nullone_bridge_common import BridgeError
@@ -56,15 +57,16 @@ def run_structured(
     model: str = "haiku",
     max_turns: int = 8,
     timeout: int = 300,
+    workspace: Path | None = None,
 ) -> dict[str, Any]:
 
     cmd = [
         "claude",
         "-p",
 
-        # No Bash/Read/Edit/Web/etc.
+        # Expose only the caller's reviewed tool set; empty denies all.
         "--tools",
-        "",
+        ",".join(allowed_tools),
     ]
 
     if allowed_tools:
@@ -82,6 +84,7 @@ def run_structured(
 
             "--no-session-persistence",
             "--disable-slash-commands",
+            "--strict-mcp-config",
 
             "--max-turns",
             str(max_turns),
@@ -107,6 +110,7 @@ def run_structured(
             capture_output=True,
             timeout=timeout,
             check=False,
+            cwd=workspace,
         )
     except subprocess.TimeoutExpired as e:
         raise BridgeError(

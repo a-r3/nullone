@@ -10,9 +10,9 @@ strategy review for the `weekly_strategy` logical role. Transport,
 model, agent, and timeout arrive from the role router's
 ProviderProfile and execute through the provider adapter registry:
 this module imports NO vendor transport module and never chooses
-OpenCode or Claude itself. The agent has no shell: analysis plus
-the two reviewed report writes, nothing else. Strategy-only, never
-publication.
+OpenCode or Claude itself. Claude has no shell or write tools; the
+reviewed outputs are persisted by deterministic Python code.
+Strategy-only, never publication.
 
 Transport budget (reviewed, transport-only, not domain policy):
 600s, mirrored in the router (`ROLE_TIMEOUTS`); the two must stay
@@ -36,10 +36,17 @@ WEEKLY_TIMEOUT_SECONDS = 600
 
 TRANSPORT_APPENDIX = """
 
-Transport note: this run executes with the workspace root as its
-working directory and has no shell. Write only the reviewed strategy
-report path and MEMORY.md; leave any other strategy-hypothesis
-update for a reviewed follow-up.
+Transport note: this run executes with the workspace root as its working
+directory. Return only the structured fields required by the JSON schema.
+Use Read, WebSearch, and WebFetch for evidence. Do not read secrets, write
+files, publish, approve, send messages, use Git or shell commands. Summarize
+the previous 7 days and separate observations, hypotheses, and decisions.
+Use web research for accessible reference samples; state when profiles are
+inaccessible rather than claiming an inspection that did not happen.
+Propose at most 3 changes. If evidence is insufficient, keep strategy stable.
+memory_update must be empty unless a finding is durable and well supported.
+The runtime writes the reviewed report and optional MEMORY.md update;
+leave any other strategy-hypothesis update for a reviewed follow-up.
 """
 
 
@@ -127,13 +134,11 @@ def execute() -> int:
 
 
 def self_test() -> int:
-    argv = build_command(workspace=Path("/tmp/nullone-weekly-self-test"))
     profile = provider_router.resolve_provider_profile(provider_router.ROLE_WEEKLY_STRATEGY)
-    assert argv[0:2] == ["opencode", "run"]
-    assert argv[argv.index("--agent") + 1] == AGENT
-    assert argv[argv.index("--model") + 1] == profile.model
-    assert argv[argv.index("--dir") + 1] == "/tmp/nullone-weekly-self-test"
-    assert "--auto" not in argv
+    assert profile.transport == "claude"
+    assert profile.model == "sonnet"
+    assert profile.timeout_seconds == WEEKLY_TIMEOUT_SECONDS
+    assert profile.fallback_policy == "none"
     assert PROMPT_PATH.name == "weekly-strategy.md"
 
     print("WEEKLY_STRATEGY_RUN_SELF_TEST=PASS")
@@ -142,7 +147,7 @@ def self_test() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="NullOne Weekly Strategy OpenCode role")
+    parser = argparse.ArgumentParser(description="NullOne Weekly Strategy role")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("execute")
     sub.add_parser("self-test")

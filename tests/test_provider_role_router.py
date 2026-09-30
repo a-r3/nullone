@@ -49,7 +49,7 @@ MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
 # Reviewed Morning route (issue #155, benchmark-validated): Claude
 # transport with the transport-local `sonnet` selector (resolves to
 # claude-sonnet-5 at the CLI). ONLY morning_editorial resolves here;
-# every other role stays on the reviewed OpenCode default.
+# Weekly now also uses Claude/Sonnet; Draft and Breaking remain OpenCode.
 MORNING_CLAUDE_MODEL = "sonnet"
 
 # Covered execution layers: these files must execute through the
@@ -194,8 +194,7 @@ class RouterFailClosedTests(unittest.TestCase):
 
     def test_claude_unsupported_role_fails_closed(self):
         mapping = checked_in_mapping()
-        for role in (router.ROLE_DRAFT_FACTORY, router.ROLE_BREAKING_RADAR,
-                     router.ROLE_WEEKLY_STRATEGY):
+        for role in (router.ROLE_DRAFT_FACTORY, router.ROLE_BREAKING_RADAR):
             with self.assertRaises(router.ProviderRoutingError):
                 router.resolve_provider_profile(
                     role, config=mapping,
@@ -211,11 +210,11 @@ class PerRoleRoutingTests(unittest.TestCase):
         # Story moved off OpenCode in the #172-era FreeTierError
         # migration: its checked-in default is now the same Claude
         # transport as Morning, with the reviewed Haiku selector
-        # (never Sonnet/Opus). Draft/Breaking/Weekly stay on OpenCode.
+        # (never Sonnet/Opus). Weekly uses Sonnet; Draft/Breaking stay on OpenCode.
         mapping = checked_in_mapping()
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
-            if role == router.ROLE_MORNING_EDITORIAL:
+            if role in (router.ROLE_MORNING_EDITORIAL, router.ROLE_WEEKLY_STRATEGY):
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, MORNING_CLAUDE_MODEL)
             elif role == router.ROLE_STORY_WRITER:
@@ -234,9 +233,7 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("WEEKLY_PROFILE_ROUTING=PASS")
 
     def test_checked_in_morning_and_story_claude_routes_are_role_only(self):
-        # Morning (issue #155) and Story (#172-era migration) are the
-        # only roles on the checked-in Claude route; Draft/Breaking/
-        # Weekly remain untouched on OpenCode/Muse Spark.
+        # Morning, Story, and Weekly have reviewed Claude paths.
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         roles = raw["roles"]
         self.assertEqual(
@@ -247,10 +244,13 @@ class PerRoleRoutingTests(unittest.TestCase):
             roles["story_writer"],
             {"transport": "claude", "model": router.HAIKU_DEFAULT_MODEL},
         )
+        self.assertEqual(
+            roles["weekly_strategy"],
+            {"transport": "claude", "model": "sonnet"},
+        )
         for role in (
             "draft_factory",
             "breaking_radar",
-            "weekly_strategy",
         ):
             self.assertEqual(
                 roles[role], {"transport": "opencode", "model": MUSE_SPARK}
@@ -698,8 +698,8 @@ class NoSilentFallbackTests(unittest.TestCase):
         )
         line = router.format_routing_metadata(profile, "BLOCKED")
         self.assertIn("ROLE=weekly_strategy", line)
-        self.assertIn("TRANSPORT=opencode", line)
-        self.assertIn(f"PROVIDER_MODEL={MUSE_SPARK}", line)
+        self.assertIn("TRANSPORT=claude", line)
+        self.assertIn("PROVIDER_MODEL=sonnet", line)
         self.assertIn("OUTCOME=BLOCKED", line)
 
 

@@ -74,7 +74,6 @@ weekly_wrapper = _load_wrapper("weekly_run_test", "nullone-weekly-strategy-run.p
 WRAPPERS = (
     ("draft-factory", "nullone-draft-factory", draft_wrapper, 900),
     ("breaking-radar", "nullone-breaking-radar", radar_wrapper, 600),
-    ("weekly-strategy", "nullone-weekly-strategy", weekly_wrapper, 600),
 )
 
 MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
@@ -237,7 +236,10 @@ class RoleWrapperTests(unittest.TestCase):
             source = code_only((SCRIPTS / filename).read_text(encoding="utf-8"))
             self.assertNotIn("os.environ", source)
             self.assertNotIn("getenv", source)
-            for token in ("anthropic", "sonnet", "haiku", "TOKEN", "SECRET", "API_KEY"):
+            forbidden = ("anthropic", "TOKEN", "SECRET", "API_KEY")
+            if filename != "nullone-weekly-strategy-run.py":
+                forbidden += ("sonnet", "haiku")
+            for token in forbidden:
                 self.assertNotIn(token, source)
 
 
