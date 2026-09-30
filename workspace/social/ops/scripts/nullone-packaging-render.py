@@ -149,11 +149,8 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
         print(f"RENDER_FORMAT=SINGLE_POST OUTPUT={output}")
         return 0
     if decision == "CAROUSEL":
-        if asset["asset_kind"] in ("REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION"):
-            raise BridgeError(
-                "PACKAGING_UNSUPPORTED_STYLE: the V2 carousel renderer takes no input images, "
-                "so file-backed evidence cannot be faithfully bound into a carousel"
-            )
+        if getattr(args, "source", None):
+            raise BridgeError("PACKAGING_INPUT_INVALID: carousel image source comes only from asset descriptor")
         if not args.spec:
             raise BridgeError("PACKAGING_INPUT_INVALID: carousel render needs --spec")
         spec_path = contained_path(Path(args.spec), root)
@@ -165,9 +162,12 @@ def render_command(args: argparse.Namespace, *, root: Path = WORKSPACE) -> int:
             raise BridgeError(
                 f"PACKAGING_DECISION_MISMATCH: spec has {count} slides, receipt allows {expected}"
             )
-        _run_renderer(
-            [sys.executable, str(CAROUSEL_RENDERER), "--spec", str(spec_path), "--output-dir", str(output)]
-        )
+        argv = [sys.executable, str(CAROUSEL_RENDERER), "--spec", str(spec_path),
+                "--output-dir", str(output)]
+        if asset["asset_kind"] != "NONE":
+            argv += ["--source", asset["local_path"], "--source-kind", asset["asset_kind"],
+                     "--source-sha256", asset["sha256"]]
+        _run_renderer(argv)
         slides = sorted(output.glob("*.png")) if output.is_dir() else []
         if len(slides) != expected:
             raise BridgeError(

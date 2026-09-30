@@ -265,6 +265,11 @@ Supported V2 slide roles:
 - limitation
 - final
 
+When the packaging receipt selects REAL_PHOTO, SOURCE_SCREENSHOT, or
+DATA_VISUALIZATION, the validated file-backed asset descriptor supplies
+the cover visual through the packaging renderer. Keep slide 1 as `cover`;
+do not put an image path in the slide spec or substitute generated art.
+
 Carousel rules:
 - 2–10 slides
 - normally 5–8 slides
@@ -872,9 +877,11 @@ This file is immutable after manifest creation.
 
    The render source image always comes from the validated asset
    descriptor (typography renders over a deterministic neutral canvas;
-   never pass --source yourself). Styles the V2 renderer cannot
-   faithfully support (generated illustration; photo evidence inside a
-   carousel) are refused deterministically — do not work around that.
+   never pass --source yourself). The only style the V2 renderer cannot
+   faithfully support (generated illustration) is refused
+   deterministically — do not work around that. Validated REAL_PHOTO /
+   SOURCE_SCREENSHOT / DATA_VISUALIZATION carousel assets render on the
+   cover through the descriptor.
 
 3. Validate dimensions locally.
 
