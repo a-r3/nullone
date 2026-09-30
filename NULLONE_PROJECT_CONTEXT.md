@@ -47,6 +47,121 @@ Status: canonical project context for repository/project continuity. Production 
   publishing. Keep GitHub desired state distinct from live production actual
   state.
 
+## Breaking Consumer + Weekly Strategy — 2026-09-30 Asia/Baku (VERIFIED)
+
+### A. Breaking Consumer delivery: FIXED + NATURALLY PROVEN
+
+- Issue #183 / PR #184 fixed scheduler delivery by changing the
+  live automation to no-delivery. Reviewed head
+  `4550546743deeeda065adbde6682069aa24e3a73`; merged main commit
+  `0c7b00795bcc8580deca01d47d98d21827bcf420`. Production backup:
+  `/home/oem/.openclaw/nullone-deploy-backups/pr184-20260930-050735`.
+- Live job `5042d119-3a40-4b43-b408-6682d4fe2bda`: natural proof
+  COMPLETE — `enabled=true`, `delivery.mode=none`, natural last run
+  `ok`, `consecutiveErrors=0`, `lastDeliveryStatus=not-requested`,
+  command `exitCode=0`.
+- The processed backlog held both successful items and intentional
+  `IDENTITY_UNRESOLVED` fail-closed items; those domain BLOCKED
+  results are not scheduler execution failures.
+- Any canonical text still calling the Breaking Consumer delivery
+  bug unresolved is superseded by this section.
+
+### C. Weekly Strategy root cause + PR #189 (MERGED, DEPLOYED)
+
+- Verified root cause: Weekly Strategy still used
+  `transport=opencode` with
+  `model=opencode/muse-spark-1.3-contributor-free`. A disposable
+  transport probe on 2026-09-30 reproduced `HTTP 403 /
+  FreeTierError / "OpenCode's free tier can only be used from
+  within OpenCode"`. The Sep-27 laptop suspend explains the delayed
+  invocation but is NOT the root cause of the provider failure.
+- Issue #188 is OPEN. PR #189, "Fix Weekly Strategy
+  Claude/Sonnet transport", reviewed exact head
+  `48ead7e56ce15d56085c4986d12b02b5eb12c49e`, exact-head CI
+  SUCCESS (run 36752507150), squash-merged as
+  `74a5c2d7189b91163e70cbf65933edc9aa497cfd`.
+- New reviewed Weekly profile: `role=weekly_strategy`,
+  `transport=claude`, `model=sonnet`, `timeout=600`,
+  `fallback=none`.
+- Security boundary: model tools only Read, WebSearch, WebFetch;
+  MCP explicitly denied; Agent/Bash/Edit/Write denied;
+  workspace-anchored read denies for `.env`, `.env.*`, `*.key`,
+  `*.pem`, `social/ops/private/**`; no publication/Zernio/
+  Telegram/Git/shell authority; Story default Claude argv/path
+  preserved; no silent OpenCode fallback; structured Claude output
+  validated; deterministic Python writes only to
+  `social/analytics/reports/YYYY-WW-weekly-strategy.md` and
+  optional `MEMORY.md`.
+- Disposable fake-secret probe: PASS — fake /tmp `.env` read
+  denied, marker absent from output, no real secret used.
+
+### D. PR #189 controlled production deployment (2026-09-30)
+
+- Backup: `/home/oem/.openclaw/nullone-deploy-backups/pr189-20260930-215607`.
+- Exactly 6 runtime files deployed from merged main:
+  `social/ops/provider-routing.json`,
+  `social/ops/scripts/nullone-weekly-strategy-run.py`,
+  `social/ops/scripts/nullone_claude.py`,
+  `social/ops/scripts/nullone_claude_weekly_provider.py`,
+  `social/ops/scripts/nullone_provider_adapter.py`,
+  `social/ops/scripts/nullone_provider_router.py`.
+- Predeploy: existing 5 files differed from merged main as
+  expected; `nullone_claude_weekly_provider.py` was absent live;
+  staged bytes matched merged main 6/6; staged Python compile PASS.
+- Postdeploy: live Python compile PASS; live hashes matched merged
+  main 6/6; `PROVIDER_ROUTER_SELF_TEST=PASS`,
+  `PROVIDER_ADAPTER_SELF_TEST=PASS`,
+  `WEEKLY_STRATEGY_RUN_SELF_TEST=PASS` — all with NO external
+  model calls.
+- No Gateway restart. No synthetic Weekly run. No Zernio call. No
+  Telegram action. No publication.
+
+### E. Live Weekly automation after deploy
+
+- Job `b62fa25e-9d83-43da-83f7-07ae6273486b`
+  (`texbrif-weekly-strategy`), enabled `true`. Schedule unchanged
+  (`0 21 * * 0 Asia/Baku`); command unchanged
+  (`python3 social/ops/scripts/nullone-weekly-strategy-run.py
+  execute`, cwd `/home/oem/.openclaw/workspace`);
+  `delivery.mode=none`.
+- The job still contains legacy env
+  `NULLONE_OPENCODE_MODEL=opencode/muse-spark-1.3-contributor-free`.
+  It is currently INERT for Weekly: the checked-in Weekly
+  transport resolves to Claude, and the router applies the legacy
+  OpenCode model only when the selected transport is OpenCode —
+  directly verified under the exact scheduler env
+  (`ROLE=weekly_strategy TRANSPORT=claude MODEL=sonnet
+  TIMEOUT=600 FALLBACK=none`). Do NOT remove the stale env during
+  stabilization merely for cleanup.
+- Existing `consecutiveErrors=2` / `lastRunStatus=error` are
+  historical pre-fix state and must NOT be read as proof the new
+  deployment failed.
+- Natural production proof remains PENDING. Next natural
+  occurrence: 2026-10-04 21:00 Asia/Baku. If the laptop is
+  suspended then, the occurrence may execute after resume; do not
+  create a synthetic run to compensate. Keep issue #188 OPEN
+  until a natural Weekly occurrence proves the new Claude/Sonnet
+  path succeeds.
+
+### F. Current status (2026-09-30)
+
+- Breaking Consumer delivery defect: FIXED + NATURALLY PROVEN.
+- Weekly Strategy OpenCode FreeTier root cause: FIXED IN CODE +
+  DEPLOYED; NATURAL PRODUCTION PROOF PENDING.
+- Carousel V2 source-image implementation: DEPLOYED; natural
+  production-content proof still pending.
+- Zernio reconciliation remains manual-only.
+- `IDENTITY_UNRESOLVED` remains intentional fail-closed.
+- Dependency-recheck fail-closed behavior remains intentional.
+- Laptop availability remains a structural risk.
+- Visual V2 remains temporary.
+- Overall M0 reliability is NOT finished.
+
+Preserved invariants: GitHub desired state != production actual
+state. Merge != deployment. No blind autonomous publishing.
+Two-stage human approval remains mandatory. The full system is not
+claimed complete.
+
 ## Current production state — 2026-09-29 Asia/Baku (VERIFIED)
 
 Runtime code baseline represented by this 2026-09-29 production snapshot:
@@ -156,12 +271,15 @@ All resolved to platform-proven PUBLISHED with `attempts=1`.
 
 ### Still unresolved / separate issues (unchanged ownership)
 
-- Breaking Consumer delivery observability bug.
+- Breaking Consumer delivery observability bug. (SUPERSEDED
+  2026-09-30: FIXED + NATURALLY PROVEN — see section above.)
 - Breaking dependency-recheck fail-closed behavior remains
   intentional.
 - `IDENTITY_UNRESOLVED` fail-closed remains intentional.
 - Notifier allowlist/time gaps.
-- Weekly Strategy old transport issue.
+- Weekly Strategy old transport issue. (SUPERSEDED 2026-09-30:
+  FIXED IN CODE + DEPLOYED, natural proof pending — see section
+  above.)
 - Zernio reconciliation is not yet scheduled automatically.
 - Laptop availability remains a structural risk.
 - Visual V2 remains temporary; Visual V3 later.
