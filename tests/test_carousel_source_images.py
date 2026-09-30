@@ -87,7 +87,18 @@ class CarouselSourceImageTests(unittest.TestCase):
                 self.assertEqual(image.size, (1080, 1350))
         with Image.open(slides[0]) as cover:
             self.assertEqual(cover.getpixel((540, 400)), color)
-            self.assertNotEqual(cover.getpixel((540, 900)), color)  # headline scrim
+            self.assertEqual(cover.getpixel((540, 760)), (24, 24, 24))
+
+    def test_headline_panel_blocks_embedded_source_text(self):
+        source = self.root / "embedded-text.png"
+        image = Image.new("RGB", (1200, 800), (240, 240, 240))
+        from PIL import ImageDraw
+        ImageDraw.Draw(image).rectangle((0, 400, 1200, 800), fill=(230, 20, 20))
+        image.save(source)
+        _, output = self.render("REAL_PHOTO", asset_path=source)
+        with Image.open(output / "01.png") as cover:
+            self.assertEqual(cover.getpixel((540, 760)), (24, 24, 24))
+            self.assertEqual(cover.getpixel((540, 1100)), (24, 24, 24))
 
     def test_real_photo_pixels_reach_cover(self):
         _, output = self.render("REAL_PHOTO", asset_path=self.image())

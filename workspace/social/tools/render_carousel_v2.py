@@ -220,7 +220,7 @@ def cover(slide, n, total, out, source_image=None, source_kind=None):
 
 def image_cover(slide, n, total, out, source_image, source_kind):
     img = Image.new("RGB", (W, H), BG)
-    box = (72, 136, 1008, 1150 if source_kind == "REAL_PHOTO" else 720)
+    box = (72, 136, 1008, 740)
     size = (box[2] - box[0], box[3] - box[1])
     # Screenshots and charts retain all original details. Photos use a
     # centered, deterministic crop to fill the hero region without stretching.
@@ -232,11 +232,10 @@ def image_cover(slide, n, total, out, source_image, source_kind):
     img.paste(hero, (box[0] + (size[0] - hero.width) // 2,
                      box[1] + (size[1] - hero.height) // 2))
 
-    # Fixed dark lower band keeps the source visible and the headline legible.
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(overlay).rectangle((72, 710, 1008, 1150), fill=(14, 14, 14, 232))
-    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     d = ImageDraw.Draw(img)
+    # Fully opaque text panel prevents baked-in source text from competing
+    # with the NullOne headline. The shorter hero also reduces photo crop.
+    d.rectangle((72, 740, 1008, 1150), fill=PANEL)
     d.rectangle((0, 0, 18, H), fill=CYAN)
     accent_label(d, slide.get("kicker", "İZAH"), y=748)
     hf, lines, lh = fit(d, slide["headline"], 850, 3, 68, 48)
