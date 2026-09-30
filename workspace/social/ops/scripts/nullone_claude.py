@@ -58,6 +58,7 @@ def run_structured(
     max_turns: int = 8,
     timeout: int = 300,
     workspace: Path | None = None,
+    weekly_security_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 
     cmd = [
@@ -74,6 +75,19 @@ def run_structured(
             ["--allowedTools", *allowed_tools]
         )
 
+    if weekly_security_settings is not None:
+        if workspace is None:
+            raise BridgeError("Weekly Claude security requires a workspace")
+        cmd.extend([
+            "--restricted",
+            "--safe-mode",
+            "--strict-mcp-config",
+            "--disallowedTools",
+            "mcp__*,Agent,Bash,Edit,Write,NotebookEdit,PowerShell,REPL",
+            "--settings",
+            json.dumps(weekly_security_settings, separators=(",", ":")),
+        ])
+
     cmd.extend(
         [
             "--permission-mode",
@@ -84,7 +98,6 @@ def run_structured(
 
             "--no-session-persistence",
             "--disable-slash-commands",
-            "--strict-mcp-config",
 
             "--max-turns",
             str(max_turns),

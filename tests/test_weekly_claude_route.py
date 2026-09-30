@@ -71,6 +71,7 @@ class WeeklyClaudeTests(unittest.TestCase):
             self.assertEqual(captured["model"], "sonnet")
             self.assertEqual(captured["timeout"], 600)
             self.assertEqual(captured["allowed_tools"], ["Read", "WebSearch", "WebFetch"])
+            self.assertEqual(captured["weekly_security_settings"], weekly.weekly_security_settings(root))
             self.assertEqual((outcome.role, outcome.transport, outcome.model),
                              ("weekly_strategy", "claude", "sonnet"))
             self.assertTrue((root / f"social/analytics/reports/{NOW.year}-40-weekly-strategy.md").exists()
@@ -89,17 +90,49 @@ class WeeklyClaudeTests(unittest.TestCase):
             with mock.patch.object(claude.subprocess, "run", side_effect=fake_run):
                 claude.run_structured(prompt="weekly only", allowed_tools=weekly.ALLOWED_TOOLS,
                                       schema=weekly.SCHEMA, model="sonnet", timeout=600,
-                                      workspace=Path(td))
+                                      workspace=Path(td),
+                                      weekly_security_settings=weekly.weekly_security_settings(Path(td)))
             cmd = seen["cmd"]
             self.assertEqual(seen["kwargs"]["cwd"], Path(td))
             self.assertEqual(seen["kwargs"]["timeout"], 600)
-            self.assertEqual(cmd[cmd.index("--allowedTools") + 1:cmd.index("--permission-mode")], weekly.ALLOWED_TOOLS)
+            self.assertEqual(cmd[cmd.index("--allowedTools") + 1:cmd.index("--restricted")], weekly.ALLOWED_TOOLS)
             self.assertEqual(cmd[cmd.index("--tools") + 1], "Read,WebSearch,WebFetch")
             self.assertIn("--no-session-persistence", cmd)
+            self.assertIn("--restricted", cmd)
+            self.assertIn("--safe-mode", cmd)
             self.assertIn("--strict-mcp-config", cmd)
+            denied_tools = cmd[cmd.index("--disallowedTools") + 1].split(",")
+            self.assertIn("mcp__*", denied_tools)
+            for denied in ("Agent", "Bash", "Edit", "Write"):
+                self.assertIn(denied, denied_tools)
+            settings = json.loads(cmd[cmd.index("--settings") + 1])
+            anchor = "//" + Path(td).resolve().as_posix().lstrip("/")
+            denied_reads = settings["permissions"]["deny"]
+            for name in (".env", ".env.*", "*.key", "*.pem"):
+                self.assertIn(f"Read({anchor}/{name})", denied_reads)
+                self.assertIn(f"Read({anchor}/**/{name})", denied_reads)
+            self.assertIn(f"Read({anchor}/social/ops/private/**)", denied_reads)
             for denied in ("Bash", "Write", "Edit", "shell", "Git", "Zernio",
                            "Telegram", "publish", "approval", "MCP"):
                 self.assertNotIn(denied, weekly.ALLOWED_TOOLS)
+
+    def test_story_default_argv_matches_pre_pr(self):
+        schema = {"type": "object"}
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen.update(cmd=cmd, kwargs=kwargs)
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"structured_output":{}}', stderr="")
+
+        with mock.patch.object(claude.subprocess, "run", side_effect=fake_run):
+            claude.run_structured(prompt="story prompt", allowed_tools=[], schema=schema)
+        self.assertEqual(seen["cmd"], [
+            "claude", "-p", "--tools", "", "--permission-mode", "dontAsk",
+            "--model", "haiku", "--no-session-persistence", "--disable-slash-commands",
+            "--max-turns", "8", "--output-format", "json", "--json-schema",
+            '{"type":"object"}', "story prompt",
+        ])
+        self.assertIsNone(seen["kwargs"]["cwd"])
 
     def test_deterministic_paths_optional_memory_and_malformed_result(self):
         with tempfile.TemporaryDirectory() as td:

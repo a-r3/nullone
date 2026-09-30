@@ -28,6 +28,17 @@ SCHEMA = {
 }
 
 
+def weekly_security_settings(workspace: Path) -> dict:
+    """Anchor Claude Read deny rules to this invocation's workspace."""
+    root = workspace.resolve(strict=True)
+    anchor = "//" + root.as_posix().lstrip("/")
+    denied = []
+    for name in (".env", ".env.*", "*.key", "*.pem"):
+        denied.extend((f"Read({anchor}/{name})", f"Read({anchor}/**/{name})"))
+    denied.append(f"Read({anchor}/social/ops/private/**)")
+    return {"permissions": {"deny": denied}}
+
+
 def _validated(result: object) -> dict:
     if not isinstance(result, dict) or set(result) != set(FIELDS):
         raise BridgeError("Malformed Weekly Claude result")
@@ -99,5 +110,6 @@ def persist_weekly(result: object, *, workspace: Path, now: datetime | None = No
 def invoke_weekly(*, prompt: str, workspace: Path, model: str, timeout: int) -> None:
     result = run_structured(prompt=prompt, allowed_tools=ALLOWED_TOOLS,
                             schema=SCHEMA, model=model, max_turns=30, timeout=timeout,
-                            workspace=workspace)
+                            workspace=workspace,
+                            weekly_security_settings=weekly_security_settings(workspace))
     persist_weekly(result, workspace=workspace)

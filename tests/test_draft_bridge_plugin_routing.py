@@ -34,7 +34,7 @@ class DraftBridgePluginSuiteTests(unittest.TestCase):
         assert node is not None
         for suite in NODE_SUITES:
             proc = subprocess.run(
-                [node, "--test", str(suite)],
+                [node, str(suite)],
                 capture_output=True,
                 text=True,
                 timeout=120,
