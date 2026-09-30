@@ -346,9 +346,15 @@ def validate_asset_descriptor(descriptor: Any, receipt: dict[str, Any], *, root:
     if expected_kind in FILE_BACKED_ASSET_KINDS:
         if not isinstance(local_path, str) or not local_path.strip():
             raise BridgeError("PACKAGING_INPUT_INVALID: file-backed asset needs local_path")
-        if Path(local_path).is_symlink():
+        asset_path = Path(local_path)
+        try:
+            relative = asset_path.absolute().relative_to(root.resolve())
+        except ValueError as e:
+            raise BridgeError("PACKAGING_INPUT_INVALID: asset path escapes workspace") from e
+        if any((root / Path(*relative.parts[:i])).is_symlink()
+               for i in range(1, len(relative.parts) + 1)):
             raise BridgeError("PACKAGING_INPUT_INVALID: asset file must not be a symlink")
-        resolved = contained_path(Path(local_path), root)
+        resolved = contained_path(asset_path, root)
         if not resolved.is_file():
             raise BridgeError("PACKAGING_INPUT_INVALID: asset file missing or not regular")
         actual = hashlib.sha256(resolved.read_bytes()).hexdigest()

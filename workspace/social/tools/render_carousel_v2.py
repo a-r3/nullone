@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
+import io
 import json
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 W, H = 1080, 1350
 
@@ -154,7 +156,32 @@ def draw_lines(d, lines, f, y, line_h, fill=WHITE, x=72):
     return y
 
 
-def cover(slide, n, total, out):
+def load_source_image(path, expected_sha256):
+    """Validate a file-backed image before creating any slide output."""
+    source = Path(path)
+    root = Path(__file__).resolve().parents[2]
+    try:
+        relative = source.absolute().relative_to(root)
+        if any((root / Path(*relative.parts[:i])).is_symlink()
+               for i in range(1, len(relative.parts) + 1)):
+            raise ValueError("source image must not be a symlink")
+        source.resolve(strict=True).relative_to(root)
+        raw = source.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ValueError("source image hash changed after asset validation")
+        with Image.open(io.BytesIO(raw)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image.load()
+            if image.width < 1 or image.height < 1:
+                raise ValueError("source image has empty dimensions")
+            return image.convert("RGB")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Invalid workspace source image: {exc}") from exc
+
+
+def cover(slide, n, total, out, source_image=None, source_kind=None):
+    if source_image is not None:
+        return image_cover(slide, n, total, out, source_image, source_kind)
     img, d = base(n, total)
 
     # Cyan accent frame / visual anchor.
@@ -188,6 +215,46 @@ def cover(slide, n, total, out):
     d.text((72, H - 185), "sürüşdür →", font=font(29, True), fill=WHITE)
 
     footer(d, slide.get("source"))
+    img.save(out, "PNG", optimize=True)
+
+
+def image_cover(slide, n, total, out, source_image, source_kind):
+    img = Image.new("RGB", (W, H), BG)
+    box = (72, 136, 1008, 1150 if source_kind == "REAL_PHOTO" else 720)
+    size = (box[2] - box[0], box[3] - box[1])
+    # Screenshots and charts retain all original details. Photos use a
+    # centered, deterministic crop to fill the hero region without stretching.
+    if source_kind == "REAL_PHOTO":
+        hero = ImageOps.fit(source_image, size, method=Image.Resampling.LANCZOS,
+                            centering=(0.5, 0.5))
+    else:
+        hero = ImageOps.contain(source_image, size, method=Image.Resampling.LANCZOS)
+    img.paste(hero, (box[0] + (size[0] - hero.width) // 2,
+                     box[1] + (size[1] - hero.height) // 2))
+
+    # Fixed dark lower band keeps the source visible and the headline legible.
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(overlay).rectangle((72, 710, 1008, 1150), fill=(14, 14, 14, 232))
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, 18, H), fill=CYAN)
+    accent_label(d, slide.get("kicker", "İZAH"), y=748)
+    hf, lines, lh = fit(d, slide["headline"], 850, 3, 68, 48)
+    if len(lines) > 3:
+        raise ValueError("Cover headline does not fit over source image")
+    y = draw_lines(d, lines, hf, 830, lh)
+    stat = slide.get("stat", "")
+    if stat:
+        sf, slines, slh = fit(d, stat, 850, 1, 35, 28)
+        if len(slines) > 1 or y + slh + 18 > 1120:
+            raise ValueError("Cover stat does not fit over source image")
+        draw_lines(d, slines, sf, y + 18, slh, CYAN)
+    d.text((72, H - 185), "sürüşdür →", font=font(29, True), fill=WHITE)
+    footer(d, slide.get("source"))
+    d.text((72, 55), "NULLONE", font=font(30, True), fill=WHITE)
+    d.text((W - 72 - d.textbbox((0, 0), "AI • TEXNOLOGİYA", font=font(20, True))[2], 63),
+           "AI • TEXNOLOGİYA", font=font(20, True), fill=GRAY)
+    d.text((W - 115, H - 86), f"{n}/{total}", font=font(21, True), fill=MUTED)
     img.save(out, "PNG", optimize=True)
 
 
@@ -405,6 +472,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--spec", required=True)
     p.add_argument("--output-dir", required=True)
+    p.add_argument("--source", default=None)
+    p.add_argument("--source-kind", choices=("REAL_PHOTO", "SOURCE_SCREENSHOT", "DATA_VISUALIZATION"))
+    p.add_argument("--source-sha256", default=None)
     args = p.parse_args()
 
     spec = json.loads(Path(args.spec).read_text())
@@ -416,6 +486,12 @@ def main():
     # Semantic gate first: an invalid spec must fail before any slide
     # is rendered, so no partial production-ready set can exist.
     validate_slide_semantics(slides)
+
+    if bool(args.source) != bool(args.source_kind) or bool(args.source) != bool(args.source_sha256):
+        raise ValueError("Source image, kind and hash must be supplied together")
+    source_image = load_source_image(args.source, args.source_sha256) if args.source else None
+    if source_image is not None and slides[0].get("type") != "cover":
+        raise ValueError("File-backed carousel needs a cover slide")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -430,7 +506,10 @@ def main():
 
         out = out_dir / f"{i:02d}.png"
 
-        RENDERERS[kind](slide, i, total, out)
+        if i == 1 and source_image is not None:
+            cover(slide, i, total, out, source_image, args.source_kind)
+        else:
+            RENDERERS[kind](slide, i, total, out)
 
         check = Image.open(out)
 

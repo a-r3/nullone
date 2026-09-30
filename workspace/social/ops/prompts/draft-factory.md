@@ -265,6 +265,11 @@ Supported V2 slide roles:
 - limitation
 - final
 
+When the packaging receipt selects REAL_PHOTO, SOURCE_SCREENSHOT, or
+DATA_VISUALIZATION, the validated file-backed asset descriptor supplies
+the cover visual through the packaging renderer. Keep slide 1 as `cover`;
+do not put an image path in the slide spec or substitute generated art.
+
 Carousel rules:
 - 2–10 slides
 - normally 5–8 slides

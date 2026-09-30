@@ -615,7 +615,7 @@ class RenderDispatcherTests(unittest.TestCase):
         self.assertIn("PACKAGING_UNSUPPORTED_STYLE", str(ctx.exception))
         self.assertEqual(calls, [])
 
-    def test_carousel_real_photo_fails_closed(self):
+    def test_carousel_real_photo_reaches_renderer_from_descriptor(self):
         calls: list = []
         request = _request(
             **{
@@ -635,7 +635,8 @@ class RenderDispatcherTests(unittest.TestCase):
             self.assertEqual(receipt["VISUAL_STYLE"], "REAL_PHOTO")
             receipt_path = self._receipt_file(root, receipt)
             photo = root / "photo.jpg"
-            photo.write_bytes(b"photo")
+            from PIL import Image
+            Image.new("RGB", (120, 80), (20, 80, 160)).save(photo)
             asset = _asset_descriptor(
                 asset_kind="REAL_PHOTO", local_path=str(photo), provenance="Official",
             )
@@ -643,16 +644,19 @@ class RenderDispatcherTests(unittest.TestCase):
             asset_path.write_text(json.dumps(asset), encoding="utf-8")
             spec = root / "spec.json"
             spec.write_text(json.dumps({"slides": [{}, {}, {}, {}, {}, {}]}), encoding="utf-8")
-            with mock.patch.object(
-                dispatcher.subprocess, "run", side_effect=lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a[0], 0, "", "")
-            ):
-                with self.assertRaises(BridgeError) as ctx:
-                    dispatcher.render_command(
-                        self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(root / "o")),
-                        root=root,
-                    )
-        self.assertIn("PACKAGING_UNSUPPORTED_STYLE", str(ctx.exception))
-        self.assertEqual(calls, [])
+            out_dir = root / "o"
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out_dir.mkdir()
+                for i in range(1, 7):
+                    (out_dir / f"{i:02d}.png").write_bytes(b"png")
+                return subprocess.CompletedProcess(cmd, 0, "SLIDES=6", "")
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(dispatcher.render_command(
+                    self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(out_dir)),
+                    root=root), 0)
+        self.assertEqual(calls[0][calls[0].index("--source") + 1], str(photo))
+        self.assertEqual(calls[0][calls[0].index("--source-kind") + 1], "REAL_PHOTO")
 
     def test_story_never_renders_in_factory(self):
         calls: list = []
@@ -1023,8 +1027,9 @@ class DataVisualizationBoundTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             receipt = self._viz_receipt(root)
-            data = root / "data.json"
-            data.write_text('{"n": 1}', encoding="utf-8")
+            data = root / "data.png"
+            from PIL import Image
+            Image.new("RGB", (120, 80), (20, 80, 160)).save(data)
             descriptor = _asset_descriptor(
                 candidate_id="viz-candidate", asset_kind="DATA_VISUALIZATION",
                 local_path=str(data), provenance="Verified dataset", sha256="0" * 64,
@@ -1571,7 +1576,7 @@ class CarouselDatavizFailClosedTests(unittest.TestCase):
         path.write_text(json.dumps(receipt), encoding="utf-8")
         return path
 
-    def test_carousel_dataviz_fails_closed_before_subprocess(self):
+    def test_carousel_dataviz_reaches_renderer_from_descriptor(self):
         calls: list = []
         request = _request(
             **{
@@ -1597,16 +1602,19 @@ class CarouselDatavizFailClosedTests(unittest.TestCase):
             asset_path.write_text(json.dumps(descriptor), encoding="utf-8")
             spec = root / "spec.json"
             spec.write_text(json.dumps({"slides": [{}, {}, {}, {}, {}, {}]}), encoding="utf-8")
-            with mock.patch.object(
-                dispatcher.subprocess, "run", side_effect=lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a[0], 0, "", "")
-            ):
-                with self.assertRaises(BridgeError) as ctx:
-                    dispatcher.render_command(
-                        self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(root / "o")),
-                        root=root,
-                    )
-        self.assertIn("PACKAGING_UNSUPPORTED_STYLE", str(ctx.exception))
-        self.assertEqual(calls, [])
+            out_dir = root / "o"
+            def fake_run(cmd, **kwargs):
+                calls.append(cmd)
+                out_dir.mkdir()
+                for i in range(1, 7):
+                    (out_dir / f"{i:02d}.png").write_bytes(b"png")
+                return subprocess.CompletedProcess(cmd, 0, "SLIDES=6", "")
+            with mock.patch.object(dispatcher.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(dispatcher.render_command(
+                    self._args(receipt_path, asset_file=str(asset_path), spec=str(spec), output=str(out_dir)),
+                    root=root), 0)
+        self.assertEqual(calls[0][calls[0].index("--source") + 1], str(data))
+        self.assertEqual(calls[0][calls[0].index("--source-kind") + 1], "DATA_VISUALIZATION")
 
     def test_typography_carousel_still_renders(self):
         calls: list = []
