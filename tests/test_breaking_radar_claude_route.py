@@ -55,29 +55,50 @@ class FakeScanModule:
     def __init__(self):
         self.commits: list = []
         self.empties: list = []
+        self.preflights: list = []
 
-    def current_scan(self, source="openclaw"):
+    def current_scan(self, source="openclaw", at=None):
         assert source == "openclaw"
         return {
             "schedule_id": "breaking-radar.scan-1130.v1",
             "scheduled_for": "2026-09-30T07:30:00Z",
             "source_occurrence_id": "breaking-radar.scan-1130.v1@2026-09-30T07:30:00Z",
             "source": source,
-            "triggered_at": "2026-09-30T07:31:00Z",
+            "triggered_at": "2026-09-30T07:31:00Z" if at is None else at,
         }
 
-    def commit_assessment(self, assessment_path, source="openclaw", workspace_root=None):
+    def prepare_assessment_commit(self, assessment, source="openclaw", at=None):
+        self.preflights.append(
+            {
+                "assessment": assessment,
+                "source": source,
+                "at": at,
+            }
+        )
+        return {
+            "external_occurrence_id": "breaking-candidate-000000000000000000000000",
+            "source_occurrence_id": "breaking-radar.scan-1130.v1@2026-09-30T07:30:00Z",
+            "scheduled_for": "2026-09-30T07:30:00Z",
+            "triggered_at": "2026-09-30T07:31:00Z" if at is None else at,
+        }
+
+    def commit_assessment(
+        self, assessment_path, source="openclaw", at=None, workspace_root=None
+    ):
         self.commits.append(
             {
                 "assessment_path": Path(assessment_path),
                 "source": source,
+                "at": at,
                 "workspace_root": Path(workspace_root),
             }
         )
         return {"committed": True}
 
-    def record_empty_scan(self, source="openclaw", workspace_root=None):
-        self.empties.append({"source": source, "workspace_root": Path(workspace_root)})
+    def record_empty_scan(self, source="openclaw", at=None, workspace_root=None):
+        self.empties.append(
+            {"source": source, "at": at, "workspace_root": Path(workspace_root)}
+        )
         return {"recorded": True}
 
 
@@ -204,10 +225,17 @@ class RadarClaudeRouteTests(unittest.TestCase):
             self.assertIn("Acme widget launch", report.read_text(encoding="utf-8"))
             staged = root / "social/ops/breaking-staging/acme-widget-launch.json"
             self.assertTrue(staged.is_file())
+            # Full-batch preflight runs before any commit, bound to the
+            # same scan occurrence/time as the report identity.
+            self.assertEqual(len(fake_scan.preflights), 1)
+            self.assertEqual(
+                fake_scan.preflights[0]["at"], "2026-09-30T07:31:00Z"
+            )
             self.assertEqual(len(fake_scan.commits), 1)
             commit = fake_scan.commits[0]
             self.assertEqual(commit["assessment_path"], staged)
             self.assertEqual(commit["source"], "openclaw")
+            self.assertEqual(commit["at"], "2026-09-30T07:31:00Z")
             self.assertEqual(commit["workspace_root"], root)
             self.assertEqual(fake_scan.empties, [])
             self.assertEqual(summary.model, "haiku")
@@ -231,6 +259,7 @@ class RadarClaudeRouteTests(unittest.TestCase):
             self.assertEqual(fake_scan.commits, [])
             self.assertEqual(len(fake_scan.empties), 1)
             self.assertEqual(fake_scan.empties[0]["workspace_root"], root)
+            self.assertEqual(fake_scan.empties[0]["at"], "2026-09-30T07:31:00Z")
 
     def test_malformed_results_fail_closed_with_no_writes(self):
         bad_results = [
@@ -267,6 +296,7 @@ class RadarClaudeRouteTests(unittest.TestCase):
                             )
                     self.assertEqual(fake_scan.commits, [])
                     self.assertEqual(fake_scan.empties, [])
+                    self.assertEqual(fake_scan.preflights, [])
                     daily = root / "social/research/daily"
                     self.assertFalse(
                         list(daily.glob("*-breaking-*.md")) if daily.is_dir() else []
@@ -292,9 +322,16 @@ class RadarClaudeRouteTests(unittest.TestCase):
         scan = load_scan_module_real()
         self.assertEqual(scan.STAGING_SUBPATH, Path("social/ops/breaking-staging"))
         for name, required in (
-            ("current_scan", ("source",)),
-            ("commit_assessment", ("assessment_path", "source", "workspace_root")),
-            ("record_empty_scan", ("source", "workspace_root")),
+            ("current_scan", ("source", "at")),
+            (
+                "prepare_assessment_commit",
+                ("assessment", "source", "at"),
+            ),
+            (
+                "commit_assessment",
+                ("assessment_path", "source", "at", "workspace_root"),
+            ),
+            ("record_empty_scan", ("source", "at", "workspace_root")),
         ):
             params = inspect.signature(getattr(scan, name)).parameters
             for key in required:
@@ -359,6 +396,228 @@ class RadarClaudeRouteTests(unittest.TestCase):
                 outcome="COMPLETED",
             )
             self.assertEqual(wrapper.execute(), 1)
+
+
+REAL_SCAN_AT = "2026-09-08T07:35:00Z"  # inside the 11:30 Asia/Baku scan slot
+REAL_SCAN_ID = "breaking-radar.scan-1130.v1@2026-09-08T07:30:00Z"
+
+
+def valid_workflow_assessment(candidate_id="acme-widget-launch", **overrides):
+    """A fully valid breaking workflow assessment (mirrors the scan self-test)."""
+    base = {
+        "schema": "nullone.breaking-workflow-input.v1",
+        "contract_version": "1.0.0",
+        "candidate_id": candidate_id,
+        "candidate_version": "v1",
+        "assessment_ref": "assessment:radar-test:1",
+        "state_snapshot_ref": "state:radar-test:1",
+        "topic": "Acme Widget launch",
+        "topic_cluster": "acme-widget",
+        "content_type": "BREAKING",
+        "evidence": [
+            {
+                "ref": "evidence:official:1",
+                "supported_claim": "Acme Widget 2 is available.",
+                "source_url": "https://example.invalid/widget-2",
+                "announcement_id": "acme-widget-2-launch",
+                "product": "Acme Widget",
+                "version": "2",
+                "region": None,
+                "availability_stage": "GENERAL_AVAILABILITY",
+                "number_value": None,
+                "number_unit": None,
+                "number_population": None,
+                "number_period": None,
+            }
+        ],
+        "follow_up_delta": None,
+        "source_attribution": "Acme official",
+        "limitations": ["Launch region only."],
+        "product_version_region": {
+            "product": "Acme Widget",
+            "version": "2",
+            "region": None,
+        },
+        "source_image": None,
+        "verification": {"state": "PASS", "evidence_refs": ["evidence:official:1"]},
+        "severity_assessment": {
+            "classification": "MATERIAL_BREAKING",
+            "reason_text": "Launch timing is material.",
+        },
+        "recent_coverage": {
+            "related_coverage_exists": False,
+            "incremental_value_present": True,
+            "assessment_ref": "coverage:radar-test:1",
+            "freshness_ref": "freshness:radar-test:1",
+        },
+        "story_safety": {
+            "quality_pass": True,
+            "quality_ref": "quality:radar-test:1",
+            "dependencies_available": True,
+            "dependencies_ref": "dependencies:radar-test:1",
+        },
+        "main_assessment": None,
+    }
+    base.update(overrides)
+    return base
+
+
+class RadarRealScanBatchTests(unittest.TestCase):
+    """Real scan-helper regression: batch preflight before authority.
+
+    No fakes: the deterministic `nullone-breaking-scan.py` module is
+    loaded for real, with only its wall clock frozen inside a due
+    scan slot. No network, no Claude invocation.
+    """
+
+    def _invoke_with_real_scan(self, result, root):
+        scan = load_scan_module_real()
+        with mock.patch.object(
+            scan, "_utc_now_canonical", return_value=REAL_SCAN_AT
+        ), mock.patch.object(
+            radar, "run_structured", return_value=result
+        ), mock.patch.object(
+            radar, "_scan_module", return_value=scan
+        ):
+            return radar.invoke_radar(
+                prompt="p", workspace=root, model="haiku", timeout=600
+            )
+
+    def _assert_no_authoritative_state(self, root):
+        scan_dir = root / "social/ops/breaking-handoffs" / REAL_SCAN_ID
+        if scan_dir.is_dir():
+            leftovers = [p for p in scan_dir.iterdir() if p.suffix == ".json"]
+            self.assertEqual(leftovers, [], leftovers)
+        else:
+            handoffs = root / "social/ops/breaking-handoffs"
+            if handoffs.is_dir():
+                stray = list(handoffs.rglob("*.json"))
+                self.assertEqual(stray, [], stray)
+
+    def _assert_no_output_writes(self, root):
+        daily = root / "social/research/daily"
+        self.assertFalse(
+            list(daily.glob("*-breaking-*.md")) if daily.is_dir() else []
+        )
+        staging = root / "social/ops/breaking-staging"
+        self.assertFalse(
+            list(staging.glob("*.json")) if staging.is_dir() else []
+        )
+
+    def test_mixed_batch_fails_closed_with_zero_partial_authority(self):
+        """Valid assessment 1 + deep-invalid assessment 2: nothing commits."""
+        result = {
+            "mode": "CANDIDATES_EMITTED",
+            "report_markdown": "# Breaking\n\n- Acme widget launch.\n",
+            "assessments": [
+                valid_workflow_assessment("acme-widget-launch"),
+                # Shallow-valid candidate_id, but no workflow envelope:
+                # the shared deep validator rejects it.
+                {"candidate_id": "acme-broken-widget", "content_type": "NEWS"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with self.assertRaises(BridgeError):
+                self._invoke_with_real_scan(result, root)
+            # Assessment 1 did NOT become authoritative ...
+            self._assert_no_authoritative_state(root)
+            # ... and the malformed batch left no output writes at all.
+            self._assert_no_output_writes(root)
+
+    def test_two_valid_assessments_both_commit_after_preflight(self):
+        result = {
+            "mode": "CANDIDATES_EMITTED",
+            "report_markdown": "# Breaking\n\n- Acme widget launch.\n",
+            "assessments": [
+                valid_workflow_assessment("acme-widget-launch"),
+                valid_workflow_assessment(
+                    "acme-widget-price", topic="Acme Widget price"
+                ),
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            summary = self._invoke_with_real_scan(result, root)
+            self.assertEqual(summary["mode"], "CANDIDATES_EMITTED")
+            self.assertEqual(
+                summary["committed"],
+                ["acme-widget-launch", "acme-widget-price"],
+            )
+            scan_dir = root / "social/ops/breaking-handoffs" / REAL_SCAN_ID
+            handoffs = sorted(
+                p
+                for p in scan_dir.iterdir()
+                if p.suffix == ".json" and p.name != "scan-receipt.json"
+            )
+            self.assertEqual(len(handoffs), 2, handoffs)
+            receipt = json.loads(
+                (scan_dir / "scan-receipt.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(receipt["status"], "CANDIDATES_EMITTED")
+            self.assertEqual(len(receipt["candidates"]), 2)
+            self.assertEqual(len(set(receipt["candidates"])), 2)
+            report = root / "social/research/daily/2026-09-08-breaking-1130.md"
+            self.assertTrue(report.is_file())
+            for candidate_id in ("acme-widget-launch", "acme-widget-price"):
+                staged = root / f"social/ops/breaking-staging/{candidate_id}.json"
+                self.assertTrue(staged.is_file())
+
+    def test_duplicate_identical_payloads_rejected_before_any_write(self):
+        payload = valid_workflow_assessment("acme-widget-launch")
+        result = {
+            "mode": "CANDIDATES_EMITTED",
+            "report_markdown": "# Breaking\n\n- Acme widget launch.\n",
+            "assessments": [payload, dict(payload)],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scan = load_scan_module_real()
+            with mock.patch.object(
+                scan, "_utc_now_canonical", return_value=REAL_SCAN_AT
+            ), mock.patch.object(
+                radar, "run_structured", return_value=result
+            ), mock.patch.object(
+                radar, "_scan_module", return_value=scan
+            ) as scan_loader:
+                with self.assertRaises(BridgeError):
+                    radar.invoke_radar(
+                        prompt="p", workspace=root, model="haiku", timeout=600
+                    )
+            # Rejected structurally: the scan helper was never consulted.
+            scan_loader.assert_not_called()
+            self._assert_no_authoritative_state(root)
+            self._assert_no_output_writes(root)
+
+    def test_duplicate_divergent_payloads_rejected_before_any_write(self):
+        result = {
+            "mode": "CANDIDATES_EMITTED",
+            "report_markdown": "# Breaking\n\n- Acme widget launch.\n",
+            "assessments": [
+                valid_workflow_assessment("acme-widget-launch"),
+                valid_workflow_assessment(
+                    "acme-widget-launch", topic="Changed topic"
+                ),
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scan = load_scan_module_real()
+            with mock.patch.object(
+                scan, "_utc_now_canonical", return_value=REAL_SCAN_AT
+            ), mock.patch.object(
+                radar, "run_structured", return_value=result
+            ), mock.patch.object(
+                radar, "_scan_module", return_value=scan
+            ) as scan_loader:
+                with self.assertRaises(BridgeError):
+                    radar.invoke_radar(
+                        prompt="p", workspace=root, model="haiku", timeout=600
+                    )
+            # Divergent duplicates must not collapse to last-write-wins.
+            scan_loader.assert_not_called()
+            self._assert_no_authoritative_state(root)
+            self._assert_no_output_writes(root)
 
 
 if __name__ == "__main__":

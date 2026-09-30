@@ -290,6 +290,72 @@ def _resolve_staged_path(workspace_root: Path, assessment_path: str | Path) -> P
     return candidate
 
 
+def prepare_assessment_commit(
+    *,
+    assessment: dict[str, Any],
+    source: str = "openclaw",
+    at: str | None = None,
+) -> dict[str, Any]:
+    """Deep-validate one assessment and prepare its handoff (no mutation).
+
+    Pure validation authority shared by single commits and batch
+    preflight: resolves the due scan slot, enforces the candidate-ID
+    shape, builds the exact `nullone.breaking-radar-handoff.v1`
+    envelope, and strict-validates the whole envelope through the same
+    edge validator `commit_assessment` uses. Performs zero filesystem
+    mutation -- no handoff write, no receipt write -- so a caller can
+    preflight an entire batch through this exact helper before the
+    first authoritative commit. Anything the validator rejects fails
+    closed here, before authority.
+
+    Returns the prepared handoff plus scan identity
+    (`external_occurrence_id`, `source_occurrence_id`,
+    `scheduled_for`, `triggered_at`). Pass the same `at` used to
+    resolve the cycle's scan so prevalidation and commits bind the
+    same occurrence.
+    """
+
+    reviewed_source = _require_m0_source(source)
+    triggered_at = at or _utc_now_canonical()
+    resolution = _resolve_due_scan(source=reviewed_source, at=triggered_at)
+    if not isinstance(assessment, dict):
+        raise BreakingScanCommitError("staged assessment must be a JSON object")
+
+    try:
+        validate_candidate_id(assessment.get("candidate_id"))
+    except BreakingScanAuthorityError as exc:
+        raise BreakingScanCommitError(str(exc)) from exc
+
+    handoff = {
+        "schema": "nullone.breaking-radar-handoff.v1",
+        "contract_version": "1.0.0",
+        "occurrence": {
+            "source_occurrence_id": resolution.source_occurrence_id,
+            "scheduled_for": resolution.scheduled_for,
+            "triggered_at": triggered_at,
+        },
+        "assessment": assessment,
+    }
+
+    try:
+        normalized = normalize_breaking_radar_handoff(
+            handoff, source=reviewed_source
+        )
+    except (BreakingRadarEdgeError, BreakingWorkflowInputError, ValueError) as exc:
+        raise BreakingScanCommitError(f"handoff validation failed: {exc}") from exc
+
+    external_id = normalized.trigger["external_occurrence_id"]
+
+    return {
+        "handoff": handoff,
+        "external_occurrence_id": external_id,
+        "candidate_id": assessment.get("candidate_id"),
+        "source_occurrence_id": resolution.source_occurrence_id,
+        "scheduled_for": resolution.scheduled_for,
+        "triggered_at": triggered_at,
+    }
+
+
 def commit_assessment(
     *,
     assessment_path: str | Path,
@@ -324,11 +390,14 @@ def commit_assessment(
     and scan identity. Identical recommit is idempotent (and repairs a
     missing receipt listing); conflicting assessment content for the
     same candidate path is rejected (COMMIT_CONFLICT).
+
+    Deep validation is delegated to `prepare_assessment_commit` -- the
+    same non-mutating helper batch callers use to preflight every
+    assessment before the first commit -- so a single commit and a
+    preflighted batch can never disagree about validity.
     """
 
     reviewed_source = _require_m0_source(source)
-    triggered_at = at or _utc_now_canonical()
-    resolution = _resolve_due_scan(source=reviewed_source, at=triggered_at)
     root = workspace_root.resolve()
     staged = _resolve_staged_path(root, assessment_path)
     try:
@@ -337,35 +406,22 @@ def commit_assessment(
         raise BreakingScanCommitError(
             f"staged assessment unreadable: {staged.name}"
         ) from exc
-    if not isinstance(assessment, dict):
-        raise BreakingScanCommitError("staged assessment must be a JSON object")
 
-    try:
-        validate_candidate_id(assessment.get("candidate_id"))
-    except BreakingScanAuthorityError as exc:
-        raise BreakingScanCommitError(str(exc)) from exc
+    # Deep validation authority is shared with batch preflight: the
+    # exact same helper rejects malformed assessments before any
+    # mutation happens below.
+    prepared = prepare_assessment_commit(
+        assessment=assessment, source=reviewed_source, at=at
+    )
+    triggered_at = prepared["triggered_at"]
+    resolution_scan_id = prepared["source_occurrence_id"]
+    scheduled_for = prepared["scheduled_for"]
 
-    handoff = {
-        "schema": "nullone.breaking-radar-handoff.v1",
-        "contract_version": "1.0.0",
-        "occurrence": {
-            "source_occurrence_id": resolution.source_occurrence_id,
-            "scheduled_for": resolution.scheduled_for,
-            "triggered_at": triggered_at,
-        },
-        "assessment": assessment,
-    }
+    handoff = prepared["handoff"]
 
-    try:
-        normalized = normalize_breaking_radar_handoff(
-            handoff, source=reviewed_source
-        )
-    except (BreakingRadarEdgeError, BreakingWorkflowInputError, ValueError) as exc:
-        raise BreakingScanCommitError(f"handoff validation failed: {exc}") from exc
+    external_id = prepared["external_occurrence_id"]
 
-    external_id = normalized.trigger["external_occurrence_id"]
-
-    with _scan_locked(root, resolution.source_occurrence_id) as scan_dir:
+    with _scan_locked(root, resolution_scan_id) as scan_dir:
         receipt_path = scan_dir / RECEIPT_FILENAME
         existing_receipt: dict[str, Any] | None = None
         if receipt_path.is_file() or receipt_path.is_symlink():
@@ -374,8 +430,8 @@ def commit_assessment(
             try:
                 existing_receipt = validate_scan_receipt(
                     json.loads(receipt_path.read_text(encoding="utf-8")),
-                    source_occurrence_id=resolution.source_occurrence_id,
-                    scheduled_for=resolution.scheduled_for,
+                    source_occurrence_id=resolution_scan_id,
+                    scheduled_for=scheduled_for,
                 )
             except (OSError, ValueError) as exc:
                 raise BreakingScanCommitError(
@@ -422,11 +478,11 @@ def commit_assessment(
                 raise BreakingScanCommitError(
                     "existing handoff occurrence missing; refusing overwrite"
                 )
-            if existing_occ.get("source_occurrence_id") != resolution.source_occurrence_id:
+            if existing_occ.get("source_occurrence_id") != resolution_scan_id:
                 raise BreakingScanCommitError(
                     "existing handoff names a different scan; refusing overwrite"
                 )
-            if existing_occ.get("scheduled_for") != resolution.scheduled_for:
+            if existing_occ.get("scheduled_for") != scheduled_for:
                 raise BreakingScanCommitError(
                     "existing handoff names a different slot; refusing overwrite"
                 )
@@ -459,8 +515,8 @@ def commit_assessment(
             known.append(external_id)
         _write_receipt(
             workspace_root=root,
-            source_occurrence_id=resolution.source_occurrence_id,
-            scheduled_for=resolution.scheduled_for,
+            source_occurrence_id=resolution_scan_id,
+            scheduled_for=scheduled_for,
             source=reviewed_source,
             status="CANDIDATES_EMITTED",
             candidates=sorted(known),
@@ -469,8 +525,8 @@ def commit_assessment(
     return {
         "handoff_path": str(target.relative_to(root)),
         "external_occurrence_id": external_id,
-        "source_occurrence_id": resolution.source_occurrence_id,
-        "scheduled_for": resolution.scheduled_for,
+        "source_occurrence_id": resolution_scan_id,
+        "scheduled_for": scheduled_for,
     }
 
 

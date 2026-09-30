@@ -48,11 +48,20 @@ Do NOT claim B where only C exists.
 ### RADAR (breaking research)
 
 - Research/web access: A (same provider boundary as Morning where used).
-  The reviewed Claude path grants only `Read,WebSearch,WebFetch`, with
-  `--tools ""` default and no session persistence (B). The model has no
-  shell or file-write grant at all: deterministic Python validates the
-  structured result and owns the report, staged assessments, and scan
-  commits (B). Malformed output fails closed.
+  The generic `run_structured` helper defaults to no tools when the
+  caller passes an empty tool set; the actual reviewed Radar
+  invocation is NOT empty -- it grants exactly
+  `Read,WebSearch,WebFetch` via `--tools Read,WebSearch,WebFetch` and
+  `--allowedTools Read WebSearch WebFetch`, with `--restricted`,
+  `--safe-mode`, `--strict-mcp-config`, `--permission-mode dontAsk`,
+  no session persistence, and workspace-anchored secret Read denies
+  (`.env`-family, keys, `social/ops/private/**`) (B). Explicitly
+  denied: `mcp__*`, `Agent`, `Bash`, `Edit`, `Write`, `NotebookEdit`,
+  `PowerShell`, `REPL` (B). The model has no shell or file-write
+  grant at all: deterministic Python validates the structured result
+  and owns the report, staged assessments, and scan commits (B).
+  Malformed output fails closed with no partial authoritative
+  handoff (full-batch deep preflight before any write, B).
 - Structured candidate/state writes only (scan receipts, handoff envelopes
   under staging/spool containment): A, with symlink-escape fail-closed and
   receipt-authority commit rules (B).
