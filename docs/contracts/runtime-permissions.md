@@ -48,6 +48,11 @@ Do NOT claim B where only C exists.
 ### RADAR (breaking research)
 
 - Research/web access: A (same provider boundary as Morning where used).
+  The reviewed Claude path grants only `Read,WebSearch,WebFetch`, with
+  `--tools ""` default and no session persistence (B). The model has no
+  shell or file-write grant at all: deterministic Python validates the
+  structured result and owns the report, staged assessments, and scan
+  commits (B). Malformed output fails closed.
 - Structured candidate/state writes only (scan receipts, handoff envelopes
   under staging/spool containment): A, with symlink-escape fail-closed and
   receipt-authority commit rules (B).

@@ -11,8 +11,11 @@ Transport, model, agent, and timeout arrive from the role router's
 ProviderProfile and execute through the provider adapter registry:
 this module imports NO vendor transport module and never chooses
 OpenCode or Claude itself. Discovery/research reasoning happens in
-the agent; handoff commits happen only through the deterministic
-`nullone-breaking-scan.py` helper in the agent's allowlist. Radar
+the model; handoff commits happen only through the deterministic
+`nullone-breaking-scan.py` boundary. On the Claude path the model
+has no shell or file-write capability: it returns one structured
+result, and deterministic Python writes the report, stages
+assessments, and commits through the scan helper. Radar
 stops at human review preview: no drafts, no Telegram, no
 publication path.
 
@@ -36,17 +39,33 @@ PROMPT_PATH = WORKSPACE / "social/ops/prompts/breaking-radar.md"
 
 RADAR_TIMEOUT_SECONDS = 600
 
-# Transport-only appendix: the working directory of `opencode run` is
-# the workspace root, so the scan helper runs workspace-relative
+# Transport appendix: the working directory of the model invocation
+# is the workspace root, so the scan helper runs workspace-relative
 # (the checked-in prompt text shows the legacy automation-root
 # form). Prompt domain behavior is unchanged.
+#
+# On transports without shell/file-write capability (Claude Radar),
+# this appendix additionally overrides the prompt's file-writing and
+# helper-invocation instructions: do NOT attempt helper commands and
+# do NOT write any files. Author the Markdown report and any staged
+# assessments ONLY as the structured result
+# (`mode` / `report_markdown` / `assessments`); the deterministic
+# wrapper writes the report, stages assessments, and commits through
+# the scan helper. Never supply filesystem paths or commands.
 TRANSPORT_APPENDIX = """
 
 Transport note: this run executes with the workspace root as its
-working directory. Invoke the scan helper as
-`python3 social/ops/scripts/nullone-breaking-scan.py ...`
-(workspace-relative), never write handoff files directly, and commit
+working directory. The scan helper path is
+`social/ops/scripts/nullone-breaking-scan.py`
+(workspace-relative); never write handoff files directly, and commit
 only through the helper.
+
+If this transport grants no shell or file-write capability, the
+helper-invocation and file-writing instructions above do not apply:
+return the Markdown report and any staged assessments ONLY as the
+structured result object, and never supply filesystem paths or
+commands. The deterministic wrapper owns all destinations and
+commits.
 """
 
 
@@ -60,7 +79,10 @@ def build_command(
 
     Delegates to the provider adapter so the reviewed argv shape is
     owned in exactly one place; `model=None` resolves through the
-    role router (never a vendor default).
+    role router (never a vendor default). Structured-invocation
+    transports (Claude Radar) have no flat argv and raise
+    ProviderRoutingError here; execution still flows through
+    `invoke_role_cycle`.
     """
 
     resolved_workspace = Path(workspace) if workspace is not None else WORKSPACE
@@ -132,13 +154,19 @@ def execute() -> int:
 
 
 def self_test() -> int:
-    argv = build_command(workspace=Path("/tmp/nullone-radar-self-test"))
     profile = provider_router.resolve_provider_profile(provider_router.ROLE_BREAKING_RADAR)
-    assert argv[0:2] == ["opencode", "run"]
-    assert argv[argv.index("--agent") + 1] == AGENT
-    assert argv[argv.index("--model") + 1] == profile.model
-    assert argv[argv.index("--dir") + 1] == "/tmp/nullone-radar-self-test"
-    assert "--auto" not in argv
+    assert profile.transport == provider_router.TRANSPORT_CLAUDE, profile
+    assert profile.model == provider_router.HAIKU_DEFAULT_MODEL, profile
+    assert profile.timeout_seconds == RADAR_TIMEOUT_SECONDS == 600, profile
+    assert profile.fallback_policy == provider_router.FALLBACK_NONE, profile
+    # Structured invocation has no flat argv: the adapter refuses to
+    # build one for Claude Radar (same contract as Weekly).
+    try:
+        build_command(workspace=Path("/tmp/nullone-radar-self-test"))
+    except provider_adapter.ProviderRoutingError:
+        pass
+    else:
+        raise AssertionError("Claude Radar must not expose a flat argv")
     assert PROMPT_PATH.name == "breaking-radar.md"
 
     print("BREAKING_RADAR_RUN_SELF_TEST=PASS")
@@ -147,7 +175,7 @@ def self_test() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="NullOne Breaking Radar OpenCode role")
+    parser = argparse.ArgumentParser(description="NullOne Breaking Radar role")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("execute")
     sub.add_parser("self-test")

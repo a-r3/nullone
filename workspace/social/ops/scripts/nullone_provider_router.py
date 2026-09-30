@@ -88,10 +88,11 @@ TRANSPORT_CLAUDE = "claude"
 KNOWN_TRANSPORTS = (TRANSPORT_OPENCODE, TRANSPORT_CLAUDE)
 
 # Claude transport exists only where a reviewed Claude implementation
-# exists: the Morning cycle, Story writer, and bounded Weekly strategy
-# cycle. Any other role x claude combination fails
+# exists: the Morning cycle, Story writer, bounded Weekly strategy
+# cycle, and bounded Radar reasoning cycle. Any other role x claude
+# combination fails
 # closed at resolve time instead of dispatching nowhere.
-CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER, ROLE_WEEKLY_STRATEGY)
+CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER, ROLE_WEEKLY_STRATEGY, ROLE_BREAKING_RADAR)
 
 FALLBACK_NONE = "none"
 
@@ -376,13 +377,13 @@ def describe_profile(profile: ProviderProfile) -> str:
 
 def self_test() -> int:
     mapping = load_routing_config()
-    # Morning, Story, and Weekly have reviewed Claude routes;
-    # Draft Factory and Breaking Radar stay on OpenCode.
+    # Morning, Story, Weekly, and Radar have reviewed Claude routes;
+    # Draft Factory stays on OpenCode.
     expected_transports = {
         ROLE_MORNING_EDITORIAL: TRANSPORT_CLAUDE,
         ROLE_DRAFT_FACTORY: TRANSPORT_OPENCODE,
         ROLE_STORY_WRITER: TRANSPORT_CLAUDE,
-        ROLE_BREAKING_RADAR: TRANSPORT_OPENCODE,
+        ROLE_BREAKING_RADAR: TRANSPORT_CLAUDE,
         ROLE_WEEKLY_STRATEGY: TRANSPORT_CLAUDE,
     }
     for role in LOGICAL_ROLES:
@@ -411,6 +412,10 @@ def self_test() -> int:
     weekly = resolve_provider_profile(ROLE_WEEKLY_STRATEGY, config=mapping, env={})
     assert weekly.model == CLAUDE_DEFAULT_MODEL, weekly
     assert weekly.timeout_seconds == 600, weekly
+    radar = resolve_provider_profile(ROLE_BREAKING_RADAR, config=mapping, env={})
+    assert radar.transport == TRANSPORT_CLAUDE, radar
+    assert radar.model == HAIKU_DEFAULT_MODEL, radar
+    assert radar.timeout_seconds == 600, radar
 
     for bad_role in ("morning", "analytics", "", "MORNING_EDITORIAL"):
         try:

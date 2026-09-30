@@ -136,10 +136,17 @@ def _invoke_claude_cycle(profile: ProviderProfile, call: AdapterCall) -> None:
         invoke_weekly(prompt=call.prompt, workspace=call.workspace,
                       model=profile.model, timeout=profile.timeout_seconds)
         return
+    if profile.role == "breaking_radar":
+        from nullone_claude_radar_provider import invoke_radar
+
+        invoke_radar(prompt=call.prompt, workspace=call.workspace,
+                     model=profile.model, timeout=profile.timeout_seconds)
+        return
     from nullone_claude_editorial_provider import default_invoke_provider
 
-    # Morning retains its reviewed Claude cycle. Weekly is dispatched
-    # above to its distinct structured, read-only cycle.
+    # Morning retains its reviewed Claude cycle. Weekly and Radar are
+    # dispatched above to their distinct structured, read-only cycles.
+    # Radar must never route through the Morning provider.
     default_invoke_provider(model=profile.model)
 
 
@@ -174,6 +181,8 @@ def build_adapter_command(
     if profile.transport == TRANSPORT_CLAUDE:
         if profile.role == "weekly_strategy":
             raise ProviderRoutingError("Weekly Claude uses structured invocation")
+        if profile.role == "breaking_radar":
+            raise ProviderRoutingError("Radar Claude uses structured invocation")
         from nullone_claude_editorial_provider import build_claude_command
 
         return build_claude_command(prompt=prompt, model=profile.model)

@@ -39,6 +39,7 @@ COMMANDS = [
     [sys.executable, "tests/test_breaking_scan_commit.py"],
     [sys.executable, "tests/test_breaking_candidate_runner.py"],
     [sys.executable, "tests/test_breaking_consume.py"],
+    [sys.executable, "tests/test_breaking_radar_claude_route.py"],
     [sys.executable, "tests/test_breaking_consumer_delivery_contract.py"],
     [sys.executable, "tests/test_breaking_production_capability_negative.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
