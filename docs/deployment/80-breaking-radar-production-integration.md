@@ -55,11 +55,14 @@ Delivery contract (issue #183): the consumer is an internal
 deterministic sweep, so the desired recipe pins `--no-deliver`
 (`delivery.mode=none`) explicitly and never relies on OpenClaw's
 default delivery. Proven live defect: without this flag the job
-inherited `mode=announce, channel=last`, and every run ended
-`completionStatus=failed` with `Refusing implicit isolated cron
-delivery` even though the sweep itself completed with exit 0 -- the
-execution was healthy, the runner fallback-delivery configuration was
-the defect. `--announce`, `--channel`, `--to`, and best-effort
+inherited `mode=announce, channel=last`. The verified latest run
+shows healthy execution (`lastRunStatus=ok`, `lastStatus=ok`,
+`consecutiveErrors=0`, command `exitCode=0`) but undelivered
+scheduler fallback (`lastDelivered=false`,
+`lastDeliveryStatus=not-delivered`, `lastDeliveryError="Refusing
+implicit isolated cron delivery..."`) -- the sweep was healthy, the
+`announce`/`last` fallback-delivery configuration was the defect.
+`--announce`, `--channel`, `--to`, and best-effort
 delivery must not appear in this recipe. The consumer's own
 #30/domain notifier behavior is separate and unchanged by this.
 
