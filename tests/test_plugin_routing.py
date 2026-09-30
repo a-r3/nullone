@@ -54,7 +54,7 @@ class PluginRoutingSuiteTests(unittest.TestCase):
         assert node is not None
         for suite in NODE_SUITES:
             proc = subprocess.run(
-                [node, str(suite)],
+                [node, "--test", str(suite)],
                 capture_output=True,
                 text=True,
                 timeout=120,
