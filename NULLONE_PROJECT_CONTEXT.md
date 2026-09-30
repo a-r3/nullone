@@ -1,7 +1,51 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-09-29 Asia/Baku
+Last updated: 2026-09-30 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
+
+## Carousel V2 source images — 2026-09-30 Asia/Baku (VERIFIED)
+
+- Issue #185, "Carousel V2 cannot render validated source images", is
+  CLOSED/completed. PR #186, "Render validated source images on Carousel V2
+  covers", merged as `174df8a74a830ebb73431b05eff00f71718d7c8a`.
+- NullOne policy already preferred official/source visuals, but Carousel V2
+  had no file-backed source-image path. Packaging therefore rejected
+  `REAL_PHOTO`, `SOURCE_SCREENSHOT`, and `DATA_VISUALIZATION` for `CAROUSEL`;
+  policy and runtime capability were inconsistent.
+- In current production, a validated `REAL_PHOTO` renders as the Carousel V2
+  cover hero with a deterministic, aspect-preserving centered crop.
+  `SOURCE_SCREENSHOT` and existing `DATA_VISUALIZATION` assets use contain
+  behavior to preserve the full visual. An opaque near-black headline/stat
+  panel prevents embedded source text or pixels from bleeding through.
+  Output remains 1080×1350.
+- The validated asset descriptor remains authoritative: free-form LLM image
+  paths are not accepted. Path containment, provenance, hash, symlink, and
+  asset-kind checks remain fail-closed. Generated illustration was not
+  introduced. Typography-only carousels remain allowed only where the
+  packaging contract permits them.
+- Selective runtime deployment used the exact merged-main bytes of
+  `social/ops/prompts/draft-factory.md`,
+  `social/ops/scripts/nullone-packaging-render.py`,
+  `social/ops/scripts/nullone_packaging_receipt.py`, and
+  `social/tools/render_carousel_v2.py`. Backup:
+  `/home/oem/.openclaw/nullone-deploy-backups/pr186-20260930-160031`.
+  All four staged/main files matched live production exactly after deploy;
+  Python compile passed. There was no Gateway restart, synthetic Draft
+  Factory run, Zernio draft, Telegram send, or publication triggered by the
+  deployment.
+- Visual review: the Fable official/branded source graphic and a Samsung
+  Global Newsroom real photograph both rendered successfully offline at
+  1080×1350. Operator review led to the opaque text-panel refinement.
+- Implementation and controlled deployment are proven; **natural
+  production-content proof remains PENDING**. No natural live draft is yet
+  claimed to have used the new source-image path. Observe the next normal
+  eligible Draft Factory run; do not trigger a synthetic production cycle.
+- Visual V2 remains temporary/operational; this is not Visual V3. Valid
+  real/official/source imagery remains the preferred default, and generated
+  imagery is not the default. Preserve `VERIFICATION: PASS` requirements,
+  two-stage human approval and publish confirmation, and no blind autonomous
+  publishing. Keep GitHub desired state distinct from live production actual
+  state.
 
 ## Current production state — 2026-09-29 Asia/Baku (VERIFIED)
 
