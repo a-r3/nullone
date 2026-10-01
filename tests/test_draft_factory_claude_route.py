@@ -646,7 +646,8 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             self.assertEqual(len(skips), 1)
 
     def _exercise_full_cycle(self, *, delivery_failure=False, exhaust_before=None,
-                             change_before_bridge=False):
+                             change_before_bridge=False, bridge_failure=False,
+                             change_after_bridge=False, complete_failure=False):
         """SELECT→PRODUCE→COMPLETE with deterministic Python mediation.
 
         The evaluator runs for real (request validation + policy +
@@ -694,6 +695,13 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
         now = [100.0]
 
         def fake_run_structured(**kwargs):
+            if len(rounds) == 1 and complete_failure:
+                raise BridgeError("Claude COMPLETE failed")
+            if len(rounds) == 1:
+                self.assertEqual(
+                    (root / draft.QUEUE_PATH).read_text(encoding="utf-8"),
+                    queue_text.replace("- **status:** READY", "- **status:** DRAFTED", 1),
+                )
             return rounds.pop(0)
 
         def fake_helper(argv, *, workspace_root, timeout, marker):
@@ -780,14 +788,27 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 assert marker in "MANIFEST_CREATED=x"
                 return "MANIFEST_CREATED=x\n"
             if name.endswith("nullone-draft-bridge.py"):
+                if bridge_failure:
+                    raise BridgeError("Draft bridge failed")
                 if exhaust_before == "deliver":
                     now[0] = 960.0
+                if change_after_bridge:
+                    queue_path = root / draft.QUEUE_PATH
+                    queue_path.write_text(
+                        queue_path.read_text(encoding="utf-8").replace(
+                            "- **status:** READY", "- **status:** DRAFTED", 1
+                        ), encoding="utf-8"
+                    )
                 assert marker in "DRAFT_BRIDGE=PASS"
                 return (
                     "DRAFT_BRIDGE=PASS\nMANIFEST=m\n"
                     "REVIEW_POST_ID=review-probe-1\nREVIEW_STATE=DRAFT_CREATED\n"
                 )
             if name.endswith("nullone_telegram_review_delivery_adapter.py"):
+                self.assertEqual(
+                    (root / draft.QUEUE_PATH).read_text(encoding="utf-8"),
+                    queue_text.replace("- **status:** READY", "- **status:** DRAFTED", 1),
+                )
                 if delivery_failure:
                     raise BridgeError("ambiguous Telegram timeout")
                 assert marker in "DELIVERY_STATUS=SENT"
@@ -806,15 +827,25 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             ), mock.patch.object(
                 draft, "_run_helper", side_effect=fake_helper
             ):
-                if exhaust_before or change_before_bridge:
+                if exhaust_before or change_before_bridge or bridge_failure or change_after_bridge or complete_failure:
                     with self.assertRaises(BridgeError):
                         draft.invoke_draft(
                             prompt="p", workspace=root, model="sonnet", timeout=900
                         )
                     scripts = [Path(a[1]).name for a in argv_seen]
-                    forbidden = ("nullone-draft-bridge.py" if exhaust_before == "bridge" or change_before_bridge
-                                 else "nullone_telegram_review_delivery_adapter.py")
-                    self.assertNotIn(forbidden, scripts)
+                    if exhaust_before == "bridge" or change_before_bridge:
+                        self.assertNotIn("nullone-draft-bridge.py", scripts)
+                    if bridge_failure or change_after_bridge or exhaust_before == "deliver":
+                        self.assertNotIn("nullone_telegram_review_delivery_adapter.py", scripts)
+                    if bridge_failure:
+                        self.assertEqual((root / draft.QUEUE_PATH).read_text(encoding="utf-8"), queue_text)
+                    if change_after_bridge:
+                        self.assertEqual(scripts.count("nullone-draft-bridge.py"), 1)
+                    if complete_failure:
+                        self.assertEqual(scripts.count("nullone_telegram_review_delivery_adapter.py"), 1)
+                    if complete_failure or exhaust_before == "deliver":
+                        self.assertEqual((root / draft.QUEUE_PATH).read_text(encoding="utf-8"),
+                                         queue_text.replace("- **status:** READY", "- **status:** DRAFTED", 1))
                     return
                 summary = draft.invoke_draft(
                     prompt="p", workspace=root, model="sonnet", timeout=900
@@ -837,6 +868,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(scripts.count("nullone_telegram_review_delivery_adapter.py"), 1)
+            self.assertEqual(scripts.count("nullone-draft-bridge.py"), 1)
             render_argv = argv_seen[1]
             self.assertIn("--receipt", render_argv)
             self.assertIn("--asset-file", render_argv)
@@ -906,6 +938,15 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
 
     def test_concurrent_status_change_blocks_bridge(self):
         self._exercise_full_cycle(change_before_bridge=True)
+
+    def test_bridge_failure_leaves_candidate_ready(self):
+        self._exercise_full_cycle(bridge_failure=True)
+
+    def test_queue_flip_failure_blocks_telegram(self):
+        self._exercise_full_cycle(change_after_bridge=True)
+
+    def test_complete_failure_keeps_candidate_drafted(self):
+        self._exercise_full_cycle(complete_failure=True)
 
     def test_no_action_writes_nothing_and_spawns_nothing(self):
         with tempfile.TemporaryDirectory() as td:

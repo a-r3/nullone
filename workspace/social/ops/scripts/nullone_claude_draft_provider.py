@@ -59,13 +59,13 @@ Weekly / Radar prompt):
                 dispatcher, builds the manifest, and runs the local
                 bridge exactly once.
     COMPLETE -> ledger record + production
-                report. Python assembles the Telegram preview
+                report. After bridge proof, Python flips the selected
+                queue status before assembling the Telegram preview
                 payload deterministically (caption text, hashed
                 render outputs, exact approval buttons), validates
                 it with the existing preview validator, runs the
                 delivery helper exactly once (failure becomes NOTIFY_FAILED),
-                constrains the queue edit to the single candidate
-                status flip, appends the ledger line, and writes
+                appends the ledger line, and writes
                 the report.
 
 DRAFT_FIRST, exactly-one-draft, no-publication, packaging receipt
@@ -828,8 +828,11 @@ def invoke_draft(
     for line in bridge_out.splitlines():
         if line.startswith("REVIEW_POST_ID="):
             review_post_id = line.split("=", 1)[1].strip()
-    if not review_post_id:
-        raise BridgeError("Draft bridge proof missing review post id")
+    if not review_post_id or "REVIEW_STATE=DRAFT_CREATED" not in bridge_out.splitlines():
+        raise BridgeError("Draft bridge proof missing created review post")
+    # The review draft now exists. A later delivery or COMPLETE failure must
+    # never leave this candidate eligible for another scheduled draft.
+    flip_ready_to_drafted(root, accepted_id, eligible[accepted_id])
 
     # ---- PAYLOAD (deterministic assembly) ----
     media_entries = _media_entries(
@@ -895,7 +898,6 @@ def invoke_draft(
         json.dumps(ledger_record, ensure_ascii=False), what="ledger record"
     )
     _scan_for_secrets(completed["report_markdown"], what="production report")
-    flip_ready_to_drafted(root, accepted_id, eligible[accepted_id])
     ledger_file = root / LEDGER_PATH
     try:
         with ledger_file.open("a", encoding="utf-8") as handle:
