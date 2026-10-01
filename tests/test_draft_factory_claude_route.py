@@ -25,6 +25,7 @@ sys.path.insert(0, str(SCRIPTS))
 from nullone_bridge_common import BridgeError  # noqa: E402
 import nullone_claude as claude  # noqa: E402
 import nullone_claude_draft_provider as draft  # noqa: E402
+import nullone_draft_candidate_queue as draft_queue  # noqa: E402
 import nullone_provider_adapter as adapter  # noqa: E402
 import nullone_provider_router as router  # noqa: E402
 
@@ -68,6 +69,25 @@ def ranked_item(candidate_id="probe-candidate-one", **overrides):
     }
     item.update(overrides)
     return item
+
+
+def queue_entry(candidate_id="post-probe-two", *, topic="Probe topic",
+                cluster="probe", content_type="NEWS", status="READY"):
+    return (
+        f"- **candidate_id:** {candidate_id}\n"
+        f"- **topic:** {topic}\n"
+        f"- **topic_cluster:** {cluster}\n"
+        f"- **content_type:** {content_type}\n"
+        f"- **status:** {status}\n"
+        "- **verification_status:** PASS\n"
+    )
+
+
+def write_queue(root, content):
+    path = root / draft_queue.QUEUE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def load_hyphenated(name, filename):
@@ -223,6 +243,7 @@ class DraftClaudeRouteTests(unittest.TestCase):
         profile = router.resolve_provider_profile("draft_factory", env={})
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            write_queue(root, queue_entry())
             captured = {}
 
             def fake_structured(**kwargs):
@@ -263,6 +284,7 @@ class DraftClaudeRouteTests(unittest.TestCase):
         self.assertNotIn("nullone_claude_editorial_provider", source)
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            write_queue(root, queue_entry())
             seen = {}
 
             def fake_structured(**kwargs):
@@ -285,21 +307,21 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
         selected = select_result([ranked_item("post-probe-two")])
         cases = {
             "missing-file": None,
-            "missing-candidate": "- [ ] other | Other | status=READY\n",
-            "not-ready": "- [ ] post-probe-two | Probe | status=DRAFTED\n",
-            "duplicate": ("- [ ] post-probe-two | Probe | status=READY\n"
-                          "- [ ] post-probe-two | Probe again | status=READY\n"),
-            "ambiguous-status": "- [ ] post-probe-two | Probe | status=READYISH\n",
-            "two-statuses": ("- [ ] post-probe-two | Probe | status=READY"
-                             " | status=DRAFTED\n"),
+            "unknown": queue_entry("other"),
+            "legacy": "- **topic:** Probe topic\n- **status:** READY\n",
+            "not-ready": queue_entry(status="DRAFTED"),
+            "story-only": queue_entry(status="READY (STORY only)"),
+            "story-threshold": queue_entry(status="READY (STORY threshold only)"),
+            "duplicate": queue_entry() + "\n" + queue_entry(),
+            "two-statuses": queue_entry() + "- **status:** DRAFTED\n",
+            "missing-topic": "- **candidate_id:** post-probe-two\n- **status:** READY\n",
+            "checklist": "- [ ] post-probe-two | Probe topic | status=READY\n",
         }
         for case, queue in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 if queue is not None:
-                    path = root / draft.QUEUE_PATH
-                    path.parent.mkdir(parents=True)
-                    path.write_text(queue, encoding="utf-8")
+                    write_queue(root, queue)
                 with mock.patch.object(draft, "run_structured", return_value=selected), \
                         mock.patch.object(draft, "_run_helper") as helper:
                     with self.assertRaises(BridgeError):
@@ -308,6 +330,105 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 self.assertEqual(helper.call_count, 0)
                 files = [p for p in root.rglob("*") if p.is_file()]
                 self.assertEqual(files, [] if queue is None else [root / draft.QUEUE_PATH])
+
+    def test_model_identity_mismatch_blocks_before_side_effects(self):
+        for field, value in (("topic", "Wrong topic"),
+                             ("topic_cluster", "wrong"),
+                             ("content_type", "EVERGREEN")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                queue = write_queue(root, queue_entry())
+                selected = select_result([ranked_item("post-probe-two", **{field: value})])
+                with mock.patch.object(draft, "run_structured", return_value=selected), \
+                        mock.patch.object(draft, "_run_helper") as helper:
+                    with self.assertRaisesRegex(BridgeError, "identity disagrees"):
+                        draft.invoke_draft(prompt="p", workspace=root,
+                                           model="sonnet", timeout=900)
+                self.assertEqual(helper.call_count, 0)
+                self.assertEqual([p for p in root.rglob("*") if p.is_file()], [queue])
+
+    def test_production_field_block_mapping_and_legacy_ineligibility(self):
+        data = (
+            "# NullOne Candidate Queue\n\n"
+            "- **topic:** Legacy Topic\n- **status:** READY\n\n"
+            "- **discovered_at:** 2026-10-01\n"
+            + queue_entry("candidate-a", topic="Topic A", cluster="cluster-a")
+            + "\n"
+            + "- **discovered_at:** 2026-10-01\n"
+            + queue_entry("candidate-b", topic="Topic B", cluster="cluster-b")
+        ).encode("utf-8")
+        snapshot = draft_queue.parse_queue(data)
+        self.assertEqual([(entry.candidate_id, entry.topic) for entry in snapshot.entries],
+                         [(None, "Legacy Topic"), ("candidate-a", "Topic A"),
+                          ("candidate-b", "Topic B")])
+        self.assertEqual(set(snapshot.eligible()), {"candidate-a", "candidate-b"})
+        self.assertEqual(snapshot.ready_entry("candidate-a").fields["topic_cluster"],
+                         "cluster-a")
+        self.assertEqual(snapshot.ready_entry("candidate-b").topic, "Topic B")
+        self.assertEqual(snapshot.entries[0].start_line, 2)
+        self.assertIsNotNone(snapshot.entries[1].status_line)
+
+    def test_exact_ready_status_and_malformed_blocks(self):
+        for status, eligible in (
+            ("READY", True), ("READY (STORY only)", False),
+            ("READY (STORY threshold only)", False), ("DRAFTED", False),
+        ):
+            with self.subTest(status=status):
+                snapshot = draft_queue.parse_queue(queue_entry(status=status).encode())
+                self.assertEqual("post-probe-two" in snapshot.eligible(), eligible)
+        for content in (
+            queue_entry() + queue_entry(),
+            queue_entry() + "- **status:** READY\n",
+            "- **candidate_id:** candidate-a\n- **status:** READY\n",
+            "- **candidate_id:** candidate-a\n- **status:** READY\n"
+            "- **topic:** Topic A\n",
+            queue_entry() + "- **topic:** Ambiguous second topic\n",
+        ):
+            with self.subTest(content=content), self.assertRaises(BridgeError):
+                draft_queue.parse_queue(content.encode())
+        self.assertEqual(draft_queue.parse_queue(
+            b"- [ ] candidate-a | Topic A | status=READY\n"
+        ).eligible(), {})
+
+    def test_exact_status_flip_preserves_other_bytes(self):
+        original = (
+            b"# Queue\r\n\r\n"
+            + queue_entry("candidate-a", topic="Topic A").replace("\n", "\r\n").encode()
+            + b"\r\n- **topic:** Legacy Topic\r\n- **status:** READY\r\n"
+            + queue_entry("candidate-b", topic="Topic B").encode()
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / draft_queue.QUEUE_PATH
+            path.parent.mkdir(parents=True)
+            path.write_bytes(original)
+            baseline = draft_queue.load_queue(root).ready_entry("candidate-a")
+            draft_queue.flip_ready_to_drafted(root, "candidate-a", baseline)
+            expected = original.replace(b"- **status:** READY\r\n",
+                                        b"- **status:** DRAFTED\r\n", 1)
+            self.assertEqual(path.read_bytes(), expected)
+            self.assertIn(b"- **topic:** Legacy Topic\r\n- **status:** READY",
+                          path.read_bytes())
+
+    def test_status_flip_rejects_changed_entry_and_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = write_queue(root, queue_entry())
+            baseline = draft_queue.load_queue(root).ready_entry("post-probe-two")
+            path.write_text(queue_entry(status="DRAFTED"), encoding="utf-8")
+            with self.assertRaises(BridgeError):
+                draft_queue.flip_ready_to_drafted(root, "post-probe-two", baseline)
+            self.assertEqual(path.read_text(encoding="utf-8"),
+                             queue_entry(status="DRAFTED"))
+            path.unlink()
+            outside = root / "outside.md"
+            outside.write_text(queue_entry(), encoding="utf-8")
+            path.symlink_to(outside)
+            with self.assertRaisesRegex(BridgeError, "symlink"):
+                draft_queue.load_queue(root)
+            with self.assertRaisesRegex(BridgeError, "symlink"):
+                draft_queue.flip_ready_to_drafted(root, "post-probe-two", baseline)
+            self.assertEqual(outside.read_text(encoding="utf-8"), queue_entry())
 
     def test_whole_cycle_timeout_bounds(self):
         with mock.patch.object(draft.time, "monotonic", return_value=100.0):
@@ -332,10 +453,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
     def test_near_deadline_evaluator_is_not_started(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            queue = root / draft.QUEUE_PATH
-            queue.parent.mkdir(parents=True)
-            queue.write_text("- [ ] post-probe-two | Probe | status=READY\n",
-                             encoding="utf-8")
+            write_queue(root, queue_entry())
             ticks = iter((100.0, 100.0, 975.0))
             with mock.patch.object(draft.time, "monotonic", side_effect=ticks), \
                     mock.patch.object(draft, "run_structured",
@@ -350,6 +468,8 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(
             draft.ALLOWED_TOOLS, ["Read", "WebSearch", "WebFetch", "Glob"]
         )
+        self.assertNotIn("queue_content", draft.COMPLETE_FIELDS)
+        self.assertNotIn("queue_content", draft.COMPLETE_SCHEMA["properties"])
         for forbidden in ("Bash", "Edit", "Write", "Agent", "mcp__*"):
             self.assertNotIn(forbidden, draft.ALLOWED_TOOLS)
 
@@ -477,11 +597,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             root = Path(td)
             (root / "social/drafts/production").mkdir(parents=True)
             (root / "social/state").mkdir(parents=True)
-            (root / "social/state/candidate-queue.md").write_text(
-                "- [ ] skip-probe-one | Skip | status=READY\n"
-                "- [ ] post-probe-two | Post | status=READY\n",
-                encoding="utf-8",
-            )
+            write_queue(root, queue_entry("skip-probe-one") + "\n" + queue_entry())
             rounds = [result]
 
             def fake_structured(**kwargs):
@@ -529,7 +645,8 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             skips = [a for a in ledger["attempts"] if a["candidate_id"] == "skip-probe-one"]
             self.assertEqual(len(skips), 1)
 
-    def _exercise_full_cycle(self, *, delivery_failure=False, exhaust_before=None):
+    def _exercise_full_cycle(self, *, delivery_failure=False, exhaust_before=None,
+                             change_before_bridge=False):
         """SELECT→PRODUCE→COMPLETE with deterministic Python mediation.
 
         The evaluator runs for real (request validation + policy +
@@ -559,8 +676,9 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
         ]
         queue_text = (
             "# Probe queue\n\n"
-            "- [ ] post-probe-two | Probe topic | status=READY | score=90\n"
-            "- [ ] other-candidate | Other | status=READY | score=10\n"
+            + queue_entry()
+            + "\n"
+            + queue_entry("other-candidate", topic="Other", cluster="other")
         )
         rounds.append(
             {
@@ -569,10 +687,6 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                     "review_post_id": "review-probe-1",
                     "state": "DRAFT_CREATED",
                 },
-                "queue_content": queue_text.replace(
-                    "post-probe-two | Probe topic | status=READY",
-                    "post-probe-two | Probe topic | status=DRAFTED",
-                ),
                 "report_markdown": "# Probe draft report\n\n- candidate post-probe-two\n",
             }
         )
@@ -656,6 +770,13 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 )
                 if exhaust_before == "bridge":
                     now[0] = 960.0
+                if change_before_bridge:
+                    queue_path = root / draft.QUEUE_PATH
+                    queue_path.write_text(
+                        queue_path.read_text(encoding="utf-8").replace(
+                            "- **status:** READY", "- **status:** DRAFTED", 1
+                        ), encoding="utf-8"
+                    )
                 assert marker in "MANIFEST_CREATED=x"
                 return "MANIFEST_CREATED=x\n"
             if name.endswith("nullone-draft-bridge.py"):
@@ -685,13 +806,13 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             ), mock.patch.object(
                 draft, "_run_helper", side_effect=fake_helper
             ):
-                if exhaust_before:
-                    with self.assertRaisesRegex(BridgeError, "budget exhausted"):
+                if exhaust_before or change_before_bridge:
+                    with self.assertRaises(BridgeError):
                         draft.invoke_draft(
                             prompt="p", workspace=root, model="sonnet", timeout=900
                         )
                     scripts = [Path(a[1]).name for a in argv_seen]
-                    forbidden = ("nullone-draft-bridge.py" if exhaust_before == "bridge"
+                    forbidden = ("nullone-draft-bridge.py" if exhaust_before == "bridge" or change_before_bridge
                                  else "nullone_telegram_review_delivery_adapter.py")
                     self.assertNotIn(forbidden, scripts)
                     return
@@ -755,8 +876,10 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             queue = (root / "social/state/candidate-queue.md").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("post-probe-two | Probe topic | status=DRAFTED", queue)
-            self.assertIn("other-candidate | Other | status=READY", queue)
+            self.assertEqual(queue, queue_text.replace(
+                "- **status:** READY", "- **status:** DRAFTED", 1
+            ))
+            self.assertIn(queue_entry("other-candidate", topic="Other", cluster="other"), queue)
             ledger_lines = (
                 (root / "social/state/topic-ledger.jsonl").read_text(
                     encoding="utf-8"
@@ -781,9 +904,13 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
     def test_delivery_not_started_without_safe_budget(self):
         self._exercise_full_cycle(exhaust_before="deliver")
 
+    def test_concurrent_status_change_blocks_bridge(self):
+        self._exercise_full_cycle(change_before_bridge=True)
+
     def test_no_action_writes_nothing_and_spawns_nothing(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            queue = write_queue(root, queue_entry())
             with mock.patch.object(
                 draft, "run_structured",
                 return_value={"decision": "NO_ACTION", "ranked": [], "notes": "n"},
@@ -795,7 +922,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 )
             self.assertEqual(summary["status"], "NO_ACTION")
             leftovers = [p for p in root.rglob("*") if p.is_file()]
-            self.assertEqual(leftovers, [])
+            self.assertEqual(leftovers, [queue])
 
     def test_malformed_rounds_fail_closed(self):
         bad_selects = [
@@ -820,7 +947,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             )
         with self.assertRaises(BridgeError):
             draft._validated_complete(
-                {"ledger_record": {}, "queue_content": " ", "report_markdown": "r"}
+                {"ledger_record": {}, "report_markdown": " "}
             )
 
 

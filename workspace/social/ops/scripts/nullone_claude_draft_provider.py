@@ -58,7 +58,7 @@ Weekly / Radar prompt):
                 writes caption/spec files, runs the render
                 dispatcher, builds the manifest, and runs the local
                 bridge exactly once.
-    COMPLETE -> ledger record + queue file content + production
+    COMPLETE -> ledger record + production
                 report. Python assembles the Telegram preview
                 payload deterministically (caption text, hashed
                 render outputs, exact approval buttons), validates
@@ -91,6 +91,9 @@ from zoneinfo import ZoneInfo
 
 from nullone_bridge_common import BridgeError
 from nullone_claude import run_structured
+from nullone_draft_candidate_queue import (
+    QUEUE_PATH, flip_ready_to_drafted, load_queue,
+)
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch", "Glob"]
 
@@ -120,7 +123,6 @@ PRIVATE_DENY_SUFFIX = "social/ops/private/**"
 # never supplies a path.
 DRAFTS_SCOPE = "social/drafts/production/*"
 PUBLISHER_SCOPE = "social/publisher/*-draft.md"
-QUEUE_PATH = "social/state/candidate-queue.md"
 LEDGER_PATH = "social/state/topic-ledger.jsonl"
 
 # Manifest-declared content vocabulary (mirrors the manifest build
@@ -222,14 +224,13 @@ PRODUCE_SCHEMA = {
     },
 }
 
-COMPLETE_FIELDS = ("ledger_record", "queue_content", "report_markdown")
+COMPLETE_FIELDS = ("ledger_record", "report_markdown")
 COMPLETE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": list(COMPLETE_FIELDS),
     "properties": {
         "ledger_record": {"type": "object"},
-        "queue_content": {"type": "string", "minLength": 1},
         "report_markdown": {"type": "string", "minLength": 1},
     },
 }
@@ -239,8 +240,9 @@ BAKU_ZONE = "Asia/Baku"
 SELECT_APPENDIX = """
 Transport note for this phase: you have read-only tools only (no
 shell, no file writes). Return ONLY the structured SELECT result:
-ranked READY candidates strongest-first (at most %(max_ranked)d),
-each with candidate_id, topic, topic_cluster, content_type, the
+ranked candidates strongest-first (at most %(max_ranked)d) ONLY from
+this deterministic eligible ID map: %(eligible)s. Each returned item
+includes candidate_id, topic, topic_cluster, content_type, the
 packaging signals object, and the asset descriptor object. Assess
 signals; never decide formats. Deterministic Python writes every
 file and runs every helper; never supply filesystem paths or
@@ -263,10 +265,10 @@ shell, no file writes). Draft Bridge reported %(bridge)s for
 candidate %(candidate_id)s (review %(review)s, Telegram %(notify)s).
 Return ONLY the structured COMPLETE result: the topic-ledger record
 object (same convention as the existing ledger lines you read),
-the full updated candidate-queue.md content (only the %(candidate_id)s
-line flips to DRAFTED), and the production report markdown (no
-secrets, no presigned URLs). Deterministic Python validates and
-writes everything; never supply filesystem paths or commands.
+and the production report markdown (no secrets, no presigned URLs).
+Deterministic Python validates and
+writes everything, including the exact queue status flip; never supply
+queue content, filesystem paths, or commands.
 """
 
 
@@ -357,10 +359,9 @@ def _validated_complete(result: object) -> dict:
         raise BridgeError("Malformed Draft Factory COMPLETE result")
     if not isinstance(result["ledger_record"], dict):
         raise BridgeError("Malformed Draft Factory COMPLETE result")
-    for key in ("queue_content", "report_markdown"):
-        value = result[key]
-        if not isinstance(value, str) or not value.strip():
-            raise BridgeError("Malformed Draft Factory COMPLETE result")
+    report = result["report_markdown"]
+    if not isinstance(report, str) or not report.strip():
+        raise BridgeError("Malformed Draft Factory COMPLETE result")
     return result
 
 
@@ -377,29 +378,6 @@ def _check_candidate_id(candidate_id: str) -> str:
         raise
     except Exception as exc:
         raise BridgeError(f"Draft candidate id rejected: {exc}") from exc
-
-
-def _ready_queue_candidates(workspace_root: Path, candidate_ids: list[str]) -> None:
-    """Require each selected id on exactly one READY queue entry before writes."""
-    try:
-        queue = (workspace_root / QUEUE_PATH).read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise BridgeError("Draft candidate queue unreadable") from exc
-    entries: dict[str, list[str]] = {candidate_id: [] for candidate_id in candidate_ids}
-    for line in queue.splitlines():
-        # The production queue and recovery fixture use checklist entries
-        # with the candidate id as the first pipe-delimited field.
-        match = re.match(r"^\s*- \[[ xX]\] ([^|]+)\|", line)
-        if match:
-            candidate_id = match.group(1).strip()
-            if candidate_id in entries:
-                entries[candidate_id].append(line)
-    for candidate_id, matches in entries.items():
-        statuses = ([field.strip() for field in matches[0].split("|")[1:]
-                     if field.strip().startswith("status=")]
-                    if len(matches) == 1 else [])
-        if len(matches) != 1 or statuses != ["status=READY"]:
-            raise BridgeError(f"Draft candidate is not uniquely READY: {candidate_id}")
 
 
 def remaining_budget(deadline: float) -> int:
@@ -486,33 +464,6 @@ def _write_new_file(path: Path, content: str, *, workspace_root: Path) -> Path:
 def _scan_for_secrets(text: str, *, what: str) -> None:
     if SECRET_VALUE_PATTERN.search(text):
         raise BridgeError(f"Draft {what} looks secret-bearing; refusing write")
-
-
-def _queue_flip(queue_text: str, new_content: str, *, candidate_id: str) -> str:
-    """Constrain the queue edit to the single candidate status flip.
-
-    The model's full-file content must equal the current queue
-    except for exactly one line: the candidate's READY line becomes
-    DRAFTED, byte-identical otherwise. Anything else BLOCKS.
-    """
-    old_lines = queue_text.splitlines()
-    new_lines = new_content.splitlines()
-    if len(old_lines) != len(new_lines):
-        raise BridgeError("Draft queue update changes line count; refusing write")
-    changed = [
-        index
-        for index, (old, new) in enumerate(zip(old_lines, new_lines))
-        if old != new
-    ]
-    if len(changed) != 1:
-        raise BridgeError("Draft queue update must touch exactly one line")
-    old_line = old_lines[changed[0]]
-    new_line = new_lines[changed[0]]
-    if candidate_id not in old_line or "status=READY" not in old_line:
-        raise BridgeError("Draft queue update must target the READY candidate line")
-    if new_line != old_line.replace("status=READY", "status=DRAFTED"):
-        raise BridgeError("Draft queue update must only flip READY to DRAFTED")
-    return new_content
 
 
 def _media_entries(
@@ -643,19 +594,34 @@ def invoke_draft(
     drafts = root / "social/drafts/production"
 
     # ---- SELECT ----
+    queue_snapshot = load_queue(root)
+    eligible = queue_snapshot.eligible()
+    eligible_prompt = [
+        {"candidate_id": candidate_id, "topic": entry.topic,
+         "topic_cluster": entry.fields["topic_cluster"],
+         "content_type": entry.fields["content_type"]}
+        for candidate_id, entry in eligible.items()
+    ]
     selected = _validated_select(
-        structured(SELECT_SCHEMA, prompt + SELECT_APPENDIX % {"max_ranked": MAX_RANKED})
+        structured(SELECT_SCHEMA, prompt + SELECT_APPENDIX % {
+            "max_ranked": MAX_RANKED,
+            "eligible": json.dumps(eligible_prompt, ensure_ascii=False),
+        })
     )
     if selected["decision"] == "NO_ACTION" or not selected["ranked"]:
         return {"status": "NO_ACTION", "candidate_id": None}
     for item in selected["ranked"]:
         _check_candidate_id(item["candidate_id"])
-        if item["content_type"] not in CONTENT_TYPES:
+        entry = eligible.get(item["candidate_id"])
+        if entry is None:
+            raise BridgeError("Draft SELECT candidate is not eligible")
+        if item["topic"] != entry.topic or item["topic_cluster"] != entry.fields["topic_cluster"] or item["content_type"] != entry.fields["content_type"]:
+            raise BridgeError("Draft SELECT identity disagrees with queue")
+        if entry.fields["content_type"] not in CONTENT_TYPES:
             raise BridgeError("Draft candidate content_type not reviewable")
     ranked_ids = [item["candidate_id"] for item in selected["ranked"]]
     if len(set(ranked_ids)) != len(ranked_ids):
         raise BridgeError("Draft ranked candidates contain duplicates")
-    _ready_queue_candidates(root, ranked_ids)
     by_id = {item["candidate_id"]: item for item in selected["ranked"]}
 
     try:
@@ -743,8 +709,6 @@ def invoke_draft(
     if manifest_format is None:
         raise BridgeError(f"Draft receipt format not producible: {format_decision!r}")
     carousel = manifest_format == "CAROUSEL"
-    item = by_id[accepted_id]
-
     # ---- PRODUCE ----
     produced = _validated_produce(
         structured(
@@ -817,11 +781,11 @@ def invoke_draft(
         "--candidate-id",
         accepted_id,
         "--topic",
-        item["topic"],
+        eligible[accepted_id].topic,
         "--topic-cluster",
-        item["topic_cluster"],
+        eligible[accepted_id].fields["topic_cluster"],
         "--content-type",
-        item["content_type"],
+        eligible[accepted_id].fields["content_type"],
         "--format",
         manifest_format,
         "--caption-file",
@@ -848,6 +812,7 @@ def invoke_draft(
         raise BridgeError("Draft manifest missing after build")
 
     # ---- BRIDGE ----
+    load_queue(root).ready_entry(accepted_id, baseline=eligible[accepted_id])
     bridge_out = _run_helper(
         [
             sys.executable,
@@ -930,30 +895,7 @@ def invoke_draft(
         json.dumps(ledger_record, ensure_ascii=False), what="ledger record"
     )
     _scan_for_secrets(completed["report_markdown"], what="production report")
-    queue_file = root / QUEUE_PATH
-    try:
-        queue_text = queue_file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise BridgeError("Draft candidate queue unreadable") from exc
-    new_queue = _queue_flip(queue_text, completed["queue_content"], candidate_id=accepted_id)
-    # Constrained overwrite only: _queue_flip above already proved the
-    # new content differs by exactly the single candidate status flip.
-    # Atomic temp+replace; never truncate-then-write.
-    import os as _os
-
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(queue_file.parent), prefix=".draft-tmp-"
-    )
-    try:
-        with _os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(new_queue)
-        _os.replace(tmp_name, queue_file)
-    except BaseException:
-        try:
-            _os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise BridgeError("Draft candidate queue unwritable")
+    flip_ready_to_drafted(root, accepted_id, eligible[accepted_id])
     ledger_file = root / LEDGER_PATH
     try:
         with ledger_file.open("a", encoding="utf-8") as handle:
@@ -986,7 +928,7 @@ def self_test() -> int:
         raise AssertionError("draft select schema fields drifted")
     if set(PRODUCE_FIELDS) != {"caption", "render_text", "slides"}:
         raise AssertionError("draft produce schema fields drifted")
-    if set(COMPLETE_FIELDS) != {"ledger_record", "queue_content", "report_markdown"}:
+    if set(COMPLETE_FIELDS) != {"ledger_record", "report_markdown"}:
         raise AssertionError("draft complete schema fields drifted")
     for bad in (None, {}, {"decision": "SELECT", "ranked": [], "notes": "n"}):
         try:
