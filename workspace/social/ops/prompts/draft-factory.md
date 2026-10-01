@@ -745,7 +745,7 @@ If Telegram delivery fails:
 - do NOT publish
 - keep the Zernio draft
 - record NOTIFY_FAILED
-- retry notification at most once
+- do not retry notification after failure or ambiguous timeout
 - do not create a duplicate draft merely because notification failed
 
 Telegram delivery failure is not publication failure.
@@ -1033,7 +1033,7 @@ If Telegram notification fails:
 - keep manifest
 - record NOTIFY_FAILED
 - do not create another Zernio draft
-- retry Telegram notification at most once
+- do not retry Telegram notification after failure or ambiguous timeout
 
 ## Absolute publication boundary
 

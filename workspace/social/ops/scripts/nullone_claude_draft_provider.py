@@ -63,7 +63,7 @@ Weekly / Radar prompt):
                 payload deterministically (caption text, hashed
                 render outputs, exact approval buttons), validates
                 it with the existing preview validator, runs the
-                delivery helper (one retry, then NOTIFY_FAILED),
+                delivery helper exactly once (failure becomes NOTIFY_FAILED),
                 constrains the queue edit to the single candidate
                 status flip, appends the ledger line, and writes
                 the report.
@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -145,8 +146,7 @@ FORMAT_TO_MANIFEST_FORMAT = {
 MAX_RANKED = 5
 MAX_TURNS_PER_ROUND = 30
 
-# Per-helper wall-clock budgets (seconds); the overall profile
-# timeout (900) bounds the whole cycle via deadline tracking.
+# Per-helper wall-clock caps (seconds), further bounded by the cycle deadline.
 HELPER_TIMEOUTS = {
     "evaluate": 120,
     "render": 300,
@@ -154,6 +154,9 @@ HELPER_TIMEOUTS = {
     "bridge": 180,
     "deliver": 120,
 }
+CYCLE_SAFETY_MARGIN_SECONDS = 30
+MIN_ROUND_SECONDS = 60
+MIN_CONSEQUENTIAL_HELPER_SECONDS = 60
 
 SECRET_VALUE_PATTERN = re.compile(
     r"(?i)(api[_-]?key|bearer|token|secret|password)\s*[:=]\s*\S+"
@@ -376,6 +379,42 @@ def _check_candidate_id(candidate_id: str) -> str:
         raise BridgeError(f"Draft candidate id rejected: {exc}") from exc
 
 
+def _ready_queue_candidates(workspace_root: Path, candidate_ids: list[str]) -> None:
+    """Require each selected id on exactly one READY queue entry before writes."""
+    try:
+        queue = (workspace_root / QUEUE_PATH).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise BridgeError("Draft candidate queue unreadable") from exc
+    entries: dict[str, list[str]] = {candidate_id: [] for candidate_id in candidate_ids}
+    for line in queue.splitlines():
+        # The production queue and recovery fixture use checklist entries
+        # with the candidate id as the first pipe-delimited field.
+        match = re.match(r"^\s*- \[[ xX]\] ([^|]+)\|", line)
+        if match:
+            candidate_id = match.group(1).strip()
+            if candidate_id in entries:
+                entries[candidate_id].append(line)
+    for candidate_id, matches in entries.items():
+        statuses = ([field.strip() for field in matches[0].split("|")[1:]
+                     if field.strip().startswith("status=")]
+                    if len(matches) == 1 else [])
+        if len(matches) != 1 or statuses != ["status=READY"]:
+            raise BridgeError(f"Draft candidate is not uniquely READY: {candidate_id}")
+
+
+def remaining_budget(deadline: float) -> int:
+    """Safe whole-cycle seconds available before the scheduler boundary."""
+    return math.floor(deadline - time.monotonic() - CYCLE_SAFETY_MARGIN_SECONDS)
+
+
+def bounded_timeout(deadline: float, *, helper_cap: int | None = None,
+                    minimum: int = 1) -> int:
+    remaining = remaining_budget(deadline)
+    if remaining < minimum:
+        raise BridgeError("Draft cycle budget exhausted")
+    return min(remaining, helper_cap) if helper_cap is not None else remaining
+
+
 def _run_helper(
     argv: list[str], *, workspace_root: Path, timeout: int, marker: str
 ) -> str:
@@ -584,11 +623,9 @@ def invoke_draft(
 
     deadline = time.monotonic() + timeout
 
-    def round_timeout() -> int:
-        remaining = int(deadline - time.monotonic())
-        if remaining < 60:
-            raise BridgeError("Draft cycle budget exhausted")
-        return remaining
+    def helper_timeout(name: str) -> int:
+        minimum = MIN_CONSEQUENTIAL_HELPER_SECONDS if name in ("bridge", "deliver") else 1
+        return bounded_timeout(deadline, helper_cap=HELPER_TIMEOUTS[name], minimum=minimum)
 
     def structured(schema: dict[str, Any], phase_prompt: str) -> dict[str, Any]:
         return run_structured(
@@ -597,7 +634,7 @@ def invoke_draft(
             schema=schema,
             model=model,
             max_turns=MAX_TURNS_PER_ROUND,
-            timeout=round_timeout(),
+            timeout=bounded_timeout(deadline, minimum=MIN_ROUND_SECONDS),
             workspace=root,
             weekly_security_settings=draft_security_settings(root),
         )
@@ -618,6 +655,7 @@ def invoke_draft(
     ranked_ids = [item["candidate_id"] for item in selected["ranked"]]
     if len(set(ranked_ids)) != len(ranked_ids):
         raise BridgeError("Draft ranked candidates contain duplicates")
+    _ready_queue_candidates(root, ranked_ids)
     by_id = {item["candidate_id"]: item for item in selected["ranked"]}
 
     try:
@@ -664,7 +702,7 @@ def invoke_draft(
                 str(request_path),
             ],
             workspace_root=root,
-            timeout=HELPER_TIMEOUTS["evaluate"],
+            timeout=helper_timeout("evaluate"),
             marker="RECEIPT_PATH=",
         )
         try:
@@ -755,7 +793,7 @@ def invoke_draft(
     render_out = _run_helper(
         render_argv,
         workspace_root=root,
-        timeout=HELPER_TIMEOUTS["render"],
+        timeout=helper_timeout("render"),
         marker="RENDER_FORMAT=",
     )
     _ = render_out
@@ -802,7 +840,7 @@ def invoke_draft(
     _run_helper(
         manifest_argv,
         workspace_root=root,
-        timeout=HELPER_TIMEOUTS["manifest"],
+        timeout=helper_timeout("manifest"),
         marker="MANIFEST_CREATED=",
     )
     manifest_path = root / "social/ops/manifests" / f"{manifest_id}.json"
@@ -818,7 +856,7 @@ def invoke_draft(
             str(manifest_path),
         ],
         workspace_root=root,
-        timeout=HELPER_TIMEOUTS["bridge"],
+        timeout=helper_timeout("bridge"),
         marker="DRAFT_BRIDGE=PASS",
     )
     review_post_id = None
@@ -850,9 +888,10 @@ def invoke_draft(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         workspace_root=root,
     )
+    delivery_timeout = helper_timeout("deliver")
     notify_state = "SENT"
     try:
-        _run_helper(
+        delivery_out = _run_helper(
             [
                 sys.executable,
                 str(SCRIPTS_DIR / "nullone_telegram_review_delivery_adapter.py"),
@@ -861,27 +900,14 @@ def invoke_draft(
                 str(payload_path),
             ],
             workspace_root=root,
-            timeout=HELPER_TIMEOUTS["deliver"],
-            marker="DELIVERY_STATUS=",
+            timeout=delivery_timeout,
+            marker="DELIVERY_STATUS=SENT",
         )
+        if "DELIVERY_STATUS=SENT" not in delivery_out.splitlines():
+            raise BridgeError("Draft delivery did not prove SENT")
     except BridgeError:
-        # Retry notification at most once; a second failure keeps
-        # the draft and manifest and records NOTIFY_FAILED.
-        try:
-            _run_helper(
-                [
-                    sys.executable,
-                    str(SCRIPTS_DIR / "nullone_telegram_review_delivery_adapter.py"),
-                    "deliver",
-                    "--payload-file",
-                    str(payload_path),
-                ],
-                workspace_root=root,
-                timeout=HELPER_TIMEOUTS["deliver"],
-                marker="DELIVERY_STATUS=",
-            )
-        except BridgeError:
-            notify_state = "NOTIFY_FAILED"
+        # An ambiguous or partial send must never be duplicated.
+        notify_state = "NOTIFY_FAILED"
 
     # ---- COMPLETE ----
     completed = _validated_complete(

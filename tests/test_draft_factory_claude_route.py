@@ -281,6 +281,71 @@ class DraftClaudeRouteTests(unittest.TestCase):
 
 
 class DraftSecurityBoundaryTests(unittest.TestCase):
+    def test_ready_queue_authority_before_side_effects(self):
+        selected = select_result([ranked_item("post-probe-two")])
+        cases = {
+            "missing-file": None,
+            "missing-candidate": "- [ ] other | Other | status=READY\n",
+            "not-ready": "- [ ] post-probe-two | Probe | status=DRAFTED\n",
+            "duplicate": ("- [ ] post-probe-two | Probe | status=READY\n"
+                          "- [ ] post-probe-two | Probe again | status=READY\n"),
+            "ambiguous-status": "- [ ] post-probe-two | Probe | status=READYISH\n",
+            "two-statuses": ("- [ ] post-probe-two | Probe | status=READY"
+                             " | status=DRAFTED\n"),
+        }
+        for case, queue in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                if queue is not None:
+                    path = root / draft.QUEUE_PATH
+                    path.parent.mkdir(parents=True)
+                    path.write_text(queue, encoding="utf-8")
+                with mock.patch.object(draft, "run_structured", return_value=selected), \
+                        mock.patch.object(draft, "_run_helper") as helper:
+                    with self.assertRaises(BridgeError):
+                        draft.invoke_draft(prompt="p", workspace=root,
+                                           model="sonnet", timeout=900)
+                self.assertEqual(helper.call_count, 0)
+                files = [p for p in root.rglob("*") if p.is_file()]
+                self.assertEqual(files, [] if queue is None else [root / draft.QUEUE_PATH])
+
+    def test_whole_cycle_timeout_bounds(self):
+        with mock.patch.object(draft.time, "monotonic", return_value=100.0):
+            deadline = 1000.0
+            self.assertEqual(draft.remaining_budget(deadline), 870)
+            self.assertEqual(draft.bounded_timeout(deadline, minimum=60), 870)
+            for name, cap in draft.HELPER_TIMEOUTS.items():
+                self.assertEqual(draft.bounded_timeout(deadline, helper_cap=cap), cap,
+                                 name)
+            self.assertLess(draft.bounded_timeout(deadline), 900)
+        with mock.patch.object(draft.time, "monotonic", return_value=960.0):
+            with self.assertRaisesRegex(BridgeError, "budget exhausted"):
+                draft.bounded_timeout(deadline, minimum=draft.MIN_ROUND_SECONDS)
+        with mock.patch.object(draft.time, "monotonic", return_value=975.0):
+            with self.assertRaisesRegex(BridgeError, "budget exhausted"):
+                draft.bounded_timeout(deadline, helper_cap=120, minimum=1)
+        with mock.patch.object(draft.time, "monotonic", return_value=850.0):
+            self.assertEqual(draft.bounded_timeout(deadline, helper_cap=120), 120)
+        with mock.patch.object(draft.time, "monotonic", return_value=900.0):
+            self.assertEqual(draft.bounded_timeout(deadline, helper_cap=120), 70)
+
+    def test_near_deadline_evaluator_is_not_started(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            queue = root / draft.QUEUE_PATH
+            queue.parent.mkdir(parents=True)
+            queue.write_text("- [ ] post-probe-two | Probe | status=READY\n",
+                             encoding="utf-8")
+            ticks = iter((100.0, 100.0, 975.0))
+            with mock.patch.object(draft.time, "monotonic", side_effect=ticks), \
+                    mock.patch.object(draft, "run_structured",
+                                      return_value=select_result([ranked_item("post-probe-two")])), \
+                    mock.patch.object(draft, "_run_helper") as helper:
+                with self.assertRaisesRegex(BridgeError, "budget exhausted"):
+                    draft.invoke_draft(prompt="p", workspace=root,
+                                       model="sonnet", timeout=900)
+            self.assertEqual(helper.call_count, 0)
+
     def test_model_tools_are_read_only_exact(self):
         self.assertEqual(
             draft.ALLOWED_TOOLS, ["Read", "WebSearch", "WebFetch", "Glob"]
@@ -411,6 +476,12 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "social/drafts/production").mkdir(parents=True)
+            (root / "social/state").mkdir(parents=True)
+            (root / "social/state/candidate-queue.md").write_text(
+                "- [ ] skip-probe-one | Skip | status=READY\n"
+                "- [ ] post-probe-two | Post | status=READY\n",
+                encoding="utf-8",
+            )
             rounds = [result]
 
             def fake_structured(**kwargs):
@@ -458,7 +529,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             skips = [a for a in ledger["attempts"] if a["candidate_id"] == "skip-probe-one"]
             self.assertEqual(len(skips), 1)
 
-    def test_full_cycle_mediation_through_complete(self):
+    def _exercise_full_cycle(self, *, delivery_failure=False, exhaust_before=None):
         """SELECT→PRODUCE→COMPLETE with deterministic Python mediation.
 
         The evaluator runs for real (request validation + policy +
@@ -506,6 +577,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             }
         )
         argv_seen: list = []
+        now = [100.0]
 
         def fake_run_structured(**kwargs):
             return rounds.pop(0)
@@ -514,6 +586,17 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             recorded = list(argv)
             argv_seen.append(recorded)
             name = argv[1]
+            helper_names = {
+                "nullone-packaging-evaluator.py": "evaluate",
+                "nullone-packaging-render.py": "render",
+                "nullone-manifest.py": "manifest",
+                "nullone-draft-bridge.py": "bridge",
+                "nullone_telegram_review_delivery_adapter.py": "deliver",
+            }
+            helper_name = helper_names[Path(name).name]
+            self.assertLessEqual(timeout, draft.HELPER_TIMEOUTS[helper_name])
+            self.assertLessEqual(timeout, 900 - draft.CYCLE_SAFETY_MARGIN_SECONDS)
+            self.assertEqual(timeout, draft.HELPER_TIMEOUTS[helper_name])
             if name.endswith("nullone-packaging-evaluator.py"):
                 cid = argv[argv.index("--candidate-id") + 1]
                 request = evaluator_cli.load_validated_request(
@@ -571,15 +654,21 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 atomic_write_json(
                     manifest_path, {"manifest_id": manifest_id, "emulated": True}
                 )
+                if exhaust_before == "bridge":
+                    now[0] = 960.0
                 assert marker in "MANIFEST_CREATED=x"
                 return "MANIFEST_CREATED=x\n"
             if name.endswith("nullone-draft-bridge.py"):
+                if exhaust_before == "deliver":
+                    now[0] = 960.0
                 assert marker in "DRAFT_BRIDGE=PASS"
                 return (
                     "DRAFT_BRIDGE=PASS\nMANIFEST=m\n"
                     "REVIEW_POST_ID=review-probe-1\nREVIEW_STATE=DRAFT_CREATED\n"
                 )
             if name.endswith("nullone_telegram_review_delivery_adapter.py"):
+                if delivery_failure:
+                    raise BridgeError("ambiguous Telegram timeout")
                 assert marker in "DELIVERY_STATUS=SENT"
                 return "DELIVERY_STATUS=SENT\n"
             raise AssertionError(f"unexpected helper: {name}")
@@ -591,17 +680,29 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             (root / "social/state/candidate-queue.md").write_text(
                 queue_text, encoding="utf-8"
             )
-            with mock.patch.object(
+            with mock.patch.object(draft.time, "monotonic", side_effect=lambda: now[0]), mock.patch.object(
                 draft, "run_structured", side_effect=fake_run_structured
             ), mock.patch.object(
                 draft, "_run_helper", side_effect=fake_helper
             ):
+                if exhaust_before:
+                    with self.assertRaisesRegex(BridgeError, "budget exhausted"):
+                        draft.invoke_draft(
+                            prompt="p", workspace=root, model="sonnet", timeout=900
+                        )
+                    scripts = [Path(a[1]).name for a in argv_seen]
+                    forbidden = ("nullone-draft-bridge.py" if exhaust_before == "bridge"
+                                 else "nullone_telegram_review_delivery_adapter.py")
+                    self.assertNotIn(forbidden, scripts)
+                    return
                 summary = draft.invoke_draft(
                     prompt="p", workspace=root, model="sonnet", timeout=900
                 )
             self.assertEqual(summary["status"], "DRAFT_CREATED")
             self.assertEqual(summary["candidate_id"], "post-probe-two")
             self.assertEqual(summary["review_post_id"], "review-probe-1")
+            self.assertEqual(summary["notify_state"],
+                             "NOTIFY_FAILED" if delivery_failure else "SENT")
             # All five reviewed helpers ran with exact script argv.
             scripts = [Path(a[1]).name for a in argv_seen]
             self.assertEqual(
@@ -614,6 +715,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                     "nullone_telegram_review_delivery_adapter.py",
                 ],
             )
+            self.assertEqual(scripts.count("nullone_telegram_review_delivery_adapter.py"), 1)
             render_argv = argv_seen[1]
             self.assertIn("--receipt", render_argv)
             self.assertIn("--asset-file", render_argv)
@@ -666,6 +768,18 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             )
             report = root / f"social/publisher/{today}-post-probe-two-draft.md"
             self.assertTrue(report.is_file())
+
+    def test_full_cycle_mediation_through_complete(self):
+        self._exercise_full_cycle()
+
+    def test_telegram_failure_invokes_delivery_once_and_persists(self):
+        self._exercise_full_cycle(delivery_failure=True)
+
+    def test_bridge_not_started_without_safe_budget(self):
+        self._exercise_full_cycle(exhaust_before="bridge")
+
+    def test_delivery_not_started_without_safe_budget(self):
+        self._exercise_full_cycle(exhaust_before="deliver")
 
     def test_no_action_writes_nothing_and_spawns_nothing(self):
         with tempfile.TemporaryDirectory() as td:
