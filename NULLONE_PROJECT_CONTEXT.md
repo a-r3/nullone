@@ -3,41 +3,68 @@
 Last updated: 2026-10-01 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
-## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (REPO DESIRED STATE ONLY; NOT DEPLOYED)
+## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
 
 - Issue #194, "Migrate Draft Factory from OpenCode to Claude/Sonnet",
-  remains OPEN. Desired repo state is prepared/reviewed on branch
-  `feature/draft-factory-claude`; PRODUCTION DEPLOYMENT NOT
-  PERFORMED; no synthetic Draft Factory production run performed;
-  no natural proof claimed.
-- DESIRED (this repo state, not production): `role=draft_factory`,
-  `transport=claude`, `model=sonnet`, `timeout=900`,
-  `fallback=none`, via the dedicated `nullone_claude_draft_provider.py`
-  dispatched before any Morning-provider fallthrough. The wrapper
-  stays provider-neutral; domain behavior (DRAFT_FIRST, one draft
-  max, no publication, deterministic packaging authority, bridge
-  backstop) is unchanged.
-- Security posture change (reviewed, probed): the model holds NO
-  shell/write authority (Read/WebSearch/WebFetch/Glob only). Grep was
-  dropped fail-closed because its deny rules proved unenforceable;
-  deterministic Python performs every write and the five exact
-  reviewed helper invocations. The OpenCode exact-command Bash
-  allowlist and path-scoped Write/Edit rules are NOT reproducible
-  as Claude Code 2.1.284 CLI permissions (probed: patterned Bash
-  allows do not restrict unmatched commands; broad Bash deny kills
-  the tool; path-scoped Edit/Write grants are not honored) -- the
-  gap is closed architecturally by full mediation, documented in
-  `docs/contracts/runtime-permissions.md`.
-- ACTUAL PRODUCTION STATE (unchanged by this work): live Draft
-  Factory automation still runs the OpenCode transport. Do not read
-  this section as deployment.
-- Remaining acceptance after review: controlled deploy + natural
-  scheduled proof. Keep #194 OPEN until both exist.
-- Separate existing queue-format defect (read-only production audit):
-  Morning persistence writes `candidate_id` then `topic`, while Breaking
-  queue parsing anchors blocks at `topic`. The audit proved shifted
-  `candidate_id` associations. PR #195 does not change Breaking code;
-  this requires a separate reliability follow-up.
+  remains OPEN pending natural scheduled production proof.
+- PR #195, "Migrate Draft Factory from OpenCode to Claude/Sonnet",
+  was squash-merged to `main` as
+  `ffde5665008196fe4eb18821ef320966fce83c69`.
+- Controlled production deployment completed on
+  2026-10-01 22:06 Asia/Baku.
+- Production backup:
+  `/home/oem/.openclaw/nullone-deploy-backups/pr195-20261001-220642`.
+- Exactly 7 runtime files were deployed from the reviewed merged-main bytes:
+  `social/ops/prompts/draft-factory.md`,
+  `social/ops/provider-routing.json`,
+  `social/ops/scripts/nullone-draft-factory-run.py`,
+  `social/ops/scripts/nullone_claude_draft_provider.py`,
+  `social/ops/scripts/nullone_draft_candidate_queue.py`,
+  `social/ops/scripts/nullone_provider_adapter.py`,
+  `social/ops/scripts/nullone_provider_router.py`.
+- Predeploy drift guard PASS.
+- Exact-byte postdeploy comparison PASS 7/7.
+- JSON parse and Python compile PASS.
+- Live offline validation PASS:
+  `PROVIDER_ROUTER_SELF_TEST=PASS`,
+  `PROVIDER_ADAPTER_SELF_TEST=PASS`,
+  `DRAFT_FACTORY_RUN_SELF_TEST=PASS`,
+  `DRAFT_CLAUDE_PROVIDER_SELF_TEST=PASS`.
+  Those tests reported `NO_EXTERNAL_CALLS=PASS`.
+- Live production routing now resolves:
+  `role=draft_factory`,
+  `transport=claude`,
+  `model=sonnet`,
+  `timeout=900`,
+  `fallback=none`.
+- The live automation still carries the legacy
+  `NULLONE_OPENCODE_MODEL=opencode/muse-spark-1.3-contributor-free`
+  environment value, but direct live routing proof with that value present
+  still resolved Draft Factory to Claude/Sonnet. The legacy env is inert
+  for the reviewed route and was not removed during stabilization.
+- Live Draft Factory automation remains enabled and unchanged:
+  job `acd7e801-7645-4fed-a88a-13c3f5783c98`
+  (`texbrif-draft-factory`), schedule
+  `45 9,15,20 * * *`, timezone `Asia/Baku`, timeout 900.
+- No automation configuration change, Gateway restart, synthetic Draft
+  Factory production run, stash operation, or publication was triggered
+  by the controlled deployment.
+- The 2026-10-01 20:45 Asia/Baku Draft Factory run occurred before this
+  deployment and therefore correctly shows the historical OpenCode/Muse
+  route. It is not Claude/Sonnet acceptance evidence.
+- First normal post-deploy natural-proof opportunity is
+  2026-10-02 09:45 Asia/Baku. Do not force-run a synthetic Draft Factory
+  cycle. Keep #194 OPEN until that natural run and its resulting artifacts /
+  side effects are inspected.
+- Security posture: the model has no shell/write authority and receives
+  only Read/WebSearch/WebFetch/Glob. Grep is intentionally dropped
+  fail-closed; deterministic Python owns writes and the five reviewed
+  helper invocations.
+- Separate existing queue-format defect remains tracked outside this
+  migration: Morning persistence writes `candidate_id` then `topic`, while
+  Breaking queue parsing anchors blocks at `topic`; production read-only
+  audit proved shifted `candidate_id` associations. PR #195 did not modify
+  Breaking code.
 
 ## Breaking Radar assessment contract — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF VERIFIED)
 
