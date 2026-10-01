@@ -3,10 +3,72 @@
 Last updated: 2026-10-01 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
-## Breaking Radar Claude/Haiku migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
+## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (REPO DESIRED STATE ONLY; NOT DEPLOYED)
+
+- Issue #194, "Migrate Draft Factory from OpenCode to Claude/Sonnet",
+  remains OPEN. Desired repo state is prepared/reviewed on branch
+  `feature/draft-factory-claude`; PRODUCTION DEPLOYMENT NOT
+  PERFORMED; no synthetic Draft Factory production run performed;
+  no natural proof claimed.
+- DESIRED (this repo state, not production): `role=draft_factory`,
+  `transport=claude`, `model=sonnet`, `timeout=900`,
+  `fallback=none`, via the dedicated `nullone_claude_draft_provider.py`
+  dispatched before any Morning-provider fallthrough. The wrapper
+  stays provider-neutral; domain behavior (DRAFT_FIRST, one draft
+  max, no publication, deterministic packaging authority, bridge
+  backstop) is unchanged.
+- Security posture change (reviewed, probed): the model holds NO
+  shell/write authority (Read/WebSearch/WebFetch/Glob only). Grep was
+  dropped fail-closed because its deny rules proved unenforceable;
+  deterministic Python performs every write and the five exact
+  reviewed helper invocations. The OpenCode exact-command Bash
+  allowlist and path-scoped Write/Edit rules are NOT reproducible
+  as Claude Code 2.1.284 CLI permissions (probed: patterned Bash
+  allows do not restrict unmatched commands; broad Bash deny kills
+  the tool; path-scoped Edit/Write grants are not honored) -- the
+  gap is closed architecturally by full mediation, documented in
+  `docs/contracts/runtime-permissions.md`.
+- ACTUAL PRODUCTION STATE (unchanged by this work): live Draft
+  Factory automation still runs the OpenCode transport. Do not read
+  this section as deployment.
+- Remaining acceptance after review: controlled deploy + natural
+  scheduled proof. Keep #194 OPEN until both exist.
+- Separate existing queue-format defect (read-only production audit):
+  Morning persistence writes `candidate_id` then `topic`, while Breaking
+  queue parsing anchors blocks at `topic`. The audit proved shifted
+  `candidate_id` associations. PR #195 does not change Breaking code;
+  this requires a separate reliability follow-up.
+
+## Breaking Radar assessment contract — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF VERIFIED)
+
+- PR #193, "Fix Breaking Radar assessment contract binding", merged
+  as `d9d1e50773e3fc7277b28ff1706a547b60f602b3`; controlled
+  production deployment completed with backup
+  `/home/oem/.openclaw/nullone-deploy-backups/pr193-20261001-173547`.
+- The first post-deploy natural scheduled run started at
+  `2026-10-01T20:30:00.037+04:00` and finished at
+  `2026-10-01T20:32:55.949+04:00`: `status=ok`,
+  `completionStatus=succeeded`, `exit=0`, `ROLE_OUTCOME=COMPLETED`.
+  Its route was `role=breaking_radar`, `transport=claude`,
+  `model=haiku`, `timeout=600`, `fallback=none`.
+- Authoritative production scan
+  `breaking-radar.scan-2030.v1@2026-10-01T16:30:00Z` produced a
+  `nullone.breaking-radar-scan-receipt.v1` receipt with
+  `status=CANDIDATES_EMITTED`: four committed handoffs, all four
+  assessment payloads using `nullone.breaking-workflow-input.v1`,
+  all four `verification=PASS`, and all four carrying evidence/source
+  URLs.
+- The Radar report says "4 web searches + 4 primary source fetches".
+  That is model-authored report text, not independent WebSearch/WebFetch
+  transport call-count proof. Issue #196 remains OPEN to add safe
+  transport-level telemetry. The report also displayed an incorrect
+  human-readable 08:00 header; deterministic scan authority recorded
+  the correct 20:30 Baku slot. #196 tracks that report/audit improvement.
+
+## Breaking Radar Claude/Haiku migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF VERIFIED)
 
 - Issue #190, "Migrate Breaking Radar from OpenCode to Claude/Haiku",
-  remains OPEN pending natural production proof.
+  is CLOSED / COMPLETED after natural production acceptance proof.
 - PR #191 was exact-head reviewed at
   `591b1eef36d14a834dca254b7dd1cc8f6b6e44fc`; NullOne CI run
   `36776742839` completed SUCCESS. Human `REVIEW_RECEIPT` approved
@@ -73,12 +135,9 @@ Status: canonical project context for repository/project continuity. Production 
   `transport=opencode / Muse Spark` are historical pre-deployment runs,
   including the 2026-09-30 23:30 Asia/Baku occurrence. They are not
   evidence that the new deployment is using OpenCode.
-- Natural production proof is PENDING. The first normal scheduled
-  occurrence after deployment is 2026-10-01 11:30 Asia/Baku.
-  Do not force-run or create a synthetic production Radar cycle.
-- Natural proof requires the scheduled run to truthfully show the
-  Claude/Haiku route and successful role/scheduler completion. Keep
-  issue #190 OPEN until that proof exists.
+- The first post-deploy natural scheduled run and its authoritative
+  production artifacts are recorded in the assessment contract section
+  above. No synthetic production Radar cycle was needed.
 
 ## Carousel V2 source images — 2026-09-30 Asia/Baku (VERIFIED)
 

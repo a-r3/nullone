@@ -43,9 +43,9 @@ Deprecated compatibility (tested, removal needs review):
 `NULLONE_EDITORIAL_PROVIDER` (morning transport),
 `NULLONE_STORY_PROVIDER` (story transport),
 `NULLONE_OPENCODE_MODEL` (model for opencode-transport roles only).
-The checked-in mapping selects Claude/Sonnet for Morning and Weekly,
-Claude/Haiku for Story and Breaking Radar, and OpenCode/Muse Spark
-for Draft Factory only. Production activation remains a separate
+The checked-in mapping selects Claude/Sonnet for Morning, Draft
+Factory, and Weekly, Claude/Haiku for Story and Breaking Radar, and
+OpenCode for no role. Production activation remains a separate
 controlled deployment.
 
 Timeouts and capabilities are pinned in router code (equal to the
@@ -77,7 +77,8 @@ router/adapter boundary.
   explicit agent/model, `--format json`, exact `--dir`, no `--auto`/
   continuation, reviewed agents, timeouts, and fixed-string failures
   preserved.
-- Claude transport has reviewed Morning (`claude -p`), Story
+- Claude transport has reviewed Morning (`claude -p`), Draft
+  Factory (fully mediated structured rounds), Story
   (`HaikuStoryWriter`), Weekly structured-result, and Radar
   structured-result paths, model from
   the profile with truthful transport defaults when unpinned
@@ -87,8 +88,13 @@ router/adapter boundary.
   WebSearch, and WebFetch, and persists a validated result to the
   deterministic ISO-week report path and optional `MEMORY.md` update.
   It grants no model filesystem writes, shell, MCP, or publication tools.
-  Claude supports `morning_editorial`, `story_writer`, and
-  `weekly_strategy` only; other role x claude routes fail closed.
+  Draft Factory executes the actual Draft Factory prompt in three
+  read-only structured rounds (SELECT/PRODUCE/COMPLETE); the model
+  holds no shell/file authority at all, and deterministic Python
+  performs every write and the five exact reviewed helper
+  invocations (packaging evaluate/render, manifest build, bridge
+  execute, review delivery). Claude supports all five roles; no
+  role x claude route fails as unsupported.
 
 ## Observability
 

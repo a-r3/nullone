@@ -97,12 +97,53 @@ Do NOT claim B where only C exists.
 
 ### DRAFT FACTORY (review-draft creation)
 
-- Read verified candidate: A.
+- Read verified candidate: A. The reviewed Claude path
+  (`nullone_claude_draft_provider.py`, model `sonnet`, timeout 900,
+  fallback none) grants the model ONLY read-only discovery tools --
+  `Read,WebSearch,WebFetch,Glob` via `--tools`/`--allowedTools` --
+  with `--restricted`, `--safe-mode`, `--strict-mcp-config`,
+  `--permission-mode dontAsk`, no session persistence, no slash
+  commands, and workspace-anchored secret `Read` denies (`.env`,
+  `.env.*`, `**/.env`, `**/.env.*`, `*.key`, `**/*.key`, `*.pem`,
+  `**/*.pem`, `social/ops/private/**`) (B). Grep is content-bearing
+  but dropped from the toolset: its deny rules proved unenforceable
+  (B by exclusion, probed). Glob lists filenames only; secret values
+  stay protected by the proven Read denies (B + C rationale).
+  Explicitly denied: `mcp__*`, `Agent`, `Bash`, `Edit`, `Write`,
+  `NotebookEdit`, `PowerShell`, `REPL` (B).
 - Render/create review draft (exactly one Zernio draft, DRAFT_FIRST): A.
-- NO live publish capability: D. Prompt declares `It MUST NOT publish or
-  schedule` and `DRAFT_FIRST remains mandatory` (C). Transport migration
-  (MCP vs deterministic REST DraftProvider, #81) is owned by the #37
-  deployment decision, not by this instruction file.
+  The model performs read-only reasoning in three bounded
+  structured rounds (SELECT/PRODUCE/COMPLETE) and NEVER executes a
+  command or writes a file itself. Deterministic Python owns every
+  mutation: request/asset/caption/spec/payload writes go to
+  Python-derived destinations only (`social/drafts/production/*`,
+  `social/publisher/*-draft.md`, queue/ledger), and the ONLY
+  subprocesses ever spawned are the five exact reviewed helper
+  argv -- packaging `evaluate`, packaging `render`, manifest
+  `build`, bridge `execute`, review-delivery `deliver` -- built
+  from constants and validated round outputs (B). Packaging
+  decision receipts and render records stay helper-authoritative
+  and are never model-writable; the queue edit is constrained to
+  the single candidate READY-to-DRAFTED flip; the preview payload
+  is assembled deterministically and validated by the existing
+  preview validator before delivery (B).
+- Documented enforcement gap (C, proven by disposable probe on
+  Claude Code 2.1.284, fake workspace, no production): patterned
+  Bash allows do not restrict unmatched commands under
+  `dontAsk`, a broad `Bash(*)` deny removes Bash entirely (deny
+  wins), path-scoped Edit/Write grants are not honored, and
+  `Grep(...)`/`Glob(...)` deny rules are not honored either -- so
+  the OpenCode exact-command/path boundaries and Grep content
+  scoping are NOT reproducible as CLI permissions. The gap is
+  closed architecturally instead: the model holds no shell/file/
+  content-search authority at all (Grep dropped; Bash/Edit/Write
+  denied), so no prompt can reach what no tool grants (B by
+  construction).
+- NO live publish capability: D. Prompt declares `ABSOLUTELY DO NOT
+  PUBLISH OR SCHEDULE` and `DRAFT_FIRST remains mandatory` (C);
+  no publish-bridge/publisher/final-publish path is reachable
+  from any Python-built argv, and no model write can reach one
+  (B -- verified by static negative tests on the provider).
 
 ### APPROVAL (human authorization controller)
 

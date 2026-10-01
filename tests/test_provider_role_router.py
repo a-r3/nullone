@@ -46,10 +46,10 @@ import nullone_provider_router as router  # noqa: E402
 
 MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
 
-# Reviewed Morning route (issue #155, benchmark-validated): Claude
-# transport with the transport-local `sonnet` selector (resolves to
-# claude-sonnet-5 at the CLI). ONLY morning_editorial resolves here;
-# Weekly now also uses Claude/Sonnet; Draft and Breaking remain OpenCode.
+# Reviewed Claude routes (benchmark-validated Morning Sonnet, issue
+# #155): every role now resolves to the Claude transport --
+# morning/sonnet, draft/sonnet (#194), story/haiku, radar/haiku
+# (#190), weekly/sonnet. No role stays on OpenCode.
 MORNING_CLAUDE_MODEL = "sonnet"
 
 # Covered execution layers: these files must execute through the
@@ -130,7 +130,10 @@ class RouterFailClosedTests(unittest.TestCase):
             router.resolve_provider_profile(
                 router.ROLE_DRAFT_FACTORY,
                 config=mapping,
-                env={"NULLONE_ROLE_DRAFT_FACTORY_MODEL": "sonnet"},
+                env={
+                    "NULLONE_ROLE_DRAFT_FACTORY_TRANSPORT": "opencode",
+                    "NULLONE_ROLE_DRAFT_FACTORY_MODEL": "sonnet",
+                },
             )
         print("ROUTER_BLANK_MODEL_FAILS_CLOSED=PASS")
 
@@ -138,10 +141,12 @@ class RouterFailClosedTests(unittest.TestCase):
         # Compatibility: provider-defined `:suffix` IDs (OpenRouter
         # `:free` variants) are routable on the OpenCode transport;
         # blanks, vendor-less, malformed, and whitespace/control
-        # variants still fail closed. Uses draft_factory (still
-        # OpenCode after the Morning Claude route change, issue #155).
-        # No model call, no network.
+        # variants still fail closed. Uses draft_factory with an
+        # explicit OpenCode transport override (all checked-in roles
+        # now resolve to Claude, issue #194). No model call, no
+        # network.
         mapping = checked_in_mapping()
+        base_env = {"NULLONE_ROLE_DRAFT_FACTORY_TRANSPORT": "opencode"}
         for good in (
             "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
             "openrouter/qwen/qwen3.8-27b:free",
@@ -151,7 +156,7 @@ class RouterFailClosedTests(unittest.TestCase):
             profile = router.resolve_provider_profile(
                 router.ROLE_DRAFT_FACTORY,
                 config=mapping,
-                env={"NULLONE_ROLE_DRAFT_FACTORY_MODEL": good},
+                env={**base_env, "NULLONE_ROLE_DRAFT_FACTORY_MODEL": good},
             )
             self.assertEqual(profile.transport, "opencode")
             self.assertEqual(profile.model, good)
@@ -174,7 +179,7 @@ class RouterFailClosedTests(unittest.TestCase):
                 router.resolve_provider_profile(
                     router.ROLE_DRAFT_FACTORY,
                     config=mapping,
-                    env={"NULLONE_ROLE_DRAFT_FACTORY_MODEL": bad},
+                    env={**base_env, "NULLONE_ROLE_DRAFT_FACTORY_MODEL": bad},
                 )
         print("ROUTER_MODEL_SUFFIX_MATRIX=PASS")
 
@@ -192,14 +197,19 @@ class RouterFailClosedTests(unittest.TestCase):
                 router.ROLE_MORNING_EDITORIAL, config=bad, env={}
             )
 
-    def test_claude_unsupported_role_fails_closed(self):
+    def test_claude_supports_all_roles(self):
+        # Issue #194 completed the migration: every logical role now
+        # has a reviewed Claude path, so an explicit Claude transport
+        # override resolves for all of them (fail-closed only on
+        # unknown roles/transports, covered elsewhere).
         mapping = checked_in_mapping()
-        for role in (router.ROLE_DRAFT_FACTORY,):
-            with self.assertRaises(router.ProviderRoutingError):
-                router.resolve_provider_profile(
-                    role, config=mapping,
-                    env={f"NULLONE_ROLE_{role.upper()}_TRANSPORT": "claude"},
-                )
+        for role in router.LOGICAL_ROLES:
+            profile = router.resolve_provider_profile(
+                role, config=mapping,
+                env={f"NULLONE_ROLE_{role.upper()}_TRANSPORT": "claude"},
+            )
+            self.assertEqual(profile.transport, "claude", role)
+            self.assertEqual(profile.fallback_policy, "none", role)
 
     def test_routing_error_is_bridge_error(self):
         self.assertTrue(issubclass(router.ProviderRoutingError, BridgeError))
@@ -211,19 +221,18 @@ class PerRoleRoutingTests(unittest.TestCase):
         # migration: its checked-in default is now the same Claude
         # transport as Morning, with the reviewed Haiku selector
         # (never Sonnet/Opus). Weekly uses Sonnet; Radar uses Haiku
-        # (#190); Draft stays on OpenCode.
+        # (#190); Draft uses Sonnet (#194). No role stays on OpenCode.
         mapping = checked_in_mapping()
         for role in router.LOGICAL_ROLES:
             profile = router.resolve_provider_profile(role, config=mapping, env={})
-            if role in (router.ROLE_MORNING_EDITORIAL, router.ROLE_WEEKLY_STRATEGY):
+            if role in (router.ROLE_MORNING_EDITORIAL, router.ROLE_WEEKLY_STRATEGY, router.ROLE_DRAFT_FACTORY):
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, MORNING_CLAUDE_MODEL)
             elif role in (router.ROLE_STORY_WRITER, router.ROLE_BREAKING_RADAR):
                 self.assertEqual(profile.transport, "claude")
                 self.assertEqual(profile.model, router.HAIKU_DEFAULT_MODEL)
             else:
-                self.assertEqual(profile.transport, "opencode")
-                self.assertEqual(profile.model, MUSE_SPARK)
+                raise AssertionError(f"unrouted role: {role}")
             self.assertEqual(profile.fallback_policy, "none")
             self.assertEqual(profile.timeout_seconds, router.ROLE_TIMEOUTS[role])
             self.assertEqual(profile.capabilities, router.ROLE_CAPABILITIES[role])
@@ -234,12 +243,16 @@ class PerRoleRoutingTests(unittest.TestCase):
         print("WEEKLY_PROFILE_ROUTING=PASS")
 
     def test_checked_in_morning_and_story_claude_routes_are_role_only(self):
-        # Morning, Story, Radar, and Weekly have reviewed Claude paths.
+        # Morning, Draft, Story, Radar, and Weekly have reviewed Claude paths.
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         roles = raw["roles"]
         self.assertEqual(
             roles["morning_editorial"],
             {"transport": "claude", "model": MORNING_CLAUDE_MODEL},
+        )
+        self.assertEqual(
+            roles["draft_factory"],
+            {"transport": "claude", "model": "sonnet"},
         )
         self.assertEqual(
             roles["story_writer"],
@@ -253,17 +266,11 @@ class PerRoleRoutingTests(unittest.TestCase):
             roles["weekly_strategy"],
             {"transport": "claude", "model": "sonnet"},
         )
-        for role in (
-            "draft_factory",
-        ):
-            self.assertEqual(
-                roles[role], {"transport": "opencode", "model": MUSE_SPARK}
-            )
         print("MORNING_MODEL_RESOLVES_TO_TARGET=PASS")
         print("MORNING_TRANSPORT_IS_CLAUDE=PASS")
         print("STORY_MODEL_RESOLVES_TO_HAIKU=PASS")
         print("STORY_TRANSPORT_IS_CLAUDE=PASS")
-        print("DRAFT_FACTORY_ROUTE_UNCHANGED=PASS")
+        print("DRAFT_FACTORY_ROUTE_CLAUDE_SONNET=PASS")
         print("BREAKING_RADAR_ROUTE_UNCHANGED=PASS")
         print("WEEKLY_STRATEGY_ROUTE_UNCHANGED=PASS")
 
@@ -372,8 +379,8 @@ class WorkflowVendorNeutralityTests(unittest.TestCase):
                 msg=f"{filename} did not route through the adapter registry",
             )
             entry = [entry for entry in seen if entry[0] == role][0]
-            self.assertEqual(entry[1], "opencode")
-            self.assertEqual(entry[2], MUSE_SPARK)
+            self.assertEqual(entry[1], "claude")
+            self.assertEqual(entry[2], "sonnet")
         print("REAL_WORKFLOW_TO_PROVIDER_ADAPTER_WIRING=PASS")
 
     def test_model_switch_needs_no_workflow_rewrite(self):
@@ -667,15 +674,15 @@ class NoSilentFallbackTests(unittest.TestCase):
         counts: dict[str, int] = {"opencode": 0, "claude": 0}
         real_registry = dict(provider_adapter._ADAPTERS)
 
-        def failing_opencode(profile, call):
-            counts["opencode"] += 1
-            raise BridgeError("OpenCode draft-factory run failed (exit=3)")
-
-        def counting_claude(profile, call):
+        def failing_claude(profile, call):
             counts["claude"] += 1
+            raise BridgeError("Claude draft-factory run failed (exit=3)")
 
-        provider_adapter._ADAPTERS["opencode"] = failing_opencode
-        provider_adapter._ADAPTERS["claude"] = counting_claude
+        def counting_opencode(profile, call):
+            counts["opencode"] += 1
+
+        provider_adapter._ADAPTERS["opencode"] = counting_opencode
+        provider_adapter._ADAPTERS["claude"] = failing_claude
         try:
             profile = router.resolve_provider_profile(
                 router.ROLE_DRAFT_FACTORY, config=checked_in_mapping(), env={}
@@ -694,7 +701,7 @@ class NoSilentFallbackTests(unittest.TestCase):
         finally:
             provider_adapter._ADAPTERS.clear()
             provider_adapter._ADAPTERS.update(real_registry)
-        self.assertEqual(counts, {"opencode": 1, "claude": 0})
+        self.assertEqual(counts, {"opencode": 0, "claude": 1})
         print("NO_SILENT_FALLBACK=PASS")
 
     def test_failed_adapter_outcome_carries_exact_metadata(self):
@@ -776,19 +783,39 @@ class PermissionBoundaryTests(unittest.TestCase):
     def test_adapter_argv_grants_no_privilege(self):
         import nullone_provider_adapter as provider_adapter
 
-        for role in router.LOGICAL_ROLES:
-            profile = router.resolve_provider_profile(role, config=checked_in_mapping(), env={})
-            if profile.transport != "opencode":
-                continue
-            argv = provider_adapter.build_adapter_command(
-                profile, prompt="probe",
-                workspace=Path("/tmp/nullone-privilege-probe"),
-                binary="/tmp/fake-opencode",
+        # No checked-in role uses the OpenCode flat argv anymore; the
+        # builder path is proven with an explicit OpenCode profile so
+        # the reviewed argv shape cannot silently widen privilege.
+        profile = router.ProviderProfile(
+            role=router.ROLE_DRAFT_FACTORY, transport="opencode",
+            model="opencode/probe-model",
+            capabilities=router.ROLE_CAPABILITIES[router.ROLE_DRAFT_FACTORY],
+            timeout_seconds=900,
+        )
+        argv = provider_adapter.build_adapter_command(
+            profile, prompt="probe",
+            workspace=Path("/tmp/nullone-privilege-probe"),
+            binary="/tmp/fake-opencode",
+        )
+        self.assertNotIn("--auto", argv)
+        self.assertNotIn("--continue", argv)
+        self.assertNotIn("--session", argv)
+        self.assertEqual(argv[argv.index("--agent") + 1], "nullone-draft-factory")
+        # Every checked-in Claude structured role refuses flat argv.
+        for role in (
+            router.ROLE_DRAFT_FACTORY,
+            router.ROLE_WEEKLY_STRATEGY,
+            router.ROLE_BREAKING_RADAR,
+        ):
+            structured = router.resolve_provider_profile(
+                role, config=checked_in_mapping(), env={}
             )
-            self.assertNotIn("--auto", argv)
-            self.assertNotIn("--continue", argv)
-            self.assertNotIn("--session", argv)
-            self.assertEqual(argv[argv.index("--agent") + 1], router.role_agent(role))
+            with self.assertRaises(provider_adapter.ProviderRoutingError):
+                provider_adapter.build_adapter_command(
+                    structured, prompt="probe",
+                    workspace=Path("/tmp/nullone-privilege-probe"),
+                    binary="/tmp/fake-opencode",
+                )
         print("PERMISSION_BOUNDARIES_PRESERVED=PASS")
         print("CAPABILITY_BOUNDARIES_PRESERVED=PASS")
 

@@ -159,15 +159,21 @@ def _run_bridge_backstop(cycle_start: datetime) -> bool:
 
 
 def self_test() -> int:
-    argv = build_command(workspace=Path("/tmp/nullone-factory-self-test"))
     profile = provider_router.resolve_provider_profile(
         provider_router.ROLE_DRAFT_FACTORY
     )
-    assert argv[0:2] == ["opencode", "run"]
-    assert argv[argv.index("--agent") + 1] == AGENT
-    assert argv[argv.index("--model") + 1] == profile.model
-    assert argv[argv.index("--dir") + 1] == "/tmp/nullone-factory-self-test"
-    assert "--auto" not in argv
+    assert profile.transport == provider_router.TRANSPORT_CLAUDE, profile
+    assert profile.model == provider_router.CLAUDE_DEFAULT_MODEL, profile
+    assert profile.timeout_seconds == DRAFT_FACTORY_TIMEOUT_SECONDS == 900, profile
+    assert profile.fallback_policy == provider_router.FALLBACK_NONE, profile
+    # Structured invocation has no flat argv: the adapter refuses to
+    # build one for Claude Draft (same contract as Weekly/Radar).
+    try:
+        build_command(workspace=Path("/tmp/nullone-factory-self-test"))
+    except provider_adapter.ProviderRoutingError:
+        pass
+    else:
+        raise AssertionError("Claude Draft must not expose a flat argv")
     assert PROMPT_PATH.name == "draft-factory.md"
 
     print("DRAFT_FACTORY_RUN_SELF_TEST=PASS")
@@ -176,7 +182,7 @@ def self_test() -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="NullOne Draft Factory OpenCode role")
+    parser = argparse.ArgumentParser(description="NullOne Draft Factory role")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("execute")
     sub.add_parser("self-test")

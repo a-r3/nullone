@@ -130,6 +130,12 @@ def _invoke_opencode_cycle(profile: ProviderProfile, call: AdapterCall) -> None:
 
 
 def _invoke_claude_cycle(profile: ProviderProfile, call: AdapterCall) -> None:
+    if profile.role == "draft_factory":
+        from nullone_claude_draft_provider import invoke_draft
+
+        invoke_draft(prompt=call.prompt, workspace=call.workspace,
+                     model=profile.model, timeout=profile.timeout_seconds)
+        return
     if profile.role == "weekly_strategy":
         from nullone_claude_weekly_provider import invoke_weekly
 
@@ -144,9 +150,9 @@ def _invoke_claude_cycle(profile: ProviderProfile, call: AdapterCall) -> None:
         return
     from nullone_claude_editorial_provider import default_invoke_provider
 
-    # Morning retains its reviewed Claude cycle. Weekly and Radar are
-    # dispatched above to their distinct structured, read-only cycles.
-    # Radar must never route through the Morning provider.
+    # Morning retains its reviewed Claude cycle. Draft, Weekly, and
+    # Radar are dispatched above to their distinct dedicated cycles.
+    # Draft must never route through the Morning provider.
     default_invoke_provider(model=profile.model)
 
 
@@ -179,6 +185,8 @@ def build_adapter_command(
             binary=binary,
         )
     if profile.transport == TRANSPORT_CLAUDE:
+        if profile.role == "draft_factory":
+            raise ProviderRoutingError("Draft Claude uses structured invocation")
         if profile.role == "weekly_strategy":
             raise ProviderRoutingError("Weekly Claude uses structured invocation")
         if profile.role == "breaking_radar":
