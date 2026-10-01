@@ -212,13 +212,16 @@ class SchedulerRegressionTests(unittest.TestCase):
             self.assertNotEqual(argv[0], "opencode")
 
     def test_role_execute_resolves_before_subprocess(self):
-        # Issue #111 amendment: binary resolution moved behind the
-        # provider adapter boundary; the PR116 invariant (absolute
-        # HOME-derived binary reaches subprocess) is proven at that
-        # boundary instead of on the wrapper module.
+        # Issue #194: the Draft Factory wrapper executes through the
+        # Claude structured provider, so a draft execute must NEVER
+        # touch opencode binary resolution or spawn an opencode
+        # subprocess. The PR116 invariant (absolute HOME-derived
+        # binary reaches subprocess) is still proven for the
+        # transport builder above; this test proves the draft path
+        # cannot reach it at all.
         import importlib.util
 
-        import nullone_opencode_binary as binary_module
+        import nullone_provider_adapter as provider_adapter
 
         spec = importlib.util.spec_from_file_location(
             "draft_factory_run_binary_test", SCRIPTS / "nullone-draft-factory-run.py"
@@ -226,26 +229,23 @@ class SchedulerRegressionTests(unittest.TestCase):
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        with tempfile.TemporaryDirectory() as td:
-            home = _make_home_with_binary(Path(td))
-            expected = str(home / ".opencode/bin/opencode")
-            captured: dict = {}
-
-            def fake_resolve(*args, **kwargs):
-                return expected
-
-            def fake_run(cmd, **kwargs):
-                captured["cmd"] = cmd
-                import subprocess as _sp
-
-                return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-            with mock.patch.object(
-                binary_module, "resolve_opencode_binary", side_effect=fake_resolve
-            ):
-                with mock.patch.object(role_mod, "run_tree_command", side_effect=fake_run):
-                    self.assertEqual(module.execute(), 0)
-            self.assertEqual(captured["cmd"][0], expected)
+        with mock.patch(
+            "nullone_opencode_binary.resolve_opencode_binary",
+            side_effect=AssertionError("opencode binary must be unreachable"),
+        ), mock.patch.object(
+            role_mod, "run_tree_command",
+            side_effect=AssertionError("opencode subprocess must be unreachable"),
+        ), mock.patch.object(
+            provider_adapter, "invoke_role_cycle",
+            return_value=provider_adapter.AdapterOutcome(
+                role="draft_factory", transport="claude", model="sonnet",
+                outcome="COMPLETED",
+            ),
+        ), mock.patch.object(
+            module, "ensure_pending_bridge",
+            return_value={"status": "NOOP", "attempted": [], "created": {}},
+        ):
+            self.assertEqual(module.execute(), 0)
 
     def test_morning_production_invocation_uses_absolute_binary(self):
         import nullone_opencode_editorial_provider as editorial

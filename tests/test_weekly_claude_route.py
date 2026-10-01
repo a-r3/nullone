@@ -43,7 +43,7 @@ class WeeklyClaudeTests(unittest.TestCase):
             "weekly_strategy": ("claude", "sonnet", 600),
             "morning_editorial": ("claude", "sonnet", 600),
             "story_writer": ("claude", "haiku", 300),
-            "draft_factory": ("opencode", "opencode/muse-spark-1.3-contributor-free", 900),
+            "draft_factory": ("claude", "sonnet", 900),
             "breaking_radar": ("claude", "haiku", 600),
         }
         for role, wanted in expected.items():

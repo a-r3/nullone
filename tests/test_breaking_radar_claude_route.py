@@ -128,7 +128,7 @@ class RadarClaudeRouteTests(unittest.TestCase):
     def test_checked_in_profile_and_other_routes_unchanged(self):
         expected = {
             "breaking_radar": ("claude", "haiku", 600),
-            "draft_factory": ("opencode", "opencode/muse-spark-1.3-contributor-free", 900),
+            "draft_factory": ("claude", "sonnet", 900),
             "morning_editorial": ("claude", "sonnet", 600),
             "story_writer": ("claude", "haiku", 300),
             "weekly_strategy": ("claude", "sonnet", 600),

@@ -26,8 +26,6 @@ sys.path.insert(0, str(SCRIPTS))
 
 import nullone_provider_router as router  # noqa: E402
 
-MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
-
 
 def checked_in_mapping():
     raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -139,8 +137,9 @@ class StoryClaudeRouteTests(unittest.TestCase):
 
 
 class OtherRolesUnchangedTests(unittest.TestCase):
-    """F-I: Draft stays on its reviewed OpenCode route (Radar moved to
-    Claude/Haiku in #190, covered by its own route suite)."""
+    """F-I: Draft Factory moved to its reviewed Claude/Sonnet route in
+    #194 (Radar moved to Claude/Haiku in #190, covered by its own
+    route suite)."""
 
     def test_other_roles_unchanged(self):
         mapping = checked_in_mapping()
@@ -150,8 +149,8 @@ class OtherRolesUnchangedTests(unittest.TestCase):
             profile = router.resolve_provider_profile(
                 role, config=mapping, env={}
             )
-            self.assertEqual(profile.transport, "opencode", role)
-            self.assertEqual(profile.model, MUSE_SPARK, role)
+            self.assertEqual(profile.transport, "claude", role)
+            self.assertEqual(profile.model, "sonnet", role)
             self.assertEqual(profile.fallback_policy, "none", role)
             self.assertEqual(
                 profile.timeout_seconds, router.ROLE_TIMEOUTS[role], role

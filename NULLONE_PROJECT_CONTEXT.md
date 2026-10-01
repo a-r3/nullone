@@ -3,6 +3,47 @@
 Last updated: 2026-10-01 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
+## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (REPO DESIRED STATE ONLY; NOT DEPLOYED)
+
+- Issue #194, "Migrate Draft Factory from OpenCode to Claude/Sonnet",
+  remains OPEN. Desired repo state is prepared/reviewed on branch
+  `feature/draft-factory-claude`; PRODUCTION DEPLOYMENT NOT
+  PERFORMED; no synthetic Draft Factory production run performed;
+  no natural proof claimed.
+- DESIRED (this repo state, not production): `role=draft_factory`,
+  `transport=claude`, `model=sonnet`, `timeout=900`,
+  `fallback=none`, via the dedicated `nullone_claude_draft_provider.py`
+  dispatched before any Morning-provider fallthrough. The wrapper
+  stays provider-neutral; domain behavior (DRAFT_FIRST, one draft
+  max, no publication, deterministic packaging authority, bridge
+  backstop) is unchanged.
+- Security posture change (reviewed, probed): the model holds NO
+  shell/file authority (Read/WebSearch/WebFetch/Glob/Grep only);
+  deterministic Python performs every write and the five exact
+  reviewed helper invocations. The OpenCode exact-command Bash
+  allowlist and path-scoped Write/Edit rules are NOT reproducible
+  as Claude Code 2.1.284 CLI permissions (probed: patterned Bash
+  allows do not restrict unmatched commands; broad Bash deny kills
+  the tool; path-scoped Edit/Write grants are not honored) -- the
+  gap is closed architecturally by full mediation, documented in
+  `docs/contracts/runtime-permissions.md`.
+- ACTUAL PRODUCTION STATE (unchanged by this work): live Draft
+  Factory automation still runs the OpenCode transport. Do not read
+  this section as deployment.
+- Remaining acceptance after review: controlled deploy + natural
+  scheduled proof. Keep #194 OPEN until both exist.
+
+## Breaking Radar assessment contract — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
+
+- PR #193, "Fix Breaking Radar assessment contract binding", merged
+  as `d9d1e50773e3fc7277b28ff1706a547b60f602b3`; controlled
+  production deployment completed with backup
+  `/home/oem/.openclaw/nullone-deploy-backups/pr193-20261001-173547`.
+- Post-deploy natural proof is still PENDING as of the start of the
+  Draft Factory branch work above. No result is claimed here; do
+  not invent one. Do not disturb the active Radar natural-proof
+  process.
+
 ## Breaking Radar Claude/Haiku migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
 
 - Issue #190, "Migrate Breaking Radar from OpenCode to Claude/Haiku",

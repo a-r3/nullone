@@ -88,11 +88,11 @@ TRANSPORT_CLAUDE = "claude"
 KNOWN_TRANSPORTS = (TRANSPORT_OPENCODE, TRANSPORT_CLAUDE)
 
 # Claude transport exists only where a reviewed Claude implementation
-# exists: the Morning cycle, Story writer, bounded Weekly strategy
-# cycle, and bounded Radar reasoning cycle. Any other role x claude
-# combination fails
+# exists: the Morning cycle, the fully mediated Draft Factory cycle,
+# Story writer, bounded Weekly strategy cycle, and bounded Radar
+# reasoning cycle. Any other role x claude combination fails
 # closed at resolve time instead of dispatching nowhere.
-CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_STORY_WRITER, ROLE_WEEKLY_STRATEGY, ROLE_BREAKING_RADAR)
+CLAUDE_SUPPORTED_ROLES = (ROLE_MORNING_EDITORIAL, ROLE_DRAFT_FACTORY, ROLE_STORY_WRITER, ROLE_WEEKLY_STRATEGY, ROLE_BREAKING_RADAR)
 
 FALLBACK_NONE = "none"
 
@@ -377,11 +377,11 @@ def describe_profile(profile: ProviderProfile) -> str:
 
 def self_test() -> int:
     mapping = load_routing_config()
-    # Morning, Story, Weekly, and Radar have reviewed Claude routes;
-    # Draft Factory stays on OpenCode.
+    # Morning, Draft, Story, Weekly, and Radar all have reviewed
+    # Claude routes; no role stays on OpenCode.
     expected_transports = {
         ROLE_MORNING_EDITORIAL: TRANSPORT_CLAUDE,
-        ROLE_DRAFT_FACTORY: TRANSPORT_OPENCODE,
+        ROLE_DRAFT_FACTORY: TRANSPORT_CLAUDE,
         ROLE_STORY_WRITER: TRANSPORT_CLAUDE,
         ROLE_BREAKING_RADAR: TRANSPORT_CLAUDE,
         ROLE_WEEKLY_STRATEGY: TRANSPORT_CLAUDE,
@@ -401,6 +401,15 @@ def self_test() -> int:
         ROLE_MORNING_EDITORIAL, config=mapping, env={}
     )
     assert morning.model == CLAUDE_DEFAULT_MODEL, morning
+
+    # Draft Factory production migration off OpenCode (issue #194):
+    # the checked-in mapping alone must resolve Draft to the Claude
+    # transport with the reviewed Sonnet selector, keeping the 900s
+    # execution budget and no fallback.
+    draft = resolve_provider_profile(ROLE_DRAFT_FACTORY, config=mapping, env={})
+    assert draft.transport == TRANSPORT_CLAUDE, draft
+    assert draft.model == CLAUDE_DEFAULT_MODEL, draft
+    assert draft.timeout_seconds == 900, draft
 
     # Story Writer production transport (checked-in config, no env
     # override): exact reviewed Haiku model, not Sonnet/Opus, and the

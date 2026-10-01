@@ -151,15 +151,15 @@ class FactorySelectionTests(unittest.TestCase):
         self.assertEqual(profile.model, "sonnet")
         self.assertEqual(profile.fallback_policy, router.FALLBACK_NONE)
         self.assertEqual(profile.timeout_seconds, 600)
-        # Draft remains on reviewed OpenCode/Muse Spark.
-        for role, expected_model in [
-            (router.ROLE_DRAFT_FACTORY, "opencode/muse-spark-1.3-contributor-free"),
+        # Draft Factory moved to Claude/Sonnet (#194).
+        for role, expected in [
+            (router.ROLE_DRAFT_FACTORY, ("claude", "sonnet", 900, "none")),
         ]:
             p = router.resolve_provider_profile(role)
-            self.assertEqual(p.transport, "opencode")
-            self.assertEqual(p.model, expected_model)
-            self.assertEqual(p.fallback_policy, router.FALLBACK_NONE)
-            self.assertEqual(p.timeout_seconds, router.ROLE_TIMEOUTS[role])
+            self.assertEqual(
+                (p.transport, p.model, p.timeout_seconds, p.fallback_policy),
+                expected,
+            )
             self.assertEqual(p.capabilities, router.ROLE_CAPABILITIES[role])
         # Breaking Radar moved to Claude/Haiku (#190).
         radar_p = router.resolve_provider_profile(router.ROLE_BREAKING_RADAR)

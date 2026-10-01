@@ -15,6 +15,11 @@ COMMON (per role):
 - secrets not embedded; only NULLONE_OPENCODE_MODEL is read
 - no active Anthropic model dependency in new config
 
+All three wrappers now execute through Claude structured invocation
+(Draft #194, Radar #190; Weekly earlier), so no flat OpenCode argv
+remains: the adapter refuses to build one, and transport failures
+map to BLOCKED through the registry.
+
 DRAFT FACTORY:
 - agent allows exactly the reviewed script/telegram commands
 - sibling mutating message subcommands denied
@@ -71,17 +76,11 @@ draft_wrapper = _load_wrapper("draft_factory_run_test", "nullone-draft-factory-r
 radar_wrapper = _load_wrapper("radar_run_test", "nullone-breaking-radar-run.py")
 weekly_wrapper = _load_wrapper("weekly_run_test", "nullone-weekly-strategy-run.py")
 
-WRAPPERS = (
-    ("draft-factory", "nullone-draft-factory", draft_wrapper, 900),
-    ("breaking-radar", "nullone-breaking-radar", radar_wrapper, 600),
-)
-
-# Wrappers still executing through the OpenCode argv path. Breaking
-# Radar moved to Claude structured invocation (#190) and no longer
-# exposes a flat argv.
-OPENCODE_ARGV_WRAPPERS = (
-    ("draft-factory", "nullone-draft-factory", draft_wrapper, 900),
-)
+# No wrapper executes through the OpenCode argv path anymore: Draft
+# Factory moved to Claude structured invocation (#194), following
+# Breaking Radar (#190). The OpenCode argv builders and agent files
+# below stay covered as retained/reviewed artifacts.
+OPENCODE_ARGV_WRAPPERS: tuple = ()
 
 MUSE_SPARK = "opencode/muse-spark-1.3-contributor-free"
 WS = "/home/oem/.openclaw/workspace"
@@ -189,19 +188,24 @@ class RoleWrapperTests(unittest.TestCase):
         patcher.start()
 
     def test_command_shape_per_role(self):
-        for role, agent, module, timeout in OPENCODE_ARGV_WRAPPERS:
-            with self.subTest(role=role):
-                argv = module.build_command(workspace=Path("/tmp/nullone-role-check"))
-                self.assertEqual(argv[0:2], ["opencode", "run"])
-                self.assertEqual(argv[argv.index("--agent") + 1], agent)
-                with mock.patch.dict(os.environ, {}, clear=False):
-                    os.environ.pop(role_transport.OPENCODE_MODEL_ENV_VAR, None)
-                    argv_default = module.build_command(workspace=Path("/tmp/nullone-role-check"))
-                self.assertEqual(argv_default[argv_default.index("--model") + 1], MUSE_SPARK)
-                self.assertEqual(argv[argv.index("--dir") + 1], "/tmp/nullone-role-check")
-                self.assertEqual(argv[argv.index("--format") + 1], "json")
-                for forbidden in ("--auto", "--continue", "--session", "--fork", "--share"):
-                    self.assertNotIn(forbidden, argv)
+        # No wrapper exposes an OpenCode flat argv anymore (Draft
+        # Factory and Breaking Radar both use Claude structured
+        # invocation): the adapter refuses to build one for every
+        # checked-in role.
+        import nullone_provider_adapter as provider_adapter
+        import nullone_provider_router as provider_router
+
+        for module in (draft_wrapper, radar_wrapper):
+            with self.subTest(module=module):
+                with self.assertRaises(provider_adapter.ProviderRoutingError):
+                    module.build_command(workspace=Path("/tmp/nullone-role-check"))
+        profile = provider_router.resolve_provider_profile(
+            provider_router.ROLE_DRAFT_FACTORY, env={}
+        )
+        self.assertEqual(
+            (profile.transport, profile.model, profile.timeout_seconds),
+            ("claude", "sonnet", 900),
+        )
 
     def test_radar_uses_structured_invocation_without_flat_argv(self):
         # Breaking Radar moved to Claude structured invocation (#190):
@@ -211,19 +215,43 @@ class RoleWrapperTests(unittest.TestCase):
         with self.assertRaises(provider_adapter.ProviderRoutingError):
             radar_wrapper.build_command(workspace=Path("/tmp/nullone-role-check"))
 
+    def test_draft_uses_structured_invocation_without_flat_argv(self):
+        # Draft Factory moved to Claude structured invocation (#194):
+        # no flat argv exists; the adapter refuses to build one.
+        import nullone_provider_adapter as provider_adapter
+
+        with self.assertRaises(provider_adapter.ProviderRoutingError):
+            draft_wrapper.build_command(workspace=Path("/tmp/nullone-role-check"))
+
     def test_per_role_timeout_budgets(self):
         self.assertEqual(draft_wrapper.DRAFT_FACTORY_TIMEOUT_SECONDS, 900)
         self.assertEqual(radar_wrapper.RADAR_TIMEOUT_SECONDS, 600)
         self.assertEqual(weekly_wrapper.WEEKLY_TIMEOUT_SECONDS, 600)
 
     def test_execute_maps_transport_failure_to_blocked(self):
-        for role, agent, module, timeout in OPENCODE_ARGV_WRAPPERS:
-            with self.subTest(role=role):
-                def effect(cmd, **kwargs):
-                    return subprocess.CompletedProcess(cmd, 3, stdout="", stderr="boom")
+        # Transport failures map to BLOCKED for every
+        # structured-invocation wrapper: patch the registry entry
+        # and prove each wrapper fails closed. Draft runs its
+        # deterministic bridge backstop afterwards (mocked NOOP
+        # here); Radar checks its fresh-report gate (mocked empty).
+        import nullone_provider_adapter as provider_adapter
 
-                with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
-                    self.assertEqual(module.execute(), 1)
+        def effect(profile, prompt, workspace):
+            raise BridgeError("Claude run failed")
+
+        with mock.patch.object(
+            provider_adapter, "invoke_role_cycle", side_effect=effect
+        ):
+            with mock.patch.object(
+                draft_wrapper, "ensure_pending_bridge",
+                return_value={"status": "NOOP", "attempted": [], "created": {}},
+            ):
+                self.assertEqual(draft_wrapper.execute(), 1)
+            with mock.patch.object(
+                radar_wrapper, "find_fresh_reports", return_value=[]
+            ):
+                self.assertEqual(radar_wrapper.execute(), 1)
+
 
     def test_radar_execute_maps_provider_failure_to_blocked(self):
         import nullone_provider_adapter as provider_adapter
@@ -606,31 +634,35 @@ class RoleFilesystemContractTests(unittest.TestCase):
             )
 
     def test_sequential_retries_are_stateless(self):
-        """Two consecutive scheduler retries issue byte-identical argv
-        with no in-process accumulation: duplication guards live in the
-        domain helpers (scan commit, manifest, draft bridge), never in
-        transport state."""
+        """Two consecutive scheduler retries invoke the adapter
+        identically with no in-process accumulation: duplication
+        guards live in the domain helpers (packaging receipt,
+        manifest, draft bridge), never in transport state."""
+
+        import nullone_provider_adapter as provider_adapter
 
         calls: list = []
 
-        def effect(cmd, **kwargs):
-            calls.append(list(cmd))
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        def effect(profile, prompt, workspace):
+            calls.append(
+                (profile.role, profile.transport, profile.model, prompt, workspace)
+            )
+            return provider_adapter.AdapterOutcome(
+                role=profile.role, transport=profile.transport,
+                model=profile.model, outcome="COMPLETED",
+            )
 
-        with mock.patch(
-            "nullone_opencode_binary.resolve_opencode_binary",
-            return_value="/tmp/fake-opencode",
+        with mock.patch.object(
+            provider_adapter, "invoke_role_cycle", side_effect=effect
         ):
-            with mock.patch.object(role_transport, "run_tree_command", side_effect=effect):
-                workspace = Path("/tmp/nullone-retry-check")
-                first = draft_wrapper.build_command(workspace=workspace)
+            with mock.patch.object(
+                draft_wrapper, "ensure_pending_bridge",
+                return_value={"status": "NOOP", "attempted": [], "created": {}},
+            ):
                 self.assertEqual(draft_wrapper.execute(), 0)
-                second = draft_wrapper.build_command(workspace=workspace)
                 self.assertEqual(draft_wrapper.execute(), 0)
-        self.assertEqual(first, second)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0], calls[1])
-
 
 class RoleArtifactValidationTests(unittest.TestCase):
     """Fail-closed artifact proof for Radar/Weekly wrappers (issue #124).
