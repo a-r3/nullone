@@ -34,7 +34,7 @@ def candidates_result():
         "mode": "CANDIDATES_EMITTED",
         "report_markdown": "# Breaking 1130\n\n- Acme widget launch (primary source).\n",
         "assessments": [
-            {"candidate_id": "acme-widget-launch", "content_type": "NEWS"},
+            valid_workflow_assessment("acme-widget-launch"),
         ],
     }
 
@@ -278,6 +278,10 @@ class RadarClaudeRouteTests(unittest.TestCase):
              "assessments": [{"candidate_id": "a" * 81}]},
             {"mode": "CANDIDATES_EMITTED", "report_markdown": "r",
              "assessments": ["not-a-dict"]},
+            # Legacy editorial candidate shape observed in production:
+            # unknown fields and missing workflow envelope.
+            {"mode": "CANDIDATES_EMITTED", "report_markdown": "r",
+             "assessments": [legacy_editorial_assessment()]},
             {"mode": "CANDIDATES_EMITTED", "report_markdown": "r",
              "assessments": [{"candidate_id": "x-y"}], "extra": 1},
             {"mode": "WRONG", "report_markdown": "r", "assessments": []},
@@ -462,6 +466,31 @@ def valid_workflow_assessment(candidate_id="acme-widget-launch", **overrides):
     return base
 
 
+def legacy_editorial_assessment():
+    """Legacy editorial candidate shape observed in post-deploy runs.
+
+    Carries editorial fields (score, audience_value, ...) instead of
+    the exact nullone.breaking-workflow-input.v1 envelope. Must be
+    rejected at the schema/structural layer, never reach the scan
+    helper.
+    """
+    return {
+        "candidate_id": "acme-widget-launch",
+        "topic": "Acme Widget launch",
+        "topic_bucket": "acme-widget",
+        "audience_value": "high",
+        "discovered_at": "2026-10-01T07:30:00Z",
+        "evidence_summary": "Acme Widget 2 is available.",
+        "freshness_class": "fresh",
+        "freshness_deadline": "2026-10-02T00:00:00Z",
+        "proposed_format": "single",
+        "score": 8,
+        "score_notes": "material launch",
+        "verification_state": "PASS",
+        "why_now": "launch timing is material",
+    }
+
+
 class RadarRealScanBatchTests(unittest.TestCase):
     """Real scan-helper regression: batch preflight before authority.
 
@@ -511,9 +540,12 @@ class RadarRealScanBatchTests(unittest.TestCase):
             "report_markdown": "# Breaking\n\n- Acme widget launch.\n",
             "assessments": [
                 valid_workflow_assessment("acme-widget-launch"),
-                # Shallow-valid candidate_id, but no workflow envelope:
-                # the shared deep validator rejects it.
-                {"candidate_id": "acme-broken-widget", "content_type": "NEWS"},
+                # Exact workflow field set (passes shallow structural
+                # checks) but invalid content_type: only the shared
+                # deterministic deep validator rejects it.
+                valid_workflow_assessment(
+                    "acme-broken-widget", content_type="EDITORIAL"
+                ),
             ],
         }
         with tempfile.TemporaryDirectory() as td:
@@ -618,6 +650,124 @@ class RadarRealScanBatchTests(unittest.TestCase):
             scan_loader.assert_not_called()
             self._assert_no_authoritative_state(root)
             self._assert_no_output_writes(root)
+
+
+# Exact authoritative top-level field set. Literal change-detector:
+# if the workflow-input contract evolves, this test fails loudly and
+# forces a reviewed update on both sides (schema + validator share
+# one generator, so they cannot silently diverge).
+AUTHORITATIVE_ASSESSMENT_FIELDS = frozenset(
+    {
+        "schema",
+        "contract_version",
+        "candidate_id",
+        "candidate_version",
+        "assessment_ref",
+        "state_snapshot_ref",
+        "topic",
+        "topic_cluster",
+        "content_type",
+        "evidence",
+        "follow_up_delta",
+        "source_attribution",
+        "limitations",
+        "product_version_region",
+        "source_image",
+        "verification",
+        "severity_assessment",
+        "recent_coverage",
+        "story_safety",
+        "main_assessment",
+    }
+)
+
+
+class RadarAssessmentContractTests(unittest.TestCase):
+    """Radar structured schema is bound to the workflow-input contract."""
+
+    def test_schema_items_enforce_exact_authoritative_field_set(self):
+        items = radar.SCHEMA["properties"]["assessments"]["items"]
+        self.assertFalse(items.get("additionalProperties", True))
+        self.assertEqual(set(items["required"]), AUTHORITATIVE_ASSESSMENT_FIELDS)
+        # Nested objects are constrained too: no open-ended objects
+        # anywhere under an assessment.
+        def _assert_closed(node, path="items"):
+            self.assertEqual(
+                node.get("additionalProperties"), False, path
+            )
+            for name, sub in node.get("properties", {}).items():
+                for variant in sub.get("anyOf", [sub]):
+                    if variant.get("type") == "object":
+                        _assert_closed(variant, f"{path}.{name}")
+                    if variant.get("items", {}).get("type") == "object":
+                        _assert_closed(variant["items"], f"{path}.{name}[]")
+
+        _assert_closed(items)
+
+    def test_schema_required_matches_authoritative_validator_constants(self):
+        # Intentional tripwire into the validator's own constants: the
+        # schema is generated from them, so this can only fail if
+        # someone replaces the generator with a hand-maintained copy.
+        import nullone_breaking_workflow_input as workflow_input
+
+        items = radar.SCHEMA["properties"]["assessments"]["items"]
+        self.assertEqual(
+            set(items["required"]),
+            set(workflow_input._TOP_LEVEL_FIELDS),
+        )
+        self.assertEqual(
+            AUTHORITATIVE_ASSESSMENT_FIELDS,
+            set(workflow_input._TOP_LEVEL_FIELDS),
+        )
+
+    def test_schema_enums_match_authoritative_vocabularies(self):
+        import nullone_breaking_workflow_input as workflow_input
+
+        props = radar.SCHEMA["properties"]["assessments"]["items"]["properties"]
+        self.assertEqual(
+            set(props["content_type"]["enum"]),
+            set(workflow_input.CONTENT_TYPES),
+        )
+        self.assertEqual(
+            set(props["verification"]["properties"]["state"]["enum"]),
+            set(workflow_input.VERIFICATION_STATES),
+        )
+        severity_enum = props["severity_assessment"]["properties"][
+            "classification"
+        ]["anyOf"][0]["enum"]
+        self.assertEqual(set(severity_enum), set(workflow_input.SEVERITIES))
+
+    def test_legacy_editorial_shape_rejected_before_scan_contact(self):
+        import nullone_breaking_workflow_input as workflow_input
+
+        legacy = legacy_editorial_assessment()
+        result = {
+            "mode": "CANDIDATES_EMITTED",
+            "report_markdown": "# Breaking\n\n- Acme widget launch.\n",
+            "assessments": [legacy],
+        }
+        with self.assertRaises(BridgeError):
+            radar._validated(result)
+        # Both fail-closed layers agree: the deterministic validator
+        # rejects it too.
+        with self.assertRaises(Exception):
+            workflow_input.validate_breaking_workflow_input(legacy)
+
+    def test_valid_workflow_assessment_accepted_by_both_layers(self):
+        import nullone_breaking_workflow_input as workflow_input
+
+        assessment = valid_workflow_assessment("acme-widget-launch")
+        self.assertEqual(set(assessment), AUTHORITATIVE_ASSESSMENT_FIELDS)
+        validated = radar._validated(
+            {
+                "mode": "CANDIDATES_EMITTED",
+                "report_markdown": "# Breaking\n\n- x.\n",
+                "assessments": [assessment],
+            }
+        )
+        self.assertEqual(len(validated["assessments"]), 1)
+        parsed = workflow_input.validate_breaking_workflow_input(assessment)
+        self.assertEqual(parsed.candidate_id, "acme-widget-launch")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from nullone_bridge_common import BridgeError
+from nullone_breaking_workflow_input import assessment_json_schema
 from nullone_claude import run_structured
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch"]
@@ -47,6 +48,14 @@ ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch"]
 FIELDS = ("mode", "report_markdown", "assessments")
 MODES = ("CANDIDATES_EMITTED", "NO_MATERIAL_DEVELOPMENT")
 MAX_ASSESSMENTS = 25
+
+# The nested assessment schema is generated deterministically from the
+# authoritative workflow-input module's own constants (never a
+# hand-maintained copy), so the CLI-level contract cannot drift from
+# the deterministic validator. Cross-field rules stay exclusively with
+# validate_breaking_workflow_input(), which remains the final
+# authority; the deep preflight still rejects anything it rejects.
+ASSESSMENT_SCHEMA = assessment_json_schema()
 
 # Cheap structural pre-checks only (mirrors the prompt's validator-exact
 # candidate_id rule); deep envelope validation stays in the scan
@@ -61,7 +70,11 @@ SCHEMA = {
     "properties": {
         "mode": {"type": "string", "enum": list(MODES)},
         "report_markdown": {"type": "string", "minLength": 1},
-        "assessments": {"type": "array", "maxItems": MAX_ASSESSMENTS, "items": {"type": "object"}},
+        "assessments": {
+            "type": "array",
+            "maxItems": MAX_ASSESSMENTS,
+            "items": ASSESSMENT_SCHEMA,
+        },
     },
 }
 
@@ -93,13 +106,17 @@ def _validated(result: object) -> dict:
 
     Structural only: exact key set, mode enum, non-blank report,
     assessments list shape with mode-appropriate emptiness,
-    candidate_id pre-checks, and duplicate-free candidate_ids (a
+    per-assessment exact workflow-input field set, candidate_id
+    pre-checks, and duplicate-free candidate_ids (a
     repeated id would collapse two staged payloads onto one
     `<staging>/<candidate_id>.json` path and bypass the scan
     helper's conflict logic, so identical and divergent duplicates
-    are both rejected here, before any write). The scan helper's
-    shared prepare/commit path performs the full envelope
-    validation before anything becomes authoritative.
+    are both rejected here, before any write). The per-assessment
+    field-set check mirrors the validator's own exact-set rule, so
+    it can never reject anything the deterministic validator would
+    accept; full envelope validation still happens in the scan
+    helper's shared prepare/commit path before anything becomes
+    authoritative.
     """
     if not isinstance(result, dict) or set(result) != set(FIELDS):
         raise BridgeError("Malformed Radar Claude result")
@@ -116,9 +133,15 @@ def _validated(result: object) -> dict:
             raise BridgeError("Malformed Radar Claude result")
     elif not assessments:
         raise BridgeError("Malformed Radar Claude result")
+    required_assessment_fields = set(ASSESSMENT_SCHEMA["required"])
     seen_ids: set[str] = set()
     for item in assessments:
         if not isinstance(item, dict):
+            raise BridgeError("Malformed Radar Claude result")
+        # Legacy/editorial shapes (unknown fields such as score or
+        # audience_value, or missing workflow fields) fail here,
+        # before any scan contact or write.
+        if set(item) != required_assessment_fields:
             raise BridgeError("Malformed Radar Claude result")
         candidate_id = item.get("candidate_id")
         if (
