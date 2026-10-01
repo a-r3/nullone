@@ -18,7 +18,8 @@ Status: canonical project context for repository/project continuity. Production 
   max, no publication, deterministic packaging authority, bridge
   backstop) is unchanged.
 - Security posture change (reviewed, probed): the model holds NO
-  shell/file authority (Read/WebSearch/WebFetch/Glob/Grep only);
+  shell/write authority (Read/WebSearch/WebFetch/Glob only). Grep was
+  dropped fail-closed because its deny rules proved unenforceable;
   deterministic Python performs every write and the five exact
   reviewed helper invocations. The OpenCode exact-command Bash
   allowlist and path-scoped Write/Edit rules are NOT reproducible
