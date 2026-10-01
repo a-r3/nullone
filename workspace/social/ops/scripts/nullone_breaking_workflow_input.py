@@ -97,6 +97,141 @@ _MAIN_FINDING_FIELDS = frozenset(
 _PRODUCT_VERSION_REGION_FIELDS = frozenset({"product", "version", "region"})
 
 
+def assessment_json_schema() -> dict[str, Any]:
+    """Return the JSON Schema for one exact workflow-input assessment.
+
+    Generated deterministically from this module's own field-set and
+    vocabulary constants, so a structured-output schema built from it
+    cannot drift from the authoritative validator: any field or enum
+    added, removed, or renamed here flows into the schema
+    automatically. Cross-field rules (evidence-ref matching,
+    PASS-gated severity, EXCEPTIONAL-gated main_assessment) are not
+    expressible in JSON Schema and stay exclusively with
+    `validate_breaking_workflow_input`, which remains the final
+    authority. The schema is therefore never stricter than the
+    validator -- anything the validator accepts also satisfies it.
+    """
+
+    from nullone_breaking_identity import FOLLOW_UP_REASONS
+
+    text = {"type": "string", "minLength": 1}
+    nullable_text = {"type": ["string", "null"], "minLength": 1}
+
+    def exact_object(
+        fields: frozenset[str], properties: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": sorted(fields),
+            "properties": properties,
+        }
+
+    evidence_item = exact_object(
+        _EVIDENCE_REQUIRED_FIELDS | _EVIDENCE_OPTIONAL_FIELDS,
+        {
+            "ref": text,
+            "supported_claim": text,
+            **{name: nullable_text for name in sorted(_EVIDENCE_OPTIONAL_FIELDS)},
+        },
+    )
+
+    follow_up = exact_object(
+        _FOLLOW_UP_FIELDS,
+        {
+            "delta_kind": {
+                "type": "string",
+                "enum": sorted(FOLLOW_UP_REASONS),
+            },
+            "parent_claim": text,
+            "new_claim": text,
+            "evidence_ref": text,
+        },
+    )
+
+    main_findings = exact_object(
+        _MAIN_FINDING_FIELDS,
+        {
+            "feed_score": {"type": "integer", "minimum": 0},
+            "carousel_score": {"type": "integer", "minimum": 0},
+            **{
+                name: {"type": "boolean"}
+                for name in sorted(_MAIN_FINDING_FIELDS - {"feed_score", "carousel_score"})
+            },
+        },
+    )
+    main_assessment = exact_object(
+        _MAIN_ASSESSMENT_FIELDS,
+        {
+            "standalone_justification": text,
+            "findings": main_findings,
+        },
+    )
+
+    properties: dict[str, Any] = {
+        "schema": {"type": "string", "const": SCHEMA},
+        "contract_version": {"type": "string", "const": CONTRACT_VERSION},
+        "candidate_id": text,
+        "candidate_version": nullable_text,
+        "assessment_ref": text,
+        "state_snapshot_ref": text,
+        "topic": text,
+        "topic_cluster": text,
+        "content_type": {"type": "string", "enum": sorted(CONTENT_TYPES)},
+        "evidence": {"type": "array", "minItems": 1, "items": evidence_item},
+        "follow_up_delta": {"anyOf": [{"type": "null"}, follow_up]},
+        "source_attribution": text,
+        "limitations": {"type": "array", "items": text, "uniqueItems": True},
+        "product_version_region": exact_object(
+            _PRODUCT_VERSION_REGION_FIELDS,
+            {name: nullable_text for name in sorted(_PRODUCT_VERSION_REGION_FIELDS)},
+        ),
+        "source_image": nullable_text,
+        "verification": exact_object(
+            _VERIFICATION_FIELDS,
+            {
+                "state": {
+                    "type": "string",
+                    "enum": sorted(VERIFICATION_STATES),
+                },
+                "evidence_refs": {"type": "array", "items": text},
+            },
+        ),
+        "severity_assessment": exact_object(
+            _SEVERITY_FIELDS,
+            {
+                "classification": {
+                    "anyOf": [
+                        {"type": "string", "enum": sorted(SEVERITIES)},
+                        {"type": "null"},
+                    ]
+                },
+                "reason_text": nullable_text,
+            },
+        ),
+        "recent_coverage": exact_object(
+            _RECENT_COVERAGE_FIELDS,
+            {
+                "related_coverage_exists": {"type": "boolean"},
+                "incremental_value_present": {"type": "boolean"},
+                "assessment_ref": text,
+                "freshness_ref": text,
+            },
+        ),
+        "story_safety": exact_object(
+            _STORY_SAFETY_FIELDS,
+            {
+                "quality_pass": {"type": "boolean"},
+                "quality_ref": text,
+                "dependencies_available": {"type": "boolean"},
+                "dependencies_ref": text,
+            },
+        ),
+        "main_assessment": {"anyOf": [{"type": "null"}, main_assessment]},
+    }
+    return exact_object(_TOP_LEVEL_FIELDS, properties)
+
+
 class BreakingWorkflowInputError(ValueError):
     """The Radar-to-workflow handoff is malformed or unsupported."""
 
