@@ -3,6 +3,18 @@
 Last updated: 2026-10-02 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
+## Breaking Radar safe failure-stage telemetry — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- Radar natural success on 2026-10-01 20:30 Asia/Baku (`ROLE_OUTCOME=COMPLETED`).
+- Subsequent natural failures at 2026-10-01 23:30, then 2026-10-02 11:30, 14:30, 17:30 Asia/Baku, all surfacing only as `ROLE_OUTCOME=BLOCKED reason=BridgeError`.
+- Route remained `role=breaking_radar`, `transport=claude`, `model=haiku`, `timeout=600`, `fallback=none`.
+- No 2026-10-02 Radar authoritative artifacts were produced (no Breaking report/handoff/receipt).
+- Current exact inner cause remains UNCONFIRMED because existing logging collapsed failures to generic `BridgeError` (runner printed only `type(e).__name__`).
+- This branch adds safe failure-stage observability only (`RadarStageError` with stable `reason_code`: `CLAUDE_TIMEOUT`, `CLAUDE_BINARY_MISSING`, `CLAUDE_EXIT_NONZERO`, `CLAUDE_OUTPUT_INVALID`, `RESULT_VALIDATION`, `SCAN_IDENTITY`, `EMPTY_SCAN_RECEIPT`, `BATCH_PREFLIGHT`, `REPORT_WRITE`, `STAGING_WRITE`, `COMMIT`, `UNKNOWN_RADAR_FAILURE`; runner emits `ROLE_OUTCOME=BLOCKED reason=RadarStageError code=<CODE>` with numeric `exit=` only for nonzero Claude exits; no raw stdout/stderr, prompts, fetched content, URLs, source text, signed URLs, tokens, secrets, or credentials).
+- No production deployment yet. Do not claim root cause fixed.
+- Separate Draft Factory PR #198 recovery is independent.
+- Do not close #196. Do not close #194.
+
 ## Draft Factory queue status-history recovery — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
 
 - The first two natural post-PR #195 Draft Factory runs, at 09:45 and

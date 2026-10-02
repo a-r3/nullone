@@ -33,6 +33,40 @@ from nullone_bridge_common import BridgeError, WORKSPACE
 import nullone_provider_adapter as provider_adapter
 import nullone_provider_router as provider_router
 
+try:
+    from nullone_claude_radar_provider import (
+        ALLOWED_RADAR_REASON_CODES,
+        RadarStageError,
+    )
+except Exception:  # pragma: no cover - import safety net, fail-closed below
+    ALLOWED_RADAR_REASON_CODES = frozenset({"UNKNOWN_RADAR_FAILURE"})
+
+    class RadarStageError(BridgeError):  # type: ignore[no-redef]
+        def __init__(self, reason_code: str = "UNKNOWN_RADAR_FAILURE", **kwargs):
+            self.reason_code = "UNKNOWN_RADAR_FAILURE"
+            self.exit_code = None
+            super().__init__("Radar stage failure: UNKNOWN_RADAR_FAILURE")
+
+
+def format_radar_stage_blocked(exc: BaseException) -> str:
+    """Safe deterministic BLOCKED line for a RadarStageError.
+
+    Exposes only the stable reason code and, for nonzero Claude
+    exits, the numeric exit code. Never includes raw exception
+    text, prompts, fetched content, URLs, or secrets.
+    """
+    code = getattr(exc, "reason_code", "UNKNOWN_RADAR_FAILURE")
+    if not isinstance(code, str) or code not in ALLOWED_RADAR_REASON_CODES:
+        code = "UNKNOWN_RADAR_FAILURE"
+    exit_code = getattr(exc, "exit_code", None)
+    if (
+        code == "CLAUDE_EXIT_NONZERO"
+        and isinstance(exit_code, int)
+        and not isinstance(exit_code, bool)
+    ):
+        return f"ROLE_OUTCOME=BLOCKED reason=RadarStageError code={code} exit={exit_code}"
+    return f"ROLE_OUTCOME=BLOCKED reason=RadarStageError code={code}"
+
 ROLE = "breaking-radar"
 AGENT = "nullone-breaking-radar"
 PROMPT_PATH = WORKSPACE / "social/ops/prompts/breaking-radar.md"
@@ -140,6 +174,10 @@ def execute() -> int:
     started = time.time()
     try:
         outcome = provider_adapter.invoke_role_cycle(profile, prompt, WORKSPACE)
+    except RadarStageError as e:
+        print(format_radar_stage_blocked(e))
+        print(provider_router.format_routing_metadata(profile, "BLOCKED"))
+        return 1
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
         print(provider_router.format_routing_metadata(profile, "BLOCKED"))
