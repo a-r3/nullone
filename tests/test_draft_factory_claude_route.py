@@ -390,6 +390,49 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             b"- [ ] candidate-a | Topic A | status=READY\n"
         ).eligible(), {})
 
+    def test_production_historical_status_transitions_are_ineligible(self):
+        legacy = "- **topic:** Legacy Topic\n- **status:** READY\n"
+        current = queue_entry("openai-misalignment-framework-2026-09-20")
+        cases = (
+            (legacy + "- **status:** PUBLISHED\n", None, "PUBLISHED"),
+            (legacy + "- **status:** DRAFTED\n", None, "DRAFTED"),
+            (current + "- **status:** DRAFTED\n",
+             "openai-misalignment-framework-2026-09-20", "DRAFTED"),
+            (queue_entry(status="DRAFTED") + "- **status:** PUBLISHED\n",
+             "post-probe-two", "PUBLISHED"),
+            (current + "- **status:** DRAFTED\n- **status:** PUBLISHED\n",
+             "openai-misalignment-framework-2026-09-20", "PUBLISHED"),
+        )
+        for content, candidate_id, final_status in cases:
+            with self.subTest(candidate_id=candidate_id, final_status=final_status):
+                original = content.encode("utf-8")
+                snapshot = draft_queue.parse_queue(original)
+                self.assertEqual(snapshot.data, original)
+                self.assertEqual(len(snapshot.entries), 1)
+                entry = snapshot.entries[0]
+                self.assertEqual(entry.raw, original)
+                self.assertEqual(entry.candidate_id, candidate_id)
+                self.assertEqual(entry.status, final_status)
+                self.assertEqual(
+                    snapshot.lines[entry.status_line].strip(),
+                    f"- **status:** {final_status}".encode(),
+                )
+                self.assertEqual(snapshot.eligible(), {})
+
+    def test_unreviewed_status_history_and_other_duplicate_fields_fail_closed(self):
+        base = queue_entry()
+        cases = (
+            base + "- **status:** READY\n",
+            queue_entry(status="DRAFTED") + "- **status:** READY\n",
+            queue_entry(status="PUBLISHED") + "- **status:** READY\n",
+            queue_entry(status="PUBLISHED") + "- **status:** DRAFTED\n",
+            base + "- **topic_cluster:** another-cluster\n",
+            base + "- **candidate_id:** another-candidate\n",
+        )
+        for content in cases:
+            with self.subTest(content=content), self.assertRaises(BridgeError):
+                draft_queue.parse_queue(content.encode())
+
     def test_exact_status_flip_preserves_other_bytes(self):
         original = (
             b"# Queue\r\n\r\n"

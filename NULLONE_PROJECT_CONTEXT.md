@@ -1,7 +1,37 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-10-01 Asia/Baku
+Last updated: 2026-10-02 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
+
+## Draft Factory queue status-history recovery — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- The first two natural post-PR #195 Draft Factory runs, at 09:45 and
+  15:45 Asia/Baku, failed closed before Claude selection with
+  `BridgeError: Duplicate Draft queue field: status`.
+- Production routing was correct: `draft_factory` → Claude/Sonnet,
+  timeout 900, fallback none. The failure was in the Draft-only queue
+  parser, which rejected historical append-style duplicate `status`
+  fields in already non-READY entries.
+- Read-only production audit found 124 blocks (71 current, 53 legacy)
+  and three duplicate `status` histories: legacy READY → PUBLISHED,
+  legacy READY → DRAFTED, and current
+  `openai-misalignment-framework-2026-09-20` READY → DRAFTED. No other
+  duplicate fields were observed. The production queue was not modified.
+- Branch `fix/draft-queue-status-history` permits only reviewed forward
+  historical status transitions while preserving queue bytes and strict
+  READY eligibility. This repository fix is not a production deployment.
+  Issue #194 remains OPEN; successful natural production proof is pending.
+- Read-only validation of the actual production queue after this parser
+  change still fails closed: current entry
+  `openai-gpt6-1-astra-safety-halt` has `status: SKIPPED` but lacks the
+  required `content_type`. This distinct malformed-entry blocker was not
+  waived by the status-history fix, and the production queue remains
+  untouched. An in-memory diagnostic that supplied that missing field
+  counted 124 entries and 36 eligible READY entries, with
+  `openai-misalignment-framework-2026-09-20` resolving to DRAFTED and
+  ineligible; those counts are not a successful parse of the actual file.
+- The separate Breaking Radar BridgeError investigation is outside this
+  Draft Factory runtime fix.
 
 ## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
 
