@@ -94,6 +94,20 @@ from nullone_claude import run_structured
 from nullone_draft_candidate_queue import (
     QUEUE_PATH, flip_ready_to_drafted, load_queue,
 )
+from nullone_packaging_policy import (
+    AUDIENCE_VALUE_VALUES,
+    CONTENT_SHAPES,
+    CONTENT_TYPES as PACKAGING_CONTENT_TYPES,
+    SOURCE_GROUNDING_VALUES,
+    TIMELINESS_VALUES,
+    VERIFICATION_VALUES,
+)
+from nullone_packaging_receipt import (
+    ASSET_DESCRIPTOR_SCHEMA,
+    FILE_BACKED_ASSET_KINDS,
+    STYLE_TO_ASSET_KIND,
+    VISUAL_REQUIREMENT_VALUES,
+)
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch", "Glob"]
 
@@ -166,6 +180,53 @@ SECRET_VALUE_PATTERN = re.compile(
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
+# Authoritative packaging signal contract for the SELECT boundary.
+# Single source of truth lives in nullone_packaging_policy /
+# nullone_packaging_receipt; referenced here by import, never
+# redefined with an independent vocabulary.
+PACKAGING_CANDIDATE_FIELDS = (
+    "content_type",
+    "content_shape",
+    "timeliness",
+    "verification_status",
+    "source_grounding",
+    "audience_value",
+    "distinct_beat_count",
+    "depicts_real_world_subject",
+    "still_developing",
+    "visual_requirement",
+)
+
+PACKAGING_ASSET_BOOL_FIELDS = (
+    "has_official_or_source_image",
+    "has_usable_screenshot",
+    "image_on_topic",
+    "image_quality_ok",
+    "data_visualization_possible",
+)
+
+# Evaluator outputs: the model assesses raw signals only and must
+# never submit these (mirrors MODEL_FORBIDDEN_REQUEST_FIELDS in the
+# deterministic evaluator CLI; rejected here before any write).
+MODEL_FORBIDDEN_CANDIDATE_FIELDS = frozenset(
+    {"FORMAT_DECISION", "FORMAT_REASON", "VISUAL_STYLE", "slide_count_recommendation"}
+)
+
+# Asset kinds a SELECT descriptor may claim (the receipt's
+# STYLE_TO_ASSET_KIND values; receipt/style matching authority stays
+# downstream with the deterministic render validator).
+SELECT_ASSET_KINDS = frozenset(STYLE_TO_ASSET_KIND.values())
+
+SELECT_ASSET_DESCRIPTOR_REQUIRED = (
+    "schema",
+    "candidate_id",
+    "asset_kind",
+    "local_path",
+    "provenance",
+)
+
+SELECT_ASSET_DESCRIPTOR_OPTIONAL = ("sha256", "source_url")
+
 SELECT_FIELDS = ("decision", "ranked", "notes")
 SELECT_DECISIONS = ("SELECT", "NO_ACTION")
 
@@ -194,8 +255,83 @@ SELECT_SCHEMA = {
                     "topic": {"type": "string", "minLength": 1},
                     "topic_cluster": {"type": "string", "minLength": 1},
                     "content_type": {"type": "string", "minLength": 1},
-                    "packaging_request": {"type": "object"},
-                    "asset": {"type": "object"},
+                    "packaging_request": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ("candidate", "assets"),
+                        "properties": {
+                            "candidate": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": list(PACKAGING_CANDIDATE_FIELDS),
+                                "properties": {
+                                    "content_type": {
+                                        "type": "string",
+                                        "enum": sorted(PACKAGING_CONTENT_TYPES),
+                                    },
+                                    "content_shape": {
+                                        "type": "string",
+                                        "enum": sorted(CONTENT_SHAPES),
+                                    },
+                                    "timeliness": {
+                                        "type": "string",
+                                        "enum": sorted(TIMELINESS_VALUES),
+                                    },
+                                    "verification_status": {
+                                        "type": "string",
+                                        "enum": sorted(VERIFICATION_VALUES),
+                                    },
+                                    "source_grounding": {
+                                        "type": "string",
+                                        "enum": sorted(SOURCE_GROUNDING_VALUES),
+                                    },
+                                    "audience_value": {
+                                        "type": "string",
+                                        "enum": sorted(AUDIENCE_VALUE_VALUES),
+                                    },
+                                    "distinct_beat_count": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                    },
+                                    "depicts_real_world_subject": {"type": "boolean"},
+                                    "still_developing": {"type": "boolean"},
+                                    "visual_requirement": {
+                                        "type": "string",
+                                        "enum": sorted(VISUAL_REQUIREMENT_VALUES),
+                                    },
+                                },
+                            },
+                            "assets": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": list(PACKAGING_ASSET_BOOL_FIELDS),
+                                "properties": {
+                                    field: {"type": "boolean"}
+                                    for field in PACKAGING_ASSET_BOOL_FIELDS
+                                },
+                            },
+                        },
+                    },
+                    "asset": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(SELECT_ASSET_DESCRIPTOR_REQUIRED),
+                        "properties": {
+                            "schema": {
+                                "type": "string",
+                                "enum": [ASSET_DESCRIPTOR_SCHEMA],
+                            },
+                            "candidate_id": {"type": "string", "minLength": 1},
+                            "asset_kind": {
+                                "type": "string",
+                                "enum": sorted(SELECT_ASSET_KINDS),
+                            },
+                            "local_path": {"type": ["string", "null"]},
+                            "provenance": {"type": ["string", "null"]},
+                            "sha256": {"type": ["string", "null"]},
+                            "source_url": {"type": ["string", "null"]},
+                        },
+                    },
                 },
             },
         },
@@ -292,7 +428,19 @@ def draft_security_settings(workspace: Path) -> dict:
 
 
 def _validated_select(result: object) -> dict:
-    """Structural validation for the SELECT round (fail closed)."""
+    """Structural validation for the SELECT round (fail closed).
+
+    Enforces the deterministic packaging evaluator input contract
+    at the structured-output boundary, BEFORE any production file
+    write: packaging_request must carry exactly the authoritative
+    candidate + assets objects (no model-owned FORMAT_DECISION /
+    FORMAT_REASON / VISUAL_STYLE / slide_count_recommendation), the
+    nested candidate content_type must equal the item's top-level
+    content_type (single authority chain with the queue check), and
+    the asset descriptor must be structurally valid
+    (`nullone.packaging-asset.v1`). Receipt/style semantic authority
+    stays downstream with the deterministic render validator.
+    """
     if not isinstance(result, dict) or set(result) != set(SELECT_FIELDS):
         raise BridgeError("Malformed Draft Factory SELECT result")
     if result["decision"] not in SELECT_DECISIONS:
@@ -320,11 +468,104 @@ def _validated_select(result: object) -> dict:
         for key in ("candidate_id", "topic", "topic_cluster", "content_type"):
             if not isinstance(item[key], str) or not item[key].strip():
                 raise BridgeError("Malformed Draft Factory SELECT result")
-        if not isinstance(item["packaging_request"], dict):
-            raise BridgeError("Malformed Draft Factory SELECT result")
-        if not isinstance(item["asset"], dict):
-            raise BridgeError("Malformed Draft Factory SELECT result")
+        _validate_select_packaging_request(item)
+        _validate_select_asset_descriptor(item)
     return result
+
+
+def _validate_select_packaging_request(item: dict) -> None:
+    """Validate one ranked item's packaging_request (fail closed)."""
+    request = item["packaging_request"]
+    if not isinstance(request, dict):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    if set(request) != {"candidate", "assets"}:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    candidate = request["candidate"]
+    if not isinstance(candidate, dict):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    for forbidden in MODEL_FORBIDDEN_CANDIDATE_FIELDS:
+        if forbidden in candidate:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    if set(candidate) != set(PACKAGING_CANDIDATE_FIELDS):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    enum_checks = (
+        ("content_type", PACKAGING_CONTENT_TYPES),
+        ("content_shape", CONTENT_SHAPES),
+        ("timeliness", TIMELINESS_VALUES),
+        ("verification_status", VERIFICATION_VALUES),
+        ("source_grounding", SOURCE_GROUNDING_VALUES),
+        ("audience_value", AUDIENCE_VALUE_VALUES),
+        ("visual_requirement", VISUAL_REQUIREMENT_VALUES),
+    )
+    for field, allowed in enum_checks:
+        value = candidate[field]
+        if not isinstance(value, str) or value not in allowed:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    beats = candidate["distinct_beat_count"]
+    if isinstance(beats, bool) or not isinstance(beats, int) or beats < 0:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    for field in ("depicts_real_world_subject", "still_developing"):
+        if not isinstance(candidate[field], bool):
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    # Single content_type authority: the nested packaging candidate
+    # must agree with the SELECT item's top-level content_type (which
+    # the later queue identity check binds to the eligible entry).
+    # Otherwise the receipt would bind one type while the manifest
+    # builds from another.
+    if candidate["content_type"] != item["content_type"]:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    assets = request["assets"]
+    if not isinstance(assets, dict):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    if set(assets) != set(PACKAGING_ASSET_BOOL_FIELDS):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    for field in PACKAGING_ASSET_BOOL_FIELDS:
+        if not isinstance(assets[field], bool):
+            raise BridgeError("Malformed Draft Factory SELECT result")
+
+
+def _validate_select_asset_descriptor(item: dict) -> None:
+    """Validate one ranked item's asset descriptor shape (fail closed).
+
+    Structural only: authoritative `nullone.packaging-asset.v1`
+    field set, schema literal, candidate binding, asset-kind
+    vocabulary, and file-backed vs NONE path/provenance shape.
+    Receipt/style matching authority stays downstream.
+    """
+    descriptor = item["asset"]
+    if not isinstance(descriptor, dict):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    allowed_keys = set(SELECT_ASSET_DESCRIPTOR_REQUIRED) | set(
+        SELECT_ASSET_DESCRIPTOR_OPTIONAL
+    )
+    if not set(SELECT_ASSET_DESCRIPTOR_REQUIRED) <= set(descriptor) <= allowed_keys:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    if descriptor["schema"] != ASSET_DESCRIPTOR_SCHEMA:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    if (
+        not isinstance(descriptor["candidate_id"], str)
+        or not descriptor["candidate_id"].strip()
+        or descriptor["candidate_id"] != item["candidate_id"]
+    ):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    kind = descriptor["asset_kind"]
+    if kind not in SELECT_ASSET_KINDS:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    local_path = descriptor["local_path"]
+    provenance = descriptor["provenance"]
+    if kind in FILE_BACKED_ASSET_KINDS:
+        if not isinstance(local_path, str) or not local_path.strip():
+            raise BridgeError("Malformed Draft Factory SELECT result")
+        if not isinstance(provenance, str) or not provenance.strip():
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    elif local_path is not None:
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    elif provenance is not None and not isinstance(provenance, str):
+        raise BridgeError("Malformed Draft Factory SELECT result")
+    for field in SELECT_ASSET_DESCRIPTOR_OPTIONAL:
+        value = descriptor.get(field)
+        if value is not None and not isinstance(value, str):
+            raise BridgeError("Malformed Draft Factory SELECT result")
 
 
 def _validated_produce(result: object, *, carousel: bool) -> dict:
@@ -932,6 +1173,34 @@ def self_test() -> int:
         raise AssertionError("draft produce schema fields drifted")
     if set(COMPLETE_FIELDS) != {"ledger_record", "report_markdown"}:
         raise AssertionError("draft complete schema fields drifted")
+    # SELECT packaging contract binding: the schema and validator
+    # share the authoritative policy/receipt vocabularies, so a
+    # contract evolution fails loudly here instead of drifting.
+    if set(PACKAGING_CANDIDATE_FIELDS) != {
+        "content_type",
+        "content_shape",
+        "timeliness",
+        "verification_status",
+        "source_grounding",
+        "audience_value",
+        "distinct_beat_count",
+        "depicts_real_world_subject",
+        "still_developing",
+        "visual_requirement",
+    }:
+        raise AssertionError("draft select candidate fields drifted")
+    if set(PACKAGING_ASSET_BOOL_FIELDS) != {
+        "has_official_or_source_image",
+        "has_usable_screenshot",
+        "image_on_topic",
+        "image_quality_ok",
+        "data_visualization_possible",
+    }:
+        raise AssertionError("draft select asset fields drifted")
+    if SELECT_ASSET_KINDS != frozenset(STYLE_TO_ASSET_KIND.values()):
+        raise AssertionError("draft select asset kinds drifted")
+    if VISUAL_REQUIREMENT_VALUES != frozenset({"NONE", "SOURCE_GROUNDED"}):
+        raise AssertionError("draft select visual_requirement drifted")
     for bad in (None, {}, {"decision": "SELECT", "ranked": [], "notes": "n"}):
         try:
             _validated_select(bad)
