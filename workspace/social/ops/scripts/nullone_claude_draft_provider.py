@@ -434,7 +434,9 @@ def _validated_select(result: object) -> dict:
     at the structured-output boundary, BEFORE any production file
     write: packaging_request must carry exactly the authoritative
     candidate + assets objects (no model-owned FORMAT_DECISION /
-    FORMAT_REASON / VISUAL_STYLE / slide_count_recommendation), and
+    FORMAT_REASON / VISUAL_STYLE / slide_count_recommendation), the
+    nested candidate content_type must equal the item's top-level
+    content_type (single authority chain with the queue check), and
     the asset descriptor must be structurally valid
     (`nullone.packaging-asset.v1`). Receipt/style semantic authority
     stays downstream with the deterministic render validator.
@@ -505,6 +507,13 @@ def _validate_select_packaging_request(item: dict) -> None:
     for field in ("depicts_real_world_subject", "still_developing"):
         if not isinstance(candidate[field], bool):
             raise BridgeError("Malformed Draft Factory SELECT result")
+    # Single content_type authority: the nested packaging candidate
+    # must agree with the SELECT item's top-level content_type (which
+    # the later queue identity check binds to the eligible entry).
+    # Otherwise the receipt would bind one type while the manifest
+    # builds from another.
+    if candidate["content_type"] != item["content_type"]:
+        raise BridgeError("Malformed Draft Factory SELECT result")
     assets = request["assets"]
     if not isinstance(assets, dict):
         raise BridgeError("Malformed Draft Factory SELECT result")

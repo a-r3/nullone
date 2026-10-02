@@ -435,6 +435,35 @@ class SelectPackagingContractTests(unittest.TestCase):
                 bad["packaging_request"] = {"candidate": None, "assets": {}}
                 draft._validated_select(select_result([bad]))
 
+    def test_17_split_content_type_authority_rejected_before_write(self):
+        # Top-level NEWS + nested EXPLAINER: structurally valid enums,
+        # but split authority (receipt would bind EXPLAINER while the
+        # manifest builds from queue NEWS).
+        item = ranked_item()
+        self.assertEqual(item["content_type"], "NEWS")
+        item["packaging_request"]["candidate"]["content_type"] = "EXPLAINER"
+        with self.assertRaises(BridgeError):
+            draft._validated_select(select_result([item]))
+        error, helper_calls = self._invoke_select(item)
+        self.assertIsNotNone(error)
+        self.assertEqual(helper_calls, 0)
+
+    def test_18_matching_content_type_passes(self):
+        item = ranked_item()
+        item["content_type"] = "EXPLAINER"
+        item["packaging_request"]["candidate"]["content_type"] = "EXPLAINER"
+        validated = draft._validated_select(select_result([item]))
+        self.assertEqual(
+            validated["ranked"][0]["packaging_request"]["candidate"]["content_type"],
+            validated["ranked"][0]["content_type"],
+        )
+        # The default NEWS/NEWS chain passes as well.
+        defaulted = draft._validated_select(select_result([ranked_item()]))
+        self.assertEqual(
+            defaulted["ranked"][0]["packaging_request"]["candidate"]["content_type"],
+            "NEWS",
+        )
+
     def test_16_no_production_writes(self):
         before = workspace_prod_snapshot()
         with tempfile.TemporaryDirectory() as td:

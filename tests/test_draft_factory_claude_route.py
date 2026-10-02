@@ -352,7 +352,12 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 queue = write_queue(root, queue_entry())
-                selected = select_result([ranked_item("post-probe-two", **{field: value})])
+                item = ranked_item("post-probe-two", **{field: value})
+                if field == "content_type":
+                    # Keep the SELECT-internal authority chain intact so
+                    # this case still exercises the queue identity check.
+                    item["packaging_request"]["candidate"]["content_type"] = value
+                selected = select_result([item])
                 with mock.patch.object(draft, "run_structured", return_value=selected), \
                         mock.patch.object(draft, "_run_helper") as helper:
                     with self.assertRaisesRegex(BridgeError, "identity disagrees"):
