@@ -419,6 +419,51 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 )
                 self.assertEqual(snapshot.eligible(), {})
 
+    def test_nonready_current_entries_need_only_identity_fields(self):
+        cases = (
+            ("SKIPPED", ("content_type",)),
+            ("SKIPPED", ("topic_cluster", "content_type")),
+            ("DRAFTED", ("content_type",)),
+            ("PUBLISHED", ("topic_cluster", "content_type")),
+            ("RESEARCHING", ("topic_cluster", "content_type")),
+            ("DEFERRED", ("topic_cluster", "content_type")),
+        )
+        for status, missing in cases:
+            with self.subTest(status=status, missing=missing):
+                content = queue_entry(status=status)
+                for field in missing:
+                    value = "probe" if field == "topic_cluster" else "NEWS"
+                    content = content.replace(f"- **{field}:** {value}\n", "")
+                original = content.encode()
+                snapshot = draft_queue.parse_queue(original)
+                self.assertEqual(len(snapshot.entries), 1)
+                self.assertEqual(snapshot.entries[0].status, status)
+                self.assertEqual(snapshot.entries[0].raw, original)
+                self.assertEqual(snapshot.eligible(), {})
+
+    def test_ready_current_entries_require_both_selection_fields(self):
+        for missing in (("content_type",), ("topic_cluster",),
+                        ("topic_cluster", "content_type")):
+            with self.subTest(missing=missing):
+                content = queue_entry()
+                for field in missing:
+                    value = "probe" if field == "topic_cluster" else "NEWS"
+                    content = content.replace(f"- **{field}:** {value}\n", "")
+                with self.assertRaisesRegex(BridgeError, "Malformed current"):
+                    draft_queue.parse_queue(content.encode())
+
+    def test_nonready_current_entries_still_require_identity(self):
+        base = queue_entry(status="SKIPPED")
+        cases = (
+            base.replace("- **candidate_id:** post-probe-two\n",
+                         "- **candidate_id:** \n"),
+            base.replace("- **topic:** Probe topic\n", ""),
+            base.replace("- **status:** SKIPPED\n", ""),
+        )
+        for content in cases:
+            with self.subTest(content=content), self.assertRaises(BridgeError):
+                draft_queue.parse_queue(content.encode())
+
     def test_unreviewed_status_history_and_other_duplicate_fields_fail_closed(self):
         base = queue_entry()
         cases = (
@@ -428,6 +473,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             queue_entry(status="PUBLISHED") + "- **status:** DRAFTED\n",
             base + "- **topic_cluster:** another-cluster\n",
             base + "- **candidate_id:** another-candidate\n",
+            queue_entry(status="SKIPPED") + "- **content_type:** EVERGREEN\n",
         )
         for content in cases:
             with self.subTest(content=content), self.assertRaises(BridgeError):

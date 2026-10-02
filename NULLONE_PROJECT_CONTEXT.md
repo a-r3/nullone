@@ -21,15 +21,19 @@ Status: canonical project context for repository/project continuity. Production 
   historical status transitions while preserving queue bytes and strict
   READY eligibility. This repository fix is not a production deployment.
   Issue #194 remains OPEN; successful natural production proof is pending.
-- Read-only validation of the actual production queue after this parser
-  change still fails closed: current entry
-  `openai-gpt6-1-astra-safety-halt` has `status: SKIPPED` but lacks the
-  required `content_type`. This distinct malformed-entry blocker was not
-  waived by the status-history fix, and the production queue remains
-  untouched. An in-memory diagnostic that supplied that missing field
-  counted 124 entries and 36 eligible READY entries, with
-  `openai-misalignment-framework-2026-09-20` resolving to DRAFTED and
-  ineligible; those counts are not a successful parse of the actual file.
+- A full read-only production schema audit found one second blocker: the
+  current historical entry `openai-gpt6-1-astra-safety-halt` has final
+  `SKIPPED` status but lacks `content_type`. No READY current entry was
+  malformed (`READY_MALFORMED=0`), and no current duplicate non-status
+  fields were found. The parser now requires `candidate_id`, `topic`, and
+  `status` for every current entry, and full selection metadata only when
+  its final status is exact `READY`. The SKIPPED entry remains ineligible.
+- The branch parser now passes against the actual production queue read-only:
+  124 entries parsed and 36 eligible READY entries.
+  `openai-misalignment-framework-2026-09-20` resolves to DRAFTED and is
+  ineligible; `openai-gpt6-1-astra-safety-halt` resolves to SKIPPED and is
+  ineligible. Production queue bytes were not modified. The repository fix
+  remains undeployed, and natural production proof is still pending.
 - The separate Breaking Radar BridgeError investigation is outside this
   Draft Factory runtime fix.
 

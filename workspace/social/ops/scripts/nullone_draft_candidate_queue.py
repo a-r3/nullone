@@ -91,9 +91,10 @@ def parse_queue(data: bytes) -> QueueSnapshot:
             return
         candidate_id = fields.get("candidate_id") if current else None
         topic = fields.get("topic")
-        if current and (
-            not candidate_id or not topic or not fields.get("topic_cluster")
-            or not fields.get("content_type") or not fields.get("status")
+        if current and (not candidate_id or not topic or not fields.get("status")):
+            raise BridgeError("Malformed current Draft queue entry")
+        if current and fields["status"] == "READY" and (
+            not fields.get("topic_cluster") or not fields.get("content_type")
         ):
             raise BridgeError("Malformed current Draft queue entry")
         if not topic:
