@@ -42,6 +42,22 @@ from zoneinfo import ZoneInfo
 from nullone_bridge_common import BridgeError
 from nullone_breaking_workflow_input import assessment_json_schema
 from nullone_claude import run_structured
+from nullone_radar_stage_error import (
+    ALLOWED_RADAR_REASON_CODES,
+    RADAR_REASON_BATCH_PREFLIGHT,
+    RADAR_REASON_CLAUDE_BINARY_MISSING,
+    RADAR_REASON_CLAUDE_EXIT_NONZERO,
+    RADAR_REASON_CLAUDE_OUTPUT_INVALID,
+    RADAR_REASON_CLAUDE_TIMEOUT,
+    RADAR_REASON_COMMIT,
+    RADAR_REASON_EMPTY_SCAN_RECEIPT,
+    RADAR_REASON_REPORT_WRITE,
+    RADAR_REASON_RESULT_VALIDATION,
+    RADAR_REASON_SCAN_IDENTITY,
+    RADAR_REASON_STAGING_WRITE,
+    RADAR_REASON_UNKNOWN,
+    RadarStageError,
+)
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch"]
 
@@ -83,66 +99,6 @@ SCAN_SOURCE = "openclaw"
 REPORT_GLOB_HINT = "breaking"
 
 BAKU_ZONE = "Asia/Baku"
-
-# Safe failure-stage telemetry (no raw transport content, ever).
-#
-# Every Radar failure surfaces as RadarStageError with a stable
-# machine-readable reason_code. Only the code, the stage name
-# (identical to the code), and -- for nonzero Claude exits -- a
-# numeric exit code are observable. Raw stdout/stderr, prompt text,
-# fetched content, model/tool URLs, source text, signed URLs, and
-# secrets are never included.
-RADAR_REASON_CLAUDE_TIMEOUT = "CLAUDE_TIMEOUT"
-RADAR_REASON_CLAUDE_BINARY_MISSING = "CLAUDE_BINARY_MISSING"
-RADAR_REASON_CLAUDE_EXIT_NONZERO = "CLAUDE_EXIT_NONZERO"
-RADAR_REASON_CLAUDE_OUTPUT_INVALID = "CLAUDE_OUTPUT_INVALID"
-RADAR_REASON_RESULT_VALIDATION = "RESULT_VALIDATION"
-RADAR_REASON_SCAN_IDENTITY = "SCAN_IDENTITY"
-RADAR_REASON_EMPTY_SCAN_RECEIPT = "EMPTY_SCAN_RECEIPT"
-RADAR_REASON_BATCH_PREFLIGHT = "BATCH_PREFLIGHT"
-RADAR_REASON_REPORT_WRITE = "REPORT_WRITE"
-RADAR_REASON_STAGING_WRITE = "STAGING_WRITE"
-RADAR_REASON_COMMIT = "COMMIT"
-RADAR_REASON_UNKNOWN = "UNKNOWN_RADAR_FAILURE"
-
-ALLOWED_RADAR_REASON_CODES = frozenset(
-    {
-        RADAR_REASON_CLAUDE_TIMEOUT,
-        RADAR_REASON_CLAUDE_BINARY_MISSING,
-        RADAR_REASON_CLAUDE_EXIT_NONZERO,
-        RADAR_REASON_CLAUDE_OUTPUT_INVALID,
-        RADAR_REASON_RESULT_VALIDATION,
-        RADAR_REASON_SCAN_IDENTITY,
-        RADAR_REASON_EMPTY_SCAN_RECEIPT,
-        RADAR_REASON_BATCH_PREFLIGHT,
-        RADAR_REASON_REPORT_WRITE,
-        RADAR_REASON_STAGING_WRITE,
-        RADAR_REASON_COMMIT,
-        RADAR_REASON_UNKNOWN,
-    }
-)
-
-
-class RadarStageError(BridgeError):
-    """Deterministic Radar failure stage with safe telemetry only."""
-
-    def __init__(self, reason_code: str, *, exit_code: int | None = None):
-        code = (
-            reason_code
-            if reason_code in ALLOWED_RADAR_REASON_CODES
-            else RADAR_REASON_UNKNOWN
-        )
-        self.reason_code = code
-        if isinstance(exit_code, bool):
-            self.exit_code: int | None = None
-        elif isinstance(exit_code, int):
-            self.exit_code = exit_code
-        else:
-            self.exit_code = None
-        message = f"Radar stage failure: {self.reason_code}"
-        if self.reason_code == RADAR_REASON_CLAUDE_EXIT_NONZERO and self.exit_code is not None:
-            message += f" exit={self.exit_code}"
-        super().__init__(message)
 
 
 _CLAUDE_EXIT_RE = re.compile(r"^Claude invocation failed \(exit=(-?\d+)\)$")

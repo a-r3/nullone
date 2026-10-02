@@ -453,5 +453,51 @@ class StageTelemetryTests(unittest.TestCase):
                 self.assertEqual(rc, 1)
 
 
+class WrapperBoundaryTests(unittest.TestCase):
+    """Provider-neutral wrapper boundary: no direct Claude import."""
+
+    def test_runner_does_not_import_claude_provider(self):
+        source = (SCRIPTS / "nullone-breaking-radar-run.py").read_text(encoding="utf-8")
+        self.assertNotIn("nullone_claude_radar_provider", source)
+        self.assertIn("nullone_radar_stage_error", source)
+        self.assertIn("nullone_provider_adapter", source)
+
+    def test_runner_stage_error_is_neutral_contract(self):
+        import nullone_radar_stage_error as neutral  # noqa: E402
+
+        wrapper = load_wrapper()
+        self.assertIs(wrapper.RadarStageError, neutral.RadarStageError)
+        self.assertEqual(wrapper.ALLOWED_RADAR_REASON_CODES, neutral.ALLOWED_RADAR_REASON_CODES)
+
+    def test_claude_provider_owns_mapping_neutral_owns_contract(self):
+        provider_source = (SCRIPTS / "nullone_claude_radar_provider.py").read_text(encoding="utf-8")
+        self.assertIn("_map_claude_failure", provider_source)
+        self.assertIn("from nullone_radar_stage_error import", provider_source)
+        neutral_source = (SCRIPTS / "nullone_radar_stage_error.py").read_text(encoding="utf-8")
+        self.assertIn("class RadarStageError", neutral_source)
+        self.assertIn("ALLOWED_RADAR_REASON_CODES", neutral_source)
+        self.assertNotIn("def _map_claude_failure", neutral_source)
+        self.assertNotIn("from nullone_claude import", neutral_source)
+        self.assertNotIn("import nullone_claude", neutral_source)
+        self.assertNotIn("Claude invocation timed out", neutral_source)
+
+    def test_execution_flows_through_adapter(self):
+        wrapper = load_wrapper()
+        import nullone_radar_stage_error as neutral  # noqa: E402
+
+        with mock.patch.object(
+            wrapper.provider_adapter,
+            "invoke_role_cycle",
+            side_effect=neutral.RadarStageError("CLAUDE_TIMEOUT"),
+        ) as cycle:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = wrapper.execute()
+            out = buf.getvalue()
+        self.assertEqual(cycle.call_count, 1)
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=RadarStageError code=CLAUDE_TIMEOUT", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

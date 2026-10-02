@@ -230,6 +230,10 @@ COMMANDS = [
     ],
     [
         sys.executable,
+        "workspace/social/ops/scripts/nullone_radar_stage_error.py",
+    ],
+    [
+        sys.executable,
         "workspace/social/ops/scripts/nullone-weekly-strategy-run.py",
         "self-test",
     ],

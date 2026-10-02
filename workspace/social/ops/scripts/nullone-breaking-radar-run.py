@@ -32,20 +32,7 @@ from pathlib import Path
 from nullone_bridge_common import BridgeError, WORKSPACE
 import nullone_provider_adapter as provider_adapter
 import nullone_provider_router as provider_router
-
-try:
-    from nullone_claude_radar_provider import (
-        ALLOWED_RADAR_REASON_CODES,
-        RadarStageError,
-    )
-except Exception:  # pragma: no cover - import safety net, fail-closed below
-    ALLOWED_RADAR_REASON_CODES = frozenset({"UNKNOWN_RADAR_FAILURE"})
-
-    class RadarStageError(BridgeError):  # type: ignore[no-redef]
-        def __init__(self, reason_code: str = "UNKNOWN_RADAR_FAILURE", **kwargs):
-            self.reason_code = "UNKNOWN_RADAR_FAILURE"
-            self.exit_code = None
-            super().__init__("Radar stage failure: UNKNOWN_RADAR_FAILURE")
+from nullone_radar_stage_error import ALLOWED_RADAR_REASON_CODES, RadarStageError
 
 
 def format_radar_stage_blocked(exc: BaseException) -> str:
