@@ -3,6 +3,33 @@
 Last updated: 2026-10-02 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
+## Draft Factory SELECT packaging contract — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- PR #198 parser deploy remains successful (live queue parses:
+  `TOTAL_ENTRIES=124`, `ELIGIBLE_READY=36`).
+- The 2026-10-02 20:45 Asia/Baku natural Draft run still failed, past
+  the parser/queue layer: it reached SELECT output persistence for
+  exact candidate `anthropic-robots-physical-work-exposure-2026-10-02`.
+- Request + asset files were written
+  (`2026-10-02-anthropic-robots-physical-work-exposure-2026-10-02-packaging-request.json`
+  and `...-packaging-asset.json`); no packaging decision receipt was created.
+- Read-only pure evaluator diagnostic against the exact production request:
+  `BLOCKED PACKAGING_INPUT_INVALID: candidate must be an object`.
+- Confirmed root cause: the Claude SELECT structured schema
+  under-constrained `packaging_request` relative to the deterministic
+  evaluator contract (plain `{"type": "object"}` for `packaging_request`
+  and `asset`). The evaluator behaved correctly fail-closed. This is not
+  a queue-parser failure and not an evaluator bug.
+- This branch strengthens the SELECT JSON schema and `_validated_select()`
+  to the authoritative evaluator/asset contracts (exact candidate + assets
+  objects, enum/type-checked signals, no model-owned FORMAT_DECISION /
+  FORMAT_REASON / VISUAL_STYLE / slide_count_recommendation, structurally
+  valid `nullone.packaging-asset.v1` descriptor; receipt/style authority
+  stays downstream). Malformed SELECT output now fails before any
+  request/asset production write.
+- This new fix is repo-only until separately deployed. #194 remains OPEN;
+  no natural acceptance proof yet. Radar recovery remains separate.
+
 ## Breaking Radar safe failure-stage telemetry — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
 
 - Radar natural success on 2026-10-01 20:30 Asia/Baku (`ROLE_OUTCOME=COMPLETED`).

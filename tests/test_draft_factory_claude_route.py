@@ -65,9 +65,23 @@ def ranked_item(candidate_id="probe-candidate-one", **overrides):
         "topic_cluster": "probe",
         "content_type": "NEWS",
         "packaging_request": {"candidate": candidate, "assets": assets},
-        "asset": {"asset_kind": "NONE"},
+        "asset": {
+            "schema": "nullone.packaging-asset.v1",
+            "candidate_id": candidate_id,
+            "asset_kind": "NONE",
+            "local_path": None,
+            "source_url": None,
+            "provenance": "probe provenance",
+            "sha256": None,
+        },
     }
     item.update(overrides)
+    # Keep the descriptor bound when the caller names a different
+    # id (positionally or by keyword) without supplying its own
+    # descriptor.
+    if "asset" not in overrides:
+        item["asset"] = dict(item["asset"])
+        item["asset"]["candidate_id"] = item["candidate_id"]
     return item
 
 
