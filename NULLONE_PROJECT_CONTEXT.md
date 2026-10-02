@@ -1,7 +1,41 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-10-01 Asia/Baku
+Last updated: 2026-10-02 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
+
+## Draft Factory queue status-history recovery — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- The first two natural post-PR #195 Draft Factory runs, at 09:45 and
+  15:45 Asia/Baku, failed closed before Claude selection with
+  `BridgeError: Duplicate Draft queue field: status`.
+- Production routing was correct: `draft_factory` → Claude/Sonnet,
+  timeout 900, fallback none. The failure was in the Draft-only queue
+  parser, which rejected historical append-style duplicate `status`
+  fields in already non-READY entries.
+- Read-only production audit found 124 blocks (71 current, 53 legacy)
+  and three duplicate `status` histories: legacy READY → PUBLISHED,
+  legacy READY → DRAFTED, and current
+  `openai-misalignment-framework-2026-09-20` READY → DRAFTED. No other
+  duplicate fields were observed. The production queue was not modified.
+- Branch `fix/draft-queue-status-history` permits only reviewed forward
+  historical status transitions while preserving queue bytes and strict
+  READY eligibility. This repository fix is not a production deployment.
+  Issue #194 remains OPEN; successful natural production proof is pending.
+- A full read-only production schema audit found one second blocker: the
+  current historical entry `openai-gpt6-1-astra-safety-halt` has final
+  `SKIPPED` status but lacks `content_type`. No READY current entry was
+  malformed (`READY_MALFORMED=0`), and no current duplicate non-status
+  fields were found. The parser now requires `candidate_id`, `topic`, and
+  `status` for every current entry, and full selection metadata only when
+  its final status is exact `READY`. The SKIPPED entry remains ineligible.
+- The branch parser now passes against the actual production queue read-only:
+  124 entries parsed and 36 eligible READY entries.
+  `openai-misalignment-framework-2026-09-20` resolves to DRAFTED and is
+  ineligible; `openai-gpt6-1-astra-safety-halt` resolves to SKIPPED and is
+  ineligible. Production queue bytes were not modified. The repository fix
+  remains undeployed, and natural production proof is still pending.
+- The separate Breaking Radar BridgeError investigation is outside this
+  Draft Factory runtime fix.
 
 ## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
 

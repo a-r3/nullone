@@ -18,6 +18,11 @@ from nullone_packaging_receipt import check_candidate_id
 QUEUE_PATH = "social/state/candidate-queue.md"
 FIELD = re.compile(r"^- \*\*([a-z_]+):\*\* (.*)$")
 READY_STATUS_LINE = b"- **status:** READY"
+HISTORICAL_STATUS_TRANSITIONS = {
+    ("READY", "DRAFTED"),
+    ("READY", "PUBLISHED"),
+    ("DRAFTED", "PUBLISHED"),
+}
 
 
 @dataclass(frozen=True)
@@ -86,9 +91,10 @@ def parse_queue(data: bytes) -> QueueSnapshot:
             return
         candidate_id = fields.get("candidate_id") if current else None
         topic = fields.get("topic")
-        if current and (
-            not candidate_id or not topic or not fields.get("topic_cluster")
-            or not fields.get("content_type") or not fields.get("status")
+        if current and (not candidate_id or not topic or not fields.get("status")):
+            raise BridgeError("Malformed current Draft queue entry")
+        if current and fields["status"] == "READY" and (
+            not fields.get("topic_cluster") or not fields.get("content_type")
         ):
             raise BridgeError("Malformed current Draft queue entry")
         if not topic:
@@ -136,7 +142,8 @@ def parse_queue(data: bytes) -> QueueSnapshot:
         elif start is None:
             continue  # Section metadata before the next candidate block.
         if key in fields:
-            raise BridgeError(f"Duplicate Draft queue field: {key}")
+            if key != "status" or (fields[key], value.strip()) not in HISTORICAL_STATUS_TRANSITIONS:
+                raise BridgeError(f"Duplicate Draft queue field: {key}")
         if current and key == "topic" and "candidate_id" not in fields:
             raise BridgeError("Draft queue topic has no preceding candidate_id")
         fields[key] = value.strip()
