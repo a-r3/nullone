@@ -3,7 +3,19 @@
 Last updated: 2026-10-02 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
-## Draft Factory queue status-history recovery — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+## Breaking Radar safe failure-stage telemetry — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- Radar natural success on 2026-10-01 20:30 Asia/Baku (`ROLE_OUTCOME=COMPLETED`).
+- Subsequent natural failures at 2026-10-01 23:30, then 2026-10-02 11:30, 14:30, 17:30 Asia/Baku, all surfacing only as `ROLE_OUTCOME=BLOCKED reason=BridgeError`.
+- Route remained `role=breaking_radar`, `transport=claude`, `model=haiku`, `timeout=600`, `fallback=none`.
+- No 2026-10-02 Radar authoritative artifacts were produced (no Breaking report/handoff/receipt).
+- Current exact inner cause remains UNCONFIRMED because existing logging collapsed failures to generic `BridgeError` (runner printed only `type(e).__name__`).
+- This branch adds safe failure-stage observability only (`RadarStageError` with stable `reason_code`: `CLAUDE_TIMEOUT`, `CLAUDE_BINARY_MISSING`, `CLAUDE_EXIT_NONZERO`, `CLAUDE_OUTPUT_INVALID`, `RESULT_VALIDATION`, `SCAN_IDENTITY`, `EMPTY_SCAN_RECEIPT`, `BATCH_PREFLIGHT`, `REPORT_WRITE`, `STAGING_WRITE`, `COMMIT`, `UNKNOWN_RADAR_FAILURE`; runner emits `ROLE_OUTCOME=BLOCKED reason=RadarStageError code=<CODE>` with numeric `exit=` only for nonzero Claude exits; no raw stdout/stderr, prompts, fetched content, URLs, source text, signed URLs, tokens, secrets, or credentials).
+- No production deployment yet. Do not claim root cause fixed.
+- Separate Draft Factory PR #198 recovery is independent.
+- Do not close #196. Do not close #194.
+
+## Draft Factory queue status-history recovery — 2026-10-02 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
 
 - The first two natural post-PR #195 Draft Factory runs, at 09:45 and
   15:45 Asia/Baku, failed closed before Claude selection with
@@ -17,25 +29,24 @@ Status: canonical project context for repository/project continuity. Production 
   legacy READY → DRAFTED, and current
   `openai-misalignment-framework-2026-09-20` READY → DRAFTED. No other
   duplicate fields were observed. The production queue was not modified.
-- Branch `fix/draft-queue-status-history` permits only reviewed forward
-  historical status transitions while preserving queue bytes and strict
-  READY eligibility. This repository fix is not a production deployment.
-  Issue #194 remains OPEN; successful natural production proof is pending.
-- A full read-only production schema audit found one second blocker: the
-  current historical entry `openai-gpt6-1-astra-safety-halt` has final
-  `SKIPPED` status but lacks `content_type`. No READY current entry was
-  malformed (`READY_MALFORMED=0`), and no current duplicate non-status
-  fields were found. The parser now requires `candidate_id`, `topic`, and
-  `status` for every current entry, and full selection metadata only when
-  its final status is exact `READY`. The SKIPPED entry remains ineligible.
-- The branch parser now passes against the actual production queue read-only:
-  124 entries parsed and 36 eligible READY entries.
-  `openai-misalignment-framework-2026-09-20` resolves to DRAFTED and is
-  ineligible; `openai-gpt6-1-astra-safety-halt` resolves to SKIPPED and is
-  ineligible. Production queue bytes were not modified. The repository fix
-  remains undeployed, and natural production proof is still pending.
-- The separate Breaking Radar BridgeError investigation is outside this
-  Draft Factory runtime fix.
+- PR #198 merged to `main` as
+  `3c9ff7cb0a04bd3fbdcdf1f764527c3199028391` and controlled
+  production deploy completed 2026-10-02 19:43 Asia/Baku with backup
+  `/home/oem/.openclaw/nullone-deploy-backups/pr198-20261002-194320`.
+- Only deployed runtime file:
+  `social/ops/scripts/nullone_draft_candidate_queue.py` with exact
+  deployed SHA256
+  `ed385c0a29496da0a2d77ebbdf2b15e33635b3bb33c6e7e062de50384378e921`.
+- Postdeploy: `POSTDEPLOY_BYTES=PASS`, `LIVE_PARSER_IMPORT=PASS`,
+  `LIVE_QUEUE_PARSE=PASS`, `LIVE_QUEUE_SEMANTICS=PASS`.
+- Live queue at validation: `TOTAL_ENTRIES=124`, `ELIGIBLE_READY=36`;
+  `openai-misalignment-framework-2026-09-20` DRAFTED / ineligible;
+  `openai-gpt6-1-astra-safety-halt` SKIPPED / ineligible.
+- `NO_SYNTHETIC_DRAFT_RUN=TRUE`, `NO_GATEWAY_RESTART=TRUE`,
+  `NO_QUEUE_MUTATION=TRUE`.
+- Natural production acceptance proof remains pending at the next
+  scheduled Draft Factory run. Issue #194 remains OPEN until natural
+  proof is accepted. Do not claim Draft Factory natural proof verified yet.
 
 ## Draft Factory Claude/Sonnet migration — 2026-10-01 Asia/Baku (DEPLOYED; NATURAL PROOF PENDING)
 

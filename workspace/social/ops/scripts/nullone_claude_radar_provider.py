@@ -42,6 +42,22 @@ from zoneinfo import ZoneInfo
 from nullone_bridge_common import BridgeError
 from nullone_breaking_workflow_input import assessment_json_schema
 from nullone_claude import run_structured
+from nullone_radar_stage_error import (
+    ALLOWED_RADAR_REASON_CODES,
+    RADAR_REASON_BATCH_PREFLIGHT,
+    RADAR_REASON_CLAUDE_BINARY_MISSING,
+    RADAR_REASON_CLAUDE_EXIT_NONZERO,
+    RADAR_REASON_CLAUDE_OUTPUT_INVALID,
+    RADAR_REASON_CLAUDE_TIMEOUT,
+    RADAR_REASON_COMMIT,
+    RADAR_REASON_EMPTY_SCAN_RECEIPT,
+    RADAR_REASON_REPORT_WRITE,
+    RADAR_REASON_RESULT_VALIDATION,
+    RADAR_REASON_SCAN_IDENTITY,
+    RADAR_REASON_STAGING_WRITE,
+    RADAR_REASON_UNKNOWN,
+    RadarStageError,
+)
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch"]
 
@@ -85,6 +101,39 @@ REPORT_GLOB_HINT = "breaking"
 BAKU_ZONE = "Asia/Baku"
 
 
+_CLAUDE_EXIT_RE = re.compile(r"^Claude invocation failed \(exit=(-?\d+)\)$")
+
+
+def _map_claude_failure(exc: BaseException) -> RadarStageError:
+    """Map a `run_structured` BridgeError to a safe stage code.
+
+    Matches only known locally-generated messages from
+    `nullone_claude.run_structured`. Anything else -- including
+    arbitrary downstream text -- collapses to UNKNOWN_RADAR_FAILURE
+    without echoing the original message.
+    """
+    message = str(exc) if isinstance(exc, BridgeError) else ""
+    if message == "Claude invocation timed out":
+        return RadarStageError(RADAR_REASON_CLAUDE_TIMEOUT)
+    if message == "claude binary not found":
+        return RadarStageError(RADAR_REASON_CLAUDE_BINARY_MISSING)
+    matched = _CLAUDE_EXIT_RE.match(message)
+    if matched is not None:
+        try:
+            exit_code = int(matched.group(1))
+        except ValueError:
+            exit_code = None
+        return RadarStageError(
+            RADAR_REASON_CLAUDE_EXIT_NONZERO, exit_code=exit_code
+        )
+    if message in (
+        "Claude returned non-JSON output",
+        "Claude JSON output is not an object",
+    ):
+        return RadarStageError(RADAR_REASON_CLAUDE_OUTPUT_INVALID)
+    return RadarStageError(RADAR_REASON_UNKNOWN)
+
+
 def radar_security_settings(workspace: Path) -> dict:
     """Anchor Claude Read deny rules to this invocation's workspace.
 
@@ -117,43 +166,44 @@ def _validated(result: object) -> dict:
     accept; full envelope validation still happens in the scan
     helper's shared prepare/commit path before anything becomes
     authoritative.
+
+    All rejections raise RadarStageError(RESULT_VALIDATION) with no
+    payload echo.
     """
     if not isinstance(result, dict) or set(result) != set(FIELDS):
-        raise BridgeError("Malformed Radar Claude result")
+        raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
     if result["mode"] not in MODES:
-        raise BridgeError("Malformed Radar Claude result")
+        raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
     report = result["report_markdown"]
     if not isinstance(report, str) or not report.strip():
-        raise BridgeError("Malformed Radar Claude result")
+        raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
     assessments = result["assessments"]
     if not isinstance(assessments, list):
-        raise BridgeError("Malformed Radar Claude result")
+        raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
     if result["mode"] == "NO_MATERIAL_DEVELOPMENT":
         if assessments:
-            raise BridgeError("Malformed Radar Claude result")
+            raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
     elif not assessments:
-        raise BridgeError("Malformed Radar Claude result")
+        raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
     required_assessment_fields = set(ASSESSMENT_SCHEMA["required"])
     seen_ids: set[str] = set()
     for item in assessments:
         if not isinstance(item, dict):
-            raise BridgeError("Malformed Radar Claude result")
+            raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
         # Legacy/editorial shapes (unknown fields such as score or
         # audience_value, or missing workflow fields) fail here,
         # before any scan contact or write.
         if set(item) != required_assessment_fields:
-            raise BridgeError("Malformed Radar Claude result")
+            raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
         candidate_id = item.get("candidate_id")
         if (
             not isinstance(candidate_id, str)
             or len(candidate_id) > CANDIDATE_ID_MAX_LEN
             or not CANDIDATE_ID_RE.match(candidate_id)
         ):
-            raise BridgeError("Malformed Radar Claude result")
+            raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
         if candidate_id in seen_ids:
-            raise BridgeError(
-                "Duplicate candidate_id in Radar Claude result"
-            )
+            raise RadarStageError(RADAR_REASON_RESULT_VALIDATION)
         seen_ids.add(candidate_id)
     return result
 
@@ -194,9 +244,9 @@ def _report_filename(scheduled_for: str) -> str:
     try:
         slot = datetime.fromisoformat(str(scheduled_for).replace("Z", "+00:00"))
     except ValueError as exc:
-        raise BridgeError(f"Unparseable scan slot: {scheduled_for!r}") from exc
+        raise BridgeError("Unparseable scan slot") from exc
     if slot.tzinfo is None:
-        raise BridgeError(f"Scan slot must be timezone-aware: {scheduled_for!r}")
+        raise BridgeError("Scan slot must be timezone-aware")
     local = slot.astimezone(ZoneInfo(BAKU_ZONE))
     return local.strftime("%Y-%m-%d-breaking-%H%M.md")
 
@@ -244,15 +294,20 @@ def invoke_radar(
     """Run one bounded Claude Radar cycle and persist deterministically.
 
     Returns a summary dict (mode, report_path, committed candidate
-    ids / empty-scan flag). Raises BridgeError fail-closed on
-    transport failure, malformed output, duplicate candidate_ids, or
-    any scan-helper rejection -- with zero authoritative state left
-    by a rejected batch: every CANDIDATES_EMITTED assessment is
-    deep-validated through the scan helper's own non-mutating
-    `prepare_assessment_commit` (the exact helper `commit_assessment`
-    uses) before the first output write, so a deep-invalid batch
-    produces no report, no staged assessment, no handoff, and no
-    scan receipt.
+    ids / empty-scan flag). Raises RadarStageError fail-closed with
+    a stable reason_code on every failure -- with zero authoritative
+    state left by a rejected batch: every CANDIDATES_EMITTED
+    assessment is deep-validated through the scan helper's own
+    non-mutating `prepare_assessment_commit` (the exact helper
+    `commit_assessment` uses) before the first output write, so a
+    deep-invalid batch produces no report, no staged assessment, no
+    handoff, and no scan receipt.
+
+    Failure ordering, write ordering, and authority are unchanged:
+    a failure that previously blocked still blocks at the same
+    point, and no new write precedes an existing write boundary.
+    Only the error carrier changes (safe stage code, never raw
+    transport content).
 
     Scan-identity binding: the whole cycle -- report name,
     prevalidation, and every commit -- binds the single
@@ -267,42 +322,99 @@ def invoke_radar(
     the scan helper's per-scan lock via its own COMMIT_CONFLICT
     rules; that path is outside model-malformed scope.
     """
+    try:
+        return _invoke_radar_staged(
+            prompt=prompt, workspace=workspace, model=model, timeout=timeout
+        )
+    except RadarStageError:
+        raise
+    except BridgeError:
+        raise RadarStageError(RADAR_REASON_UNKNOWN) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_UNKNOWN) from None
+
+
+def _invoke_radar_staged(
+    *,
+    prompt: str,
+    workspace: Path | str,
+    model: str,
+    timeout: int,
+) -> dict[str, Any]:
     root = Path(workspace)
     if not prompt.strip():
-        raise BridgeError("Radar prompt must not be blank")
+        raise RadarStageError(RADAR_REASON_UNKNOWN)
     if not model.strip():
-        raise BridgeError("Radar model must not be blank")
+        raise RadarStageError(RADAR_REASON_UNKNOWN)
     if timeout <= 0:
-        raise BridgeError("Radar timeout must be positive")
+        raise RadarStageError(RADAR_REASON_UNKNOWN)
 
-    result = run_structured(
-        prompt=prompt,
-        allowed_tools=ALLOWED_TOOLS,
-        schema=SCHEMA,
-        model=model,
-        max_turns=30,
-        timeout=timeout,
-        workspace=root,
-        weekly_security_settings=radar_security_settings(root),
-    )
-    validated = _validated(result)
-
-    scanmod = _scan_module()
     try:
-        scan = scanmod.current_scan(source=SCAN_SOURCE)
-    except BridgeError:
+        result = run_structured(
+            prompt=prompt,
+            allowed_tools=ALLOWED_TOOLS,
+            schema=SCHEMA,
+            model=model,
+            max_turns=30,
+            timeout=timeout,
+            workspace=root,
+            weekly_security_settings=radar_security_settings(root),
+        )
+    except RadarStageError:
         raise
-    except Exception as exc:
-        raise BridgeError(f"Radar scan identity unavailable: {exc}") from exc
-    cycle_at = scan.get("triggered_at") if isinstance(scan, dict) else None
-    if not isinstance(cycle_at, str) or not cycle_at:
-        raise BridgeError("Radar scan identity missing triggered_at")
-    scheduled_for = scan.get("scheduled_for") if isinstance(scan, dict) else None
-    if not isinstance(scheduled_for, str) or not scheduled_for:
-        raise BridgeError("Radar scan identity missing scheduled_for")
+    except BridgeError as exc:
+        raise _map_claude_failure(exc) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_UNKNOWN) from None
+    try:
+        validated = _validated(result)
+    except RadarStageError:
+        raise
+    except BridgeError:
+        raise RadarStageError(RADAR_REASON_RESULT_VALIDATION) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_UNKNOWN) from None
+
+    try:
+        scanmod = _scan_module()
+    except RadarStageError:
+        raise
+    except BridgeError:
+        raise RadarStageError(RADAR_REASON_SCAN_IDENTITY) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_UNKNOWN) from None
+    try:
+        try:
+            scan = scanmod.current_scan(source=SCAN_SOURCE)
+        except RadarStageError:
+            raise
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_SCAN_IDENTITY) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_SCAN_IDENTITY) from None
+        cycle_at = scan.get("triggered_at") if isinstance(scan, dict) else None
+        if not isinstance(cycle_at, str) or not cycle_at:
+            raise RadarStageError(RADAR_REASON_SCAN_IDENTITY)
+        scheduled_for = scan.get("scheduled_for") if isinstance(scan, dict) else None
+        if not isinstance(scheduled_for, str) or not scheduled_for:
+            raise RadarStageError(RADAR_REASON_SCAN_IDENTITY)
+        try:
+            filename = _report_filename(scheduled_for)
+        except RadarStageError:
+            raise
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_SCAN_IDENTITY) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_SCAN_IDENTITY) from None
+    except RadarStageError:
+        raise
+    except BridgeError:
+        raise RadarStageError(RADAR_REASON_SCAN_IDENTITY) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_UNKNOWN) from None
 
     daily = root / "social/research/daily"
-    report_path = daily / _report_filename(scheduled_for)
+    report_path = daily / filename
 
     if validated["mode"] == "NO_MATERIAL_DEVELOPMENT":
         # Receipt first: a rejected empty-record leaves no orphan report
@@ -311,11 +423,20 @@ def invoke_radar(
             scanmod.record_empty_scan(
                 source=SCAN_SOURCE, at=cycle_at, workspace_root=root
             )
-        except BridgeError:
+        except RadarStageError:
             raise
-        except Exception as exc:
-            raise BridgeError(f"Radar empty scan rejected: {exc}") from exc
-        _write_text_file(report_path, validated["report_markdown"], workspace_root=root)
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_EMPTY_SCAN_RECEIPT) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_EMPTY_SCAN_RECEIPT) from None
+        try:
+            _write_text_file(report_path, validated["report_markdown"], workspace_root=root)
+        except RadarStageError:
+            raise
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_REPORT_WRITE) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_REPORT_WRITE) from None
         return {
             "mode": "NO_MATERIAL_DEVELOPMENT",
             "report_path": str(report_path),
@@ -327,20 +448,36 @@ def invoke_radar(
     # validation authority, BEFORE any output write. Any rejection
     # aborts here with no report, no staged file, no handoff, and no
     # receipt mutation.
-    try:
-        for item in validated["assessments"]:
+    for item in validated["assessments"]:
+        try:
             scanmod.prepare_assessment_commit(
                 assessment=item, source=SCAN_SOURCE, at=cycle_at
             )
-    except BridgeError:
+        except RadarStageError:
+            raise
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_BATCH_PREFLIGHT) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_BATCH_PREFLIGHT) from None
+
+    try:
+        _write_text_file(report_path, validated["report_markdown"], workspace_root=root)
+    except RadarStageError:
         raise
-    except Exception as exc:
-        raise BridgeError(f"Radar batch deep validation failed: {exc}") from exc
+    except BridgeError:
+        raise RadarStageError(RADAR_REASON_REPORT_WRITE) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_REPORT_WRITE) from None
 
-    _write_text_file(report_path, validated["report_markdown"], workspace_root=root)
-
-    staging = root / str(scanmod.STAGING_SUBPATH)
-    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        staging = root / str(scanmod.STAGING_SUBPATH)
+        staging.mkdir(parents=True, exist_ok=True)
+    except RadarStageError:
+        raise
+    except BridgeError:
+        raise RadarStageError(RADAR_REASON_STAGING_WRITE) from None
+    except Exception:
+        raise RadarStageError(RADAR_REASON_STAGING_WRITE) from None
 
     # Staged payloads are keyed by the duplicate-free candidate_ids
     # rejected above, so no two assessments can share a staged path.
@@ -349,23 +486,32 @@ def invoke_radar(
         candidate_id = item["candidate_id"]
         staged = staging / f"{candidate_id}.json"
         payload = json.dumps(item, ensure_ascii=False, indent=2, sort_keys=True)
-        _write_text_file(staged, payload + "\n", workspace_root=root)
+        try:
+            _write_text_file(staged, payload + "\n", workspace_root=root)
+        except RadarStageError:
+            raise
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_STAGING_WRITE) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_STAGING_WRITE) from None
         staged_paths.append((candidate_id, staged))
 
     committed: list[str] = []
-    try:
-        for candidate_id, staged in staged_paths:
+    for candidate_id, staged in staged_paths:
+        try:
             scanmod.commit_assessment(
                 assessment_path=staged,
                 source=SCAN_SOURCE,
                 at=cycle_at,
                 workspace_root=root,
             )
-            committed.append(candidate_id)
-    except BridgeError:
-        raise
-    except Exception as exc:
-        raise BridgeError(f"Radar commit rejected: {exc}") from exc
+        except RadarStageError:
+            raise
+        except BridgeError:
+            raise RadarStageError(RADAR_REASON_COMMIT) from None
+        except Exception:
+            raise RadarStageError(RADAR_REASON_COMMIT) from None
+        committed.append(candidate_id)
 
     return {
         "mode": "CANDIDATES_EMITTED",
