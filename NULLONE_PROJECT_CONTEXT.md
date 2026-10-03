@@ -3,6 +3,44 @@
 Last updated: 2026-10-03 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
+## Draft Factory visual-grounding fallback — 2026-10-03 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- PR #201 merged: `4026729ea10532e53f16af8cadbc8bdf86f92e30`.
+  Controlled deploy: 2026-10-03 11:57 Asia/Baku.
+- PR #201 natural production proof PASS: the known STORY candidate was
+  recorded as `STORY_NOT_FACTORY_PRODUCIBLE` and the next ranked
+  candidate was attempted.
+- The 16:15 catch-up run (host was offline at the 15:45 slot) then
+  failed on second candidate `github-copilot-computer-use-preview-2026-10-03`
+  with `ROLE_OUTCOME=BLOCKED`, `BridgeError`, exit 1. Fallback ledger
+  shows the first candidate `STORY_NOT_FACTORY_PRODUCIBLE`
+  (`TWO_ITEM_COMPARISON_FITS_STORY`), `accepted_candidate_id=None`.
+- Request + asset files were written for the second candidate; no
+  receipt/render/manifest/Zernio/Telegram was produced for it.
+- Read-only pure validation of the exact production request:
+  `REQUEST_VALIDATION=PASS` (PRACTICAL/ANNOUNCEMENT/TODAY/PASS/
+  STRONG_PRIMARY/HIGH, 1 beat, real-world subject, not developing,
+  `SOURCE_GROUNDED`, no usable evidence asset). Pure evaluation:
+  `PACKAGING_VISUAL_GROUNDING_UNMET`.
+- Exact root cause: `PACKAGING_VISUAL_GROUNDING_UNMET`. Evaluator safety
+  behavior is correct and unchanged (typography/generated illustration
+  must never substitute for required evidence); orchestration
+  misclassifies this candidate-local impossibility as a whole-cycle
+  BridgeError instead of continuing ranked fallback.
+- This branch: the evaluator CLI keeps its non-zero exit and emits a
+  fixed `BLOCKED_CODE=PACKAGING_VISUAL_GROUNDING_UNMET` line; the Draft
+  runner parses only that exact line into a typed signal (no fragile
+  substring matching, no raw output surfaced); the fallback ledger gains
+  a truthful `VISUAL_GROUNDING_UNMET` disposition (never a receipt,
+  never `POST_DECISION=SKIP`); all-exhausted ends as truthful `NO_ACTION`;
+  interrupted request+asset bytes with no receipt are recovered through
+  the authoritative evaluator (never overwritten; partial/malformed
+  state fails closed). Unknown/timeout/startup/INPUT_INVALID evaluator
+  failures remain fail-closed BridgeErrors.
+- New fix is repo-only until reviewed/deployed. #194 remains OPEN; full
+  FEED/CAROUSEL -> Zernio -> Telegram natural acceptance proof pending.
+  Radar recovery remains separate.
+
 ## Draft Factory STORY non-producible fallback — 2026-10-03 Asia/Baku (REPO FIX; NOT DEPLOYED)
 
 - PR #200 (Draft SELECT packaging-request/asset contract) is MERGED and

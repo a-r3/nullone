@@ -94,7 +94,8 @@ class Harness:
         self.rounds.append("PRODUCE")
         raise StopAtProduce("PRODUCE reached")
 
-    def fake_helper(self, argv, *, workspace_root, timeout, marker):
+    def fake_helper(self, argv, *, workspace_root, timeout, marker,
+                      grounding_unmet_ok=False):
         name = Path(argv[1]).name
         cid = argv[argv.index("--candidate-id") + 1] if "--candidate-id" in argv else ""
         self.helper_calls.append((name, cid))

@@ -49,13 +49,16 @@ Weekly / Radar prompt):
 
     SELECT   -> ranked candidates + verification + packaging signals
                 + asset descriptors. Python writes request/asset
-                files, runs the evaluator per candidate in ranked
+                files (or reuses valid interrupted prior-cycle bytes),
+                runs the evaluator per candidate in ranked
                 order, classifies receipts through the deterministic
                 fallback helper (SKIP records and continues, POST
-                FEED/CAROUSEL accepts exactly one, POST/STORY is a
-                Factory-non-producible disposition that records and
-                continues -- never accepted, rendered, or handed to
-                StoryWorkflow -- and system failures BLOCK).
+                FEED/CAROUSEL accepts exactly one, POST/STORY and the
+                typed visual-grounding impossibility are
+                Factory-non-producible dispositions that record and
+                continue -- never accepted, rendered, handed to
+                StoryWorkflow, or manufactured into receipts -- and
+                system failures BLOCK).
     PRODUCE  -> caption + render text args + carousel spec. Python
                 writes caption/spec files, runs the render
                 dispatcher, builds the manifest, and runs the local
@@ -108,8 +111,27 @@ from nullone_packaging_receipt import (
     ASSET_DESCRIPTOR_SCHEMA,
     FILE_BACKED_ASSET_KINDS,
     STYLE_TO_ASSET_KIND,
+    VISUAL_GROUNDING_UNMET_CODE,
     VISUAL_REQUIREMENT_VALUES,
 )
+
+# Reviewed fixed machine-readable evaluator outcome for the
+# candidate-local visual-grounding impossibility. The evaluator CLI
+# prints exactly this line (and keeps its non-zero exit) when the
+# request is valid but SOURCE_GROUNDED with no usable evidence; the
+# Draft runner matches the full line only, never a substring of
+# arbitrary output.
+EVALUATOR_GROUNDING_CODE_LINE = f"BLOCKED_CODE={VISUAL_GROUNDING_UNMET_CODE}"
+
+
+class _PackagingGroundingUnmet(Exception):
+    """Typed candidate-local grounding impossibility (not a system error).
+
+    Raised only when the deterministic evaluator reports the reviewed
+    fixed BLOCKED_CODE line. Never carries raw stdout/stderr or model
+    content: the fallback loop records VISUAL_GROUNDING_UNMET and
+    continues to the next frozen-ranked candidate.
+    """
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch", "Glob"]
 
@@ -477,7 +499,22 @@ def _validated_select(result: object) -> dict:
 
 def _validate_select_packaging_request(item: dict) -> None:
     """Validate one ranked item's packaging_request (fail closed)."""
-    request = item["packaging_request"]
+    _check_packaging_request_contract(
+        item["packaging_request"], expected_content_type=item["content_type"]
+    )
+
+
+def _check_packaging_request_contract(
+    request: object, *, expected_content_type: str
+) -> None:
+    """Enforce the authoritative packaging-request contract (fail closed).
+
+    Shared by the SELECT boundary (expected type from the ranked item)
+    and interrupted-state recovery (expected type from the eligible
+    queue entry, never model bytes): exact candidate + assets objects,
+    no model-owned outputs, enum/type-checked signals, single
+    content_type authority, boolean asset signals.
+    """
     if not isinstance(request, dict):
         raise BridgeError("Malformed Draft Factory SELECT result")
     if set(request) != {"candidate", "assets"}:
@@ -510,11 +547,11 @@ def _validate_select_packaging_request(item: dict) -> None:
         if not isinstance(candidate[field], bool):
             raise BridgeError("Malformed Draft Factory SELECT result")
     # Single content_type authority: the nested packaging candidate
-    # must agree with the SELECT item's top-level content_type (which
-    # the later queue identity check binds to the eligible entry).
-    # Otherwise the receipt would bind one type while the manifest
-    # builds from another.
-    if candidate["content_type"] != item["content_type"]:
+    # must agree with the expected top-level content_type (ranked item
+    # at SELECT, eligible queue entry at recovery). Otherwise the
+    # receipt would bind one type while the manifest builds from
+    # another.
+    if candidate["content_type"] != expected_content_type:
         raise BridgeError("Malformed Draft Factory SELECT result")
     assets = request["assets"]
     if not isinstance(assets, dict):
@@ -534,7 +571,22 @@ def _validate_select_asset_descriptor(item: dict) -> None:
     vocabulary, and file-backed vs NONE path/provenance shape.
     Receipt/style matching authority stays downstream.
     """
-    descriptor = item["asset"]
+    _check_asset_descriptor_contract(
+        item["asset"], candidate_id=item["candidate_id"]
+    )
+
+
+def _check_asset_descriptor_contract(
+    descriptor: object, *, candidate_id: str
+) -> None:
+    """Enforce the asset-descriptor structural contract (fail closed).
+
+    Shared by the SELECT boundary and interrupted-state recovery
+    (both bind the descriptor to the ledger/queue candidate_id, never
+    model bytes): exact/allowed field set, schema literal, candidate
+    binding, authoritative asset-kind vocabulary, file-backed vs NONE
+    path/provenance shape, optional sha256/source_url types.
+    """
     if not isinstance(descriptor, dict):
         raise BridgeError("Malformed Draft Factory SELECT result")
     allowed_keys = set(SELECT_ASSET_DESCRIPTOR_REQUIRED) | set(
@@ -547,7 +599,7 @@ def _validate_select_asset_descriptor(item: dict) -> None:
     if (
         not isinstance(descriptor["candidate_id"], str)
         or not descriptor["candidate_id"].strip()
-        or descriptor["candidate_id"] != item["candidate_id"]
+        or descriptor["candidate_id"] != candidate_id
     ):
         raise BridgeError("Malformed Draft Factory SELECT result")
     kind = descriptor["asset_kind"]
@@ -637,7 +689,8 @@ def bounded_timeout(deadline: float, *, helper_cap: int | None = None,
 
 
 def _run_helper(
-    argv: list[str], *, workspace_root: Path, timeout: int, marker: str
+    argv: list[str], *, workspace_root: Path, timeout: int, marker: str,
+    grounding_unmet_ok: bool = False,
 ) -> str:
     """Run one exact reviewed helper CLI (fail closed).
 
@@ -645,6 +698,14 @@ def _run_helper(
     and validated round outputs -- never from model-supplied command
     text. Non-zero exit, timeout, or a missing stdout marker is a
     BridgeError; stdout is returned for marker parsing by the caller.
+
+    With grounding_unmet_ok=True (packaging evaluator only), a
+    non-zero exit carrying exactly the reviewed fixed grounding code
+    line raises the typed _PackagingGroundingUnmet signal instead of
+    BridgeError -- and only for the evaluator's reviewed exit contract
+    (exit 2 with the exact code line). Timeout, startup failure, and
+    every other rejection (including the code line on any other exit)
+    stay BridgeError fail-closed, and no raw output is surfaced.
     """
     try:
         cp = subprocess.run(
@@ -660,6 +721,12 @@ def _run_helper(
     except OSError as exc:
         raise BridgeError(f"Draft helper failed to start: {argv[1]}") from exc
     if cp.returncode != 0:
+        if (
+            grounding_unmet_ok
+            and cp.returncode == 2
+            and EVALUATOR_GROUNDING_CODE_LINE in (cp.stdout or "").splitlines()
+        ):
+            raise _PackagingGroundingUnmet()
         raise BridgeError(f"Draft helper rejected: {argv[1]} (exit={cp.returncode})")
     if marker not in (cp.stdout or ""):
         raise BridgeError(f"Draft helper missing proof marker: {argv[1]}")
@@ -702,6 +769,68 @@ def _write_new_file(path: Path, content: str, *, workspace_root: Path) -> Path:
             pass
         raise
     return path
+
+
+def _recover_interrupted_request_asset(
+    *,
+    candidate_id: str,
+    request_path: Path,
+    asset_path: Path,
+    workspace_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Load valid interrupted prior-cycle request/asset bytes, if present.
+
+    Returns the parsed (request, asset) dicts when NO canonical receipt
+    exists but BOTH same-date request and asset files already exist, are
+    workspace-contained regular files (never symlinks), and parse as
+    JSON objects. The caller then fully validates those EXISTING bytes
+    against the authoritative contracts and runs the evaluator against
+    them -- newly selected model bytes never overwrite them.
+
+    Returns None when neither file exists (fresh write path).
+    Raises BridgeError fail-closed when only one file exists
+    (partial state) or existing bytes are malformed, mismatched,
+    symlinked, or escape the workspace. Never writes.
+    """
+    request_exists = request_path.exists() or request_path.is_symlink()
+    asset_exists = asset_path.exists() or asset_path.is_symlink()
+    if not request_exists and not asset_exists:
+        return None
+    if request_exists != asset_exists:
+        raise BridgeError(
+            "Draft interrupted packaging state is partial; refusing to continue"
+        )
+    root = workspace_root.resolve(strict=True)
+    for path in (request_path, asset_path):
+        if path.is_symlink():
+            raise BridgeError(
+                "Draft interrupted packaging state is a symlink"
+            )
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+        except (ValueError, OSError) as exc:
+            raise BridgeError(
+                "Draft interrupted packaging state escapes workspace"
+            ) from exc
+        if not resolved.is_file():
+            raise BridgeError(
+                "Draft interrupted packaging state is not a regular file"
+            )
+    try:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        asset = json.loads(asset_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise BridgeError(
+            "Draft interrupted packaging state is not valid JSON"
+        ) from exc
+    if not isinstance(request, dict) or not isinstance(
+        request.get("candidate"), dict
+    ):
+        raise BridgeError("Draft interrupted packaging state is malformed")
+    if not isinstance(asset, dict) or asset.get("candidate_id") != candidate_id:
+        raise BridgeError("Draft interrupted packaging state is mismatched")
+    return (request, asset)
 
 
 def _scan_for_secrets(text: str, *, what: str) -> None:
@@ -811,12 +940,14 @@ def invoke_draft(
         record_acceptance,
         record_skip,
         record_story_disposition,
+        record_visual_grounding_disposition,
         save_ledger,
     )
     from nullone_packaging_receipt import (
         canonical_receipt_path,
         load_receipt,
         load_render_record,
+        validate_asset_descriptor,
     )
     from nullone_review_delivery import validate_preview_payload
 
@@ -919,30 +1050,75 @@ def invoke_draft(
         if receipt is None:
             request_path = drafts / f"{today}-{candidate_id}-packaging-request.json"
             asset_path = drafts / f"{today}-{candidate_id}-packaging-asset.json"
-            _write_new_file(
-                request_path,
-                json.dumps(item["packaging_request"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            # Interrupted prior-cycle state (e.g. the 2026-10-03 16:15
+            # grounding block left request+asset with no receipt):
+            # reuse the EXISTING bytes through the authoritative
+            # evaluator instead of overwriting them with newly selected
+            # model bytes. Fresh candidates take the write path.
+            recovered = _recover_interrupted_request_asset(
+                candidate_id=candidate_id,
+                request_path=request_path,
+                asset_path=asset_path,
                 workspace_root=root,
             )
-            _write_new_file(
-                asset_path,
-                json.dumps(item["asset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                workspace_root=root,
-            )
-            _run_helper(
-                [
-                    sys.executable,
-                    str(SCRIPTS_DIR / "nullone-packaging-evaluator.py"),
-                    "evaluate",
-                    "--candidate-id",
-                    candidate_id,
-                    "--request-file",
-                    str(request_path),
-                ],
-                workspace_root=root,
-                timeout=helper_timeout("evaluate"),
-                marker="RECEIPT_PATH=",
-            )
+            recovered_asset: dict[str, Any] | None = None
+            if recovered is None:
+                _write_new_file(
+                    request_path,
+                    json.dumps(item["packaging_request"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    workspace_root=root,
+                )
+                _write_new_file(
+                    asset_path,
+                    json.dumps(item["asset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    workspace_root=root,
+                )
+            else:
+                existing_request, existing_asset = recovered
+                recovered_asset = existing_asset
+                # Fully validate the existing bytes before the evaluator
+                # runs: the request against the authoritative contract
+                # (content_type bound to the eligible queue entry, never
+                # model bytes) and the asset descriptor structurally. A
+                # malformed asset therefore fails closed here and can
+                # never be recorded as grounding-unmet nor accepted.
+                _check_packaging_request_contract(
+                    existing_request,
+                    expected_content_type=eligible[candidate_id].fields[
+                        "content_type"
+                    ],
+                )
+                _check_asset_descriptor_contract(
+                    existing_asset, candidate_id=candidate_id
+                )
+            try:
+                _run_helper(
+                    [
+                        sys.executable,
+                        str(SCRIPTS_DIR / "nullone-packaging-evaluator.py"),
+                        "evaluate",
+                        "--candidate-id",
+                        candidate_id,
+                        "--request-file",
+                        str(request_path),
+                    ],
+                    workspace_root=root,
+                    timeout=helper_timeout("evaluate"),
+                    marker="RECEIPT_PATH=",
+                    grounding_unmet_ok=True,
+                )
+            except _PackagingGroundingUnmet:
+                # Candidate-local visual-grounding impossibility: no
+                # receipt exists and none is manufactured. Record the
+                # typed disposition and continue to the next candidate.
+                try:
+                    ledger = record_visual_grounding_disposition(
+                        ledger, candidate_id=candidate_id
+                    )
+                    save_ledger(ledger_path, ledger)
+                except DraftFallbackError as exc:
+                    raise BridgeError(f"Draft fallback refused: {exc}") from exc
+                continue
             try:
                 receipt = load_receipt(receipt_file, root=root)
                 kind, reason = classify_packaging_receipt(receipt)
@@ -950,6 +1126,25 @@ def invoke_draft(
                 raise
             except Exception as exc:
                 raise BridgeError(f"Draft receipt classification failed: {exc}") from exc
+            if (
+                recovered_asset is not None
+                and kind != "SKIP_FALLBACK"
+                and kind != "STORY_FALLBACK"
+            ):
+                # A recovered asset must match the receipt it helped
+                # create before anything can accept it or PRODUCE from
+                # it. Fresh-path assets were SELECT-validated from this
+                # cycle's bytes and meet the render gate downstream.
+                try:
+                    validate_asset_descriptor(
+                        recovered_asset, receipt, root=root
+                    )
+                except BridgeError:
+                    raise
+                except Exception as exc:
+                    raise BridgeError(
+                        f"Draft recovered asset rejected: {exc}"
+                    ) from exc
         if kind == "SKIP_FALLBACK":
             try:
                 ledger = record_skip(

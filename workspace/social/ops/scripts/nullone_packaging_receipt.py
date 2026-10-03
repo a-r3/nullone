@@ -156,6 +156,17 @@ def input_fingerprint(validated_request: dict[str, Any]) -> str:
 VISUAL_REQUIREMENT_VALUES = frozenset({"NONE", "SOURCE_GROUNDED"})
 
 
+# Typed candidate-local visual-grounding impossibility: the layout
+# declares a visual block (SOURCE_GROUNDED) but no usable evidence
+# asset, source screenshot, or data visualization exists. Raised
+# BEFORE any receipt exists, so it is never a receipt and never
+# publication authority. Orchestration layers treat it as
+# Factory-non-producible (continue ranked fallback), never as a
+# system error. The literal is the stable machine-readable code the
+# evaluator CLI surfaces as BLOCKED_CODE=<code>.
+VISUAL_GROUNDING_UNMET_CODE = "PACKAGING_VISUAL_GROUNDING_UNMET"
+
+
 def visual_requirement_of(validated_request: dict[str, Any]) -> str:
     candidate = validated_request.get("candidate")
     requirement = candidate.get("visual_requirement") if isinstance(candidate, dict) else None
@@ -235,7 +246,7 @@ def evaluate_request(candidate_id: str, validated_request: dict[str, Any]) -> di
     requirement = visual_requirement_of(validated_request)
     if requirement == "SOURCE_GROUNDED" and not visual_evidence_available(validated_request):
         raise BridgeError(
-            "PACKAGING_VISUAL_GROUNDING_UNMET: layout declares a visual block but"
+            f"{VISUAL_GROUNDING_UNMET_CODE}: layout declares a visual block but"
             " no usable evidence asset, source screenshot, or data visualization exists"
         )
     try:

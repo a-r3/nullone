@@ -141,7 +141,8 @@ def emulated_run_helper(root, recorded):
         evaluate_request,
     )
 
-    def fake(argv, *, workspace_root, timeout, marker):
+    def fake(argv, *, workspace_root, timeout, marker,
+               grounding_unmet_ok=False):
         recorded.append(list(argv))
         assert workspace_root == root
         if argv[1].endswith("nullone-packaging-evaluator.py"):
@@ -812,7 +813,8 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                 )
             return rounds.pop(0)
 
-        def fake_helper(argv, *, workspace_root, timeout, marker):
+        def fake_helper(argv, *, workspace_root, timeout, marker,
+                         grounding_unmet_ok=False):
             recorded = list(argv)
             argv_seen.append(recorded)
             name = argv[1]

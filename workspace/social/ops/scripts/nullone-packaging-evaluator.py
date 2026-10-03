@@ -40,6 +40,7 @@ from typing import Any
 
 from nullone_bridge_common import BridgeError, WORKSPACE, atomic_write_json
 from nullone_packaging_receipt import (
+    VISUAL_GROUNDING_UNMET_CODE,
     canonical_json_bytes,
     canonical_receipt_path,
     check_candidate_id,
@@ -105,6 +106,26 @@ def load_validated_request(path: Path, *, root: Path = WORKSPACE) -> dict[str, A
     return request
 
 
+def blocked_code_line(exc: BaseException) -> str | None:
+    """Fixed machine-readable BLOCKED_CODE line for typed grounding blocks.
+
+    Pure function (no I/O): returns
+    ``BLOCKED_CODE=PACKAGING_VISUAL_GROUNDING_UNMET`` for the
+    candidate-local visual-grounding impossibility, else None.
+    Matches only this module's own locally-generated grounding
+    literal; every other rejection (including PACKAGING_INPUT_INVALID
+    and system failures) stays a plain fail-closed BLOCKED with a
+    non-zero exit and no code line.
+    """
+    message = str(exc)
+    if isinstance(exc, BridgeError) and (
+        message == VISUAL_GROUNDING_UNMET_CODE
+        or message.startswith(VISUAL_GROUNDING_UNMET_CODE + ":")
+    ):
+        return f"BLOCKED_CODE={VISUAL_GROUNDING_UNMET_CODE}"
+    return None
+
+
 def evaluate_command(args: argparse.Namespace) -> int:
     candidate_id = check_candidate_id(args.candidate_id)
     request = load_validated_request(Path(args.request_file))
@@ -140,6 +161,15 @@ def self_test() -> int:
     assert mapped["verification_status"] == "BLOCKED"
     assert _map_verification({"verification": "PASS"})["verification_status"] == "PASS"
     assert _map_verification({"verification_status": "PASS"})["verification_status"] == "PASS"
+    # Typed grounding code line: only the grounding impossibility
+    # carries a machine-readable code; input/system failures do not.
+    assert VISUAL_GROUNDING_UNMET_CODE == "PACKAGING_VISUAL_GROUNDING_UNMET"
+    assert (
+        blocked_code_line(BridgeError(f"{VISUAL_GROUNDING_UNMET_CODE}: x"))
+        == f"BLOCKED_CODE={VISUAL_GROUNDING_UNMET_CODE}"
+    )
+    assert blocked_code_line(BridgeError("PACKAGING_INPUT_INVALID: x")) is None
+    assert blocked_code_line(ValueError("x")) is None
     print("PACKAGING_EVALUATOR_SELF_TEST=PASS")
     print("NO_EXTERNAL_CALLS=PASS")
     return 0
@@ -161,6 +191,11 @@ def main() -> int:
             return self_test()
         raise BridgeError("Unknown command")
     except BridgeError as e:
+        code_line = blocked_code_line(e)
+        if code_line is not None:
+            # Non-zero exit preserved; the fixed code line is the only
+            # machine-readable outcome (no raw content is added).
+            print(code_line)
         print(f"BLOCKED={e}")
         return 2
 
