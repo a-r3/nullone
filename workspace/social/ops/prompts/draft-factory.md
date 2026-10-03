@@ -27,8 +27,11 @@ Editorial candidate handoff). This Draft Factory cycle:
 - produces normal main FEED/CAROUSEL work ONLY;
 - MUST NOT create, render, or send a normal STORY draft;
 - MUST NOT select a STORY candidate from the board, queue, or ledger;
-- MUST delegate any Story opportunity to the StoryWorkflow path
-  (it runs on its own schedule and needs nothing from this cycle).
+- MUST NOT hand off or "delegate" any Story opportunity: StoryWorkflow
+  runs on its own schedule from its own Morning handoff and needs
+  nothing from this cycle. A candidate whose deterministic packaging
+  decision is STORY is simply not producible here; the cycle moves to
+  the next ranked FEED/CAROUSEL candidate (or ends as NO_ACTION).
 
 Breaking-triggered Story work under the reviewed Story-first contract is
 separate and unaffected by this rule. Historical STORY sections below

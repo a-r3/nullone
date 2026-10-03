@@ -52,8 +52,10 @@ Weekly / Radar prompt):
                 files, runs the evaluator per candidate in ranked
                 order, classifies receipts through the deterministic
                 fallback helper (SKIP records and continues, POST
-                accepts exactly one, STORY delegates, system
-                failures BLOCK).
+                FEED/CAROUSEL accepts exactly one, POST/STORY is a
+                Factory-non-producible disposition that records and
+                continues -- never accepted, rendered, or handed to
+                StoryWorkflow -- and system failures BLOCK).
     PRODUCE  -> caption + render text args + carousel spec. Python
                 writes caption/spec files, runs the render
                 dispatcher, builds the manifest, and runs the local
@@ -808,9 +810,14 @@ def invoke_draft(
         next_candidate,
         record_acceptance,
         record_skip,
+        record_story_disposition,
         save_ledger,
     )
-    from nullone_packaging_receipt import load_receipt, load_render_record
+    from nullone_packaging_receipt import (
+        canonical_receipt_path,
+        load_receipt,
+        load_render_record,
+    )
     from nullone_review_delivery import validate_preview_payload
 
     deadline = time.monotonic() + timeout
@@ -886,47 +893,79 @@ def invoke_draft(
         item = by_id.get(candidate_id or "")
         if item is None:
             raise BridgeError("Draft fallback returned an unranked candidate")
-        request_path = drafts / f"{today}-{candidate_id}-packaging-request.json"
-        asset_path = drafts / f"{today}-{candidate_id}-packaging-asset.json"
-        _write_new_file(
-            request_path,
-            json.dumps(item["packaging_request"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            workspace_root=root,
-        )
-        _write_new_file(
-            asset_path,
-            json.dumps(item["asset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            workspace_root=root,
-        )
-        _run_helper(
-            [
-                sys.executable,
-                str(SCRIPTS_DIR / "nullone-packaging-evaluator.py"),
-                "evaluate",
-                "--candidate-id",
-                candidate_id,
-                "--request-file",
-                str(request_path),
-            ],
-            workspace_root=root,
-            timeout=helper_timeout("evaluate"),
-            marker="RECEIPT_PATH=",
-        )
-        try:
-            from nullone_packaging_receipt import canonical_receipt_path
-
-            receipt = load_receipt(
-                canonical_receipt_path(candidate_id, root=root), root=root
+        # A canonical receipt that already exists is authoritative and is
+        # verified BEFORE any request/asset write or evaluator run. A
+        # malformed/tampered one fails closed (BridgeError from
+        # load_receipt). An existing STORY decision is handled
+        # deterministically without re-evaluating changed model bytes.
+        receipt_file = canonical_receipt_path(candidate_id, root=root)
+        receipt = None
+        kind = reason = None
+        if receipt_file.exists() or receipt_file.is_symlink():
+            try:
+                receipt = load_receipt(receipt_file, root=root)
+                if receipt.get("candidate_id") != candidate_id:
+                    raise BridgeError("Draft receipt candidate mismatch")
+                kind, reason = classify_packaging_receipt(receipt)
+            except BridgeError:
+                raise
+            except Exception as exc:
+                raise BridgeError(f"Draft receipt classification failed: {exc}") from exc
+            if kind != "STORY_FALLBACK":
+                # Existing SKIP/POST receipts keep the idempotent
+                # evaluator path below (same bytes or CONFLICT).
+                receipt = None
+                kind = reason = None
+        if receipt is None:
+            request_path = drafts / f"{today}-{candidate_id}-packaging-request.json"
+            asset_path = drafts / f"{today}-{candidate_id}-packaging-asset.json"
+            _write_new_file(
+                request_path,
+                json.dumps(item["packaging_request"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                workspace_root=root,
             )
-            kind, reason = classify_packaging_receipt(receipt)
-        except BridgeError:
-            raise
-        except Exception as exc:
-            raise BridgeError(f"Draft receipt classification failed: {exc}") from exc
+            _write_new_file(
+                asset_path,
+                json.dumps(item["asset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                workspace_root=root,
+            )
+            _run_helper(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "nullone-packaging-evaluator.py"),
+                    "evaluate",
+                    "--candidate-id",
+                    candidate_id,
+                    "--request-file",
+                    str(request_path),
+                ],
+                workspace_root=root,
+                timeout=helper_timeout("evaluate"),
+                marker="RECEIPT_PATH=",
+            )
+            try:
+                receipt = load_receipt(receipt_file, root=root)
+                kind, reason = classify_packaging_receipt(receipt)
+            except BridgeError:
+                raise
+            except Exception as exc:
+                raise BridgeError(f"Draft receipt classification failed: {exc}") from exc
         if kind == "SKIP_FALLBACK":
             try:
                 ledger = record_skip(
                     ledger, candidate_id=candidate_id, skip_reason=reason or ""
+                )
+                save_ledger(ledger_path, ledger)
+            except DraftFallbackError as exc:
+                raise BridgeError(f"Draft fallback refused: {exc}") from exc
+            continue
+        if kind == "STORY_FALLBACK":
+            # Draft Factory is FEED/CAROUSEL-only. StoryWorkflow owns
+            # normal Story from its own Morning handoff; this is NOT a
+            # handoff, acceptance, or render. Record and continue.
+            try:
+                ledger = record_story_disposition(
+                    ledger, candidate_id=candidate_id, format_reason=reason or ""
                 )
                 save_ledger(ledger_path, ledger)
             except DraftFallbackError as exc:
@@ -942,10 +981,6 @@ def invoke_draft(
 
     assert accepted_id is not None and receipt is not None
     format_decision = receipt.get("FORMAT_DECISION")
-    if format_decision == "STORY":
-        # Delegated to the StoryWorkflow path: accepted for cycle
-        # accounting, but nothing is produced here.
-        return {"status": "DELEGATED", "candidate_id": accepted_id}
     manifest_format = FORMAT_TO_MANIFEST_FORMAT.get(format_decision or "")
     if manifest_format is None:
         raise BridgeError(f"Draft receipt format not producible: {format_decision!r}")

@@ -18,6 +18,14 @@ Hard rules (enforced here, not by prompt text):
   injection, no re-ordering mid-cycle.
 - Each candidate is attempted AT MOST ONCE; a second record for the
   same id raises (fail closed).
+- A deterministic POST_DECISION == POST + FORMAT_DECISION == STORY
+  receipt is a Factory-local NON-PRODUCIBLE disposition: Draft Factory
+  is FEED/CAROUSEL-only and StoryWorkflow owns normal Story from its
+  own Morning handoff. The candidate is never accepted, never rendered,
+  and never handed to StoryWorkflow; the cycle continues to the next
+  frozen-ranked candidate. The ledger records the disposition
+  truthfully (STORY_NOT_FACTORY_PRODUCIBLE), never as published,
+  delivered, or delegated.
 - Only a legitimate candidate-local policy SKIP continues: a
   well-formed receipt with POST_DECISION == SKIP,
   FORMAT_DECISION == SKIP, and FORMAT_REASON in the authoritative
@@ -70,6 +78,17 @@ DECISION_ALL_SKIPPED = "ALL_SKIPPED"
 SKIP_POST_DECISION = "SKIP"
 SKIP_FORMAT_DECISION = "SKIP"
 PROCEED_POST_DECISION = "POST"
+STORY_FORMAT_DECISION = "STORY"
+
+# Classification kinds returned by classify_packaging_receipt.
+KIND_PROCEED = "PROCEED"
+KIND_SKIP_FALLBACK = "SKIP_FALLBACK"
+KIND_STORY_FALLBACK = "STORY_FALLBACK"
+
+# Attempt dispositions. Ledgers written before the STORY disposition
+# existed carry no "disposition" key; every such attempt is a SKIP.
+DISPOSITION_SKIP = "SKIP"
+DISPOSITION_STORY = "STORY_NOT_FACTORY_PRODUCIBLE"
 
 
 class DraftFallbackError(ValueError):
@@ -88,7 +107,10 @@ def classify_packaging_receipt(receipt: Any) -> tuple[str, str | None]:
     """Classify a packaging receipt dict into a fallback decision.
 
     Returns ("SKIP_FALLBACK", reason_code) for a legitimate
-    candidate-local policy SKIP, ("PROCEED", None) for a POST decision.
+    candidate-local policy SKIP, ("STORY_FALLBACK", reason_code) for a
+    POST/STORY decision (Factory-non-producible; Draft Factory never
+    produces normal Story), ("PROCEED", None) for any other POST
+    decision.
 
     Raises DraftFallbackError for ANYTHING else: malformed receipt,
     missing/unknown decision fields, unknown reason code, or a receipt
@@ -109,7 +131,13 @@ def classify_packaging_receipt(receipt: Any) -> tuple[str, str | None]:
             f"packaging receipt has unknown FORMAT_DECISION: {fmt!r}"
         )
     if post == PROCEED_POST_DECISION:
-        return ("PROCEED", None)
+        if fmt == STORY_FORMAT_DECISION:
+            if reason not in REASON_CODES:
+                raise DraftFallbackError(
+                    f"packaging STORY receipt has unknown FORMAT_REASON: {reason!r}"
+                )
+            return (KIND_STORY_FALLBACK, reason)
+        return (KIND_PROCEED, None)
     # SKIP path: the reason code is load-bearing, validate it strictly.
     if fmt != SKIP_FORMAT_DECISION:
         raise DraftFallbackError(
@@ -120,7 +148,7 @@ def classify_packaging_receipt(receipt: Any) -> tuple[str, str | None]:
         raise DraftFallbackError(
             f"packaging SKIP receipt has unknown FORMAT_REASON: {reason!r}"
         )
-    return ("SKIP_FALLBACK", reason)
+    return (KIND_SKIP_FALLBACK, reason)
 
 
 def new_ledger(
@@ -159,6 +187,72 @@ def _require_ledger(ledger: Any) -> dict[str, Any]:
         raise DraftFallbackError("fallback ledger has malformed ranked set")
     if not isinstance(attempts, list):
         raise DraftFallbackError("fallback ledger has malformed attempts")
+    return ledger
+
+
+def _attempt_disposition(attempt: dict[str, Any]) -> str:
+    return attempt.get("disposition", DISPOSITION_SKIP)
+
+
+def _public_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
+    if _attempt_disposition(attempt) == DISPOSITION_STORY:
+        return {
+            "candidate_id": attempt["candidate_id"],
+            "disposition": DISPOSITION_STORY,
+            "format_reason": attempt["format_reason"],
+        }
+    # Unchanged legacy shape for SKIP attempts.
+    return {
+        "candidate_id": attempt["candidate_id"],
+        "skip_reason": attempt["skip_reason"],
+    }
+
+
+def _require_attemptable(
+    ledger: dict[str, Any], candidate_id: str
+) -> tuple[dict[str, Any], str]:
+    ledger = _require_ledger(ledger)
+    candidate_id = _require_candidate_id(candidate_id, what="candidate_id")
+    if ledger.get("accepted_candidate_id") is not None:
+        raise DraftFallbackError("cycle already accepted a candidate")
+    if candidate_id not in ledger["ranked_candidate_ids"]:
+        raise DraftFallbackError(
+            f"candidate {candidate_id!r} is not in the frozen ranked set"
+        )
+    if any(a["candidate_id"] == candidate_id for a in ledger["attempts"]):
+        raise DraftFallbackError(
+            f"candidate {candidate_id!r} was already attempted once"
+        )
+    return ledger, candidate_id
+
+
+def record_story_disposition(
+    ledger: dict[str, Any],
+    *,
+    candidate_id: str,
+    format_reason: str,
+) -> dict[str, Any]:
+    """Record a POST/STORY candidate as Factory-non-producible.
+
+    This is NOT an acceptance and NOT a handoff: nothing is produced,
+    queued for, or delivered to StoryWorkflow. The candidate simply
+    cannot be produced by the FEED/CAROUSEL-only Draft Factory, so the
+    cycle continues in the frozen ranked order. Same fail-closed
+    guards as record_skip (frozen set, at-most-once, no post-accept).
+    """
+    ledger, candidate_id = _require_attemptable(ledger, candidate_id)
+    if format_reason not in REASON_CODES:
+        raise DraftFallbackError(
+            f"STORY reason is not a typed packaging reason: {format_reason!r}"
+        )
+    ledger["attempts"].append(
+        {
+            "candidate_id": candidate_id,
+            "disposition": DISPOSITION_STORY,
+            "format_reason": format_reason,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     return ledger
 
 
@@ -243,13 +337,7 @@ def next_candidate(ledger: dict[str, Any]) -> dict[str, Any]:
         "candidate_id": None,
         "domain_outcome": "NO_ACTION",
         "reason": aggregate_exhaustion_reason(ledger),
-        "skipped": [
-            {
-                "candidate_id": a["candidate_id"],
-                "skip_reason": a["skip_reason"],
-            }
-            for a in ledger["attempts"]
-        ],
+        "skipped": [_public_attempt(a) for a in ledger["attempts"]],
     }
 
 
@@ -257,10 +345,18 @@ def aggregate_exhaustion_reason(ledger: dict[str, Any]) -> str:
     """Deterministic aggregate NO_ACTION reason for an exhausted set."""
     ledger = _require_ledger(ledger)
     parts = [
-        f"{a['candidate_id']}:{a['skip_reason']}" for a in ledger["attempts"]
+        (
+            f"{a['candidate_id']}:STORY_NOT_FACTORY_PRODUCIBLE({a['format_reason']})"
+            if _attempt_disposition(a) == DISPOSITION_STORY
+            else f"{a['candidate_id']}:{a['skip_reason']}"
+        )
+        for a in ledger["attempts"]
     ]
+    has_story = any(
+        _attempt_disposition(a) == DISPOSITION_STORY for a in ledger["attempts"]
+    )
     return (
-        f"ALL_ELIGIBLE_SKIPPED "
+        f"{'ALL_RANKED_NOT_FACTORY_PRODUCIBLE' if has_story else 'ALL_ELIGIBLE_SKIPPED'} "
         f"count={len(parts)} attempts=[{', '.join(parts)}]"
     )
 
@@ -277,13 +373,7 @@ def ledger_summary(ledger: dict[str, Any]) -> dict[str, Any]:
         "schema": SCHEMA,
         "editorial_date": ledger["editorial_date"],
         "candidates_considered": list(ledger["ranked_candidate_ids"]),
-        "attempts": [
-            {
-                "candidate_id": a["candidate_id"],
-                "skip_reason": a["skip_reason"],
-            }
-            for a in ledger["attempts"]
-        ],
+        "attempts": [_public_attempt(a) for a in ledger["attempts"]],
         "final_selected_candidate_id": accepted,
         "terminal_decision": terminal["decision"],
     }
@@ -399,6 +489,47 @@ def self_test() -> None:
     assert terminal["domain_outcome"] == "NO_ACTION", terminal
     assert "a:LOW_AUDIENCE_VALUE" in terminal["reason"], terminal
     assert "b:WEAK_SOURCE_GROUNDING" in terminal["reason"], terminal
+
+    # POST/STORY: Factory-non-producible, continues, never accepted.
+    story = {
+        "POST_DECISION": "POST",
+        "FORMAT_DECISION": "STORY",
+        "FORMAT_REASON": "TWO_ITEM_COMPARISON_FITS_STORY",
+    }
+    assert classify_packaging_receipt(story) == (
+        "STORY_FALLBACK", "TWO_ITEM_COMPARISON_FITS_STORY"
+    )
+    try:
+        classify_packaging_receipt({**story, "FORMAT_REASON": "INVENTED"})
+    except DraftFallbackError:
+        pass
+    else:
+        raise AssertionError("STORY with unknown reason did not fail closed")
+    sl = new_ledger(editorial_date="2026-10-03", ranked_candidate_ids=["s", "p"])
+    record_story_disposition(
+        sl, candidate_id="s", format_reason="TWO_ITEM_COMPARISON_FITS_STORY"
+    )
+    assert next_candidate(sl)["candidate_id"] == "p"
+    try:
+        record_acceptance(sl, candidate_id="s")
+    except DraftFallbackError:
+        pass
+    else:
+        raise AssertionError("STORY candidate was later accepted")
+    record_acceptance(sl, candidate_id="p")
+    assert ledger_summary(sl)["attempts"] == [{
+        "candidate_id": "s",
+        "disposition": DISPOSITION_STORY,
+        "format_reason": "TWO_ITEM_COMPARISON_FITS_STORY",
+    }]
+    allstory = new_ledger(editorial_date="2026-10-03", ranked_candidate_ids=["s"])
+    record_story_disposition(
+        allstory, candidate_id="s", format_reason="TWO_ITEM_COMPARISON_FITS_STORY"
+    )
+    end = next_candidate(allstory)
+    assert end["decision"] == DECISION_ALL_SKIPPED
+    assert end["domain_outcome"] == "NO_ACTION"
+    assert "STORY_NOT_FACTORY_PRODUCIBLE" in end["reason"]
 
     print("DRAFT_CANDIDATE_FALLBACK_SELF_TEST=PASS")
 
