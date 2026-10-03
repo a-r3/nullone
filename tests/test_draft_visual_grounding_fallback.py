@@ -427,6 +427,125 @@ class InterruptedRecoveryTests(unittest.TestCase):
                     h.run()
                 self.assertEqual(h.helper_calls, [])
 
+    def test_19b_interrupted_asset_fully_validated_before_evaluator(self):
+        """candidate_id match alone never suffices for recovery."""
+        ground = grounding_item("ground-1")
+        bad_assets = {
+            "missing-schema": lambda d: d.pop("schema"),
+            "wrong-schema": lambda d: d.update(
+                schema="nullone.packaging-asset.v9"),
+            "missing-field": lambda d: d.pop("provenance"),
+            "invalid-kind": lambda d: d.update(asset_kind="GENERATED_IMAGE"),
+            "file-backed-blank-path": lambda d: d.update(
+                asset_kind="REAL_PHOTO", local_path="  "),
+            "file-backed-no-provenance": lambda d: d.update(
+                asset_kind="REAL_PHOTO",
+                local_path="social/drafts/production/evidence.png",
+                provenance="  "),
+            "none-names-file": lambda d: d.update(
+                local_path="social/drafts/production/evidence.png"),
+            "candidate-id-only": lambda d: (
+                d.clear(), d.update(candidate_id="ground-1")),
+        }
+        for name, mutate in bad_assets.items():
+            with self.subTest(case=name):
+                h = Harness(self, [ground, post_item("post-2")])
+                today = draft._today(h.root)
+                (h.prod / f"{today}-ground-1-packaging-request.json").write_text(
+                    json.dumps(ground["packaging_request"]), encoding="utf-8")
+                asset = copy.deepcopy(ground["asset"])
+                mutate(asset)
+                (h.prod / f"{today}-ground-1-packaging-asset.json").write_text(
+                    json.dumps(asset), encoding="utf-8")
+                with self.assertRaises(BridgeError):
+                    h.run()
+                # Rejected during recovery validation: the evaluator
+                # never ran for this candidate.
+                self.assertEqual(h.helper_calls, [])
+                self.assertFalse(h.receipt_path("ground-1").exists())
+
+    def test_19c_interrupted_request_fully_validated_before_evaluator(self):
+        ground = grounding_item("ground-1")
+        bad_requests = {
+            "missing-candidate-field": lambda r: r["candidate"].pop(
+                "visual_requirement"),
+            "forbidden-output-field": lambda r: r["candidate"].update(
+                FORMAT_DECISION="CAROUSEL"),
+            "wrong-enum": lambda r: r["candidate"].update(
+                verification_status="MAYBE"),
+            "content-type-split": lambda r: r["candidate"].update(
+                content_type="EXPLAINER"),
+        }
+        for name, mutate in bad_requests.items():
+            with self.subTest(case=name):
+                h = Harness(self, [ground, post_item("post-2")])
+                today = draft._today(h.root)
+                request = copy.deepcopy(ground["packaging_request"])
+                mutate(request)
+                (h.prod / f"{today}-ground-1-packaging-request.json").write_text(
+                    json.dumps(request), encoding="utf-8")
+                (h.prod / f"{today}-ground-1-packaging-asset.json").write_text(
+                    json.dumps(ground["asset"]), encoding="utf-8")
+                with self.assertRaises(BridgeError):
+                    h.run()
+                self.assertEqual(h.helper_calls, [])
+
+    def test_16b_recovered_asset_mismatch_fails_before_acceptance(self):
+        # Structurally valid POST request + structurally valid asset whose
+        # kind contradicts the receipt: evaluator succeeds, but the
+        # recovered asset must fail closed before acceptance/PRODUCE.
+        post = post_item("post-1")
+        h = Harness(self, [post])
+        today = draft._today(h.root)
+        (h.prod / f"{today}-post-1-packaging-request.json").write_text(
+            json.dumps(post["packaging_request"]), encoding="utf-8")
+        mismatched = copy.deepcopy(post["asset"])
+        mismatched.update(
+            asset_kind="REAL_PHOTO",
+            local_path="social/drafts/production/evidence.png",
+            provenance="Official source",
+        )
+        (h.prod / f"{today}-post-1-packaging-asset.json").write_text(
+            json.dumps(mismatched), encoding="utf-8")
+        with self.assertRaisesRegex(BridgeError, "MISMATCH"):
+            h.run()
+        self.assertEqual(h.helper_calls, [("nullone-packaging-evaluator.py", "post-1")])
+        self.assertEqual(h.rounds, ["SELECT"])  # PRODUCE never attempted
+        # Nothing accepted and no ledger acceptance persisted.
+        today = draft._today(h.root)
+        ledger_path = h.prod / f"{today}-draft-fallback-ledger.json"
+        self.assertFalse(ledger_path.exists())
+
+    def test_10b_exact_1615_grounding_state_recovers_without_deletion(self):
+        # Faithful replica of the 16:15 production interrupted state:
+        # valid PRACTICAL grounding request+asset, no receipt.
+        cid = "github-copilot-computer-use-preview-2026-10-03"
+        ground = practical_grounding_item(cid)
+        h = Harness(self, [ground, post_item("post-2")])
+        today = draft._today(h.root)
+        request_path = h.prod / f"{today}-{cid}-packaging-request.json"
+        asset_path = h.prod / f"{today}-{cid}-packaging-asset.json"
+        request_path.write_text(
+            json.dumps(ground["packaging_request"], indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        asset_path.write_text(
+            json.dumps(ground["asset"], indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        before = (request_path.read_bytes(), asset_path.read_bytes())
+        with self.assertRaises(StopAtProduce):
+            h.run()
+        # Recovered as-is: no overwrite, typed disposition, next
+        # candidate accepted, still no receipt for the grounded one.
+        self.assertEqual(
+            (request_path.read_bytes(), asset_path.read_bytes()), before)
+        self.assertFalse(h.receipt_path(cid).exists())
+        ledger = h.ledger()
+        self.assertEqual(ledger["accepted_candidate_id"], "post-2")
+        self.assertEqual(
+            ledger["attempts"][0].get("disposition"), "VISUAL_GROUNDING_UNMET")
+
     def test_20_existing_story_receipt_behavior_unchanged(self):
         story = story_item("story-1")
         h = Harness(self, [story, grounding_item("ground-2"), post_item("post-3")])
@@ -479,9 +598,20 @@ class HelperSeamContractTests(unittest.TestCase):
         with self.assertRaises(draft._PackagingGroundingUnmet):
             self._run_stub(CODE_LINE + "\n", 2, grounding_unmet_ok=True)
 
+    def test_10_code_line_on_other_exits_fails_closed(self):
+        # The reviewed evaluator contract for BridgeError is exit 2:
+        # the fixed code line on any other exit is a system failure.
+        with self.assertRaises(BridgeError):
+            self._run_stub(CODE_LINE + "\n", 1, grounding_unmet_ok=True)
+        with self.assertRaises(BridgeError):
+            self._run_stub(CODE_LINE + "\n", 3, grounding_unmet_ok=True)
+
     def test_10_unknown_code_or_exit_fails_closed(self):
         with self.assertRaises(BridgeError):
             self._run_stub("BLOCKED=something else\n", 2, grounding_unmet_ok=True)
+        with self.assertRaises(BridgeError):
+            # Bare non-zero exit with no code at all.
+            self._run_stub("", 2, grounding_unmet_ok=True)
         with self.assertRaises(BridgeError):
             # Code line present but success-shaped exit without marker.
             self._run_stub(CODE_LINE + "\n", 0, grounding_unmet_ok=True)
