@@ -26,6 +26,14 @@ Hard rules (enforced here, not by prompt text):
   frozen-ranked candidate. The ledger records the disposition
   truthfully (STORY_NOT_FACTORY_PRODUCIBLE), never as published,
   delivered, or delegated.
+- A deterministic visual-grounding impossibility
+  (PACKAGING_VISUAL_GROUNDING_UNMET, raised before any receipt
+  exists) is likewise Factory-local NON-PRODUCIBLE: never accepted,
+  never rendered, no receipt manufactured, and the cycle continues
+  in the frozen ranked order. The ledger records the disposition
+  truthfully (VISUAL_GROUNDING_UNMET), never as published,
+  delivered, or delegated, and never as POST_DECISION=SKIP (no
+  receipt exists to carry that decision).
 - Only a legitimate candidate-local policy SKIP continues: a
   well-formed receipt with POST_DECISION == SKIP,
   FORMAT_DECISION == SKIP, and FORMAT_REASON in the authoritative
@@ -89,6 +97,7 @@ KIND_STORY_FALLBACK = "STORY_FALLBACK"
 # existed carry no "disposition" key; every such attempt is a SKIP.
 DISPOSITION_SKIP = "SKIP"
 DISPOSITION_STORY = "STORY_NOT_FACTORY_PRODUCIBLE"
+DISPOSITION_VISUAL_GROUNDING = "VISUAL_GROUNDING_UNMET"
 
 
 class DraftFallbackError(ValueError):
@@ -201,6 +210,11 @@ def _public_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
             "disposition": DISPOSITION_STORY,
             "format_reason": attempt["format_reason"],
         }
+    if _attempt_disposition(attempt) == DISPOSITION_VISUAL_GROUNDING:
+        return {
+            "candidate_id": attempt["candidate_id"],
+            "disposition": DISPOSITION_VISUAL_GROUNDING,
+        }
     # Unchanged legacy shape for SKIP attempts.
     return {
         "candidate_id": attempt["candidate_id"],
@@ -250,6 +264,31 @@ def record_story_disposition(
             "candidate_id": candidate_id,
             "disposition": DISPOSITION_STORY,
             "format_reason": format_reason,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return ledger
+
+
+def record_visual_grounding_disposition(
+    ledger: dict[str, Any],
+    *,
+    candidate_id: str,
+) -> dict[str, Any]:
+    """Record a visual-grounding impossibility as Factory-non-producible.
+
+    The evaluator raised PACKAGING_VISUAL_GROUNDING_UNMET before any
+    receipt existed, so there is no POST_DECISION to classify: this is
+    NOT an acceptance, NOT a SKIP receipt, and NOT a handoff. Nothing
+    is produced and the cycle continues in the frozen ranked order.
+    Same fail-closed guards as record_skip (frozen set, at-most-once,
+    no post-accept).
+    """
+    ledger, candidate_id = _require_attemptable(ledger, candidate_id)
+    ledger["attempts"].append(
+        {
+            "candidate_id": candidate_id,
+            "disposition": DISPOSITION_VISUAL_GROUNDING,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -348,15 +387,20 @@ def aggregate_exhaustion_reason(ledger: dict[str, Any]) -> str:
         (
             f"{a['candidate_id']}:STORY_NOT_FACTORY_PRODUCIBLE({a['format_reason']})"
             if _attempt_disposition(a) == DISPOSITION_STORY
-            else f"{a['candidate_id']}:{a['skip_reason']}"
+            else (
+                f"{a['candidate_id']}:VISUAL_GROUNDING_UNMET"
+                if _attempt_disposition(a) == DISPOSITION_VISUAL_GROUNDING
+                else f"{a['candidate_id']}:{a['skip_reason']}"
+            )
         )
         for a in ledger["attempts"]
     ]
-    has_story = any(
-        _attempt_disposition(a) == DISPOSITION_STORY for a in ledger["attempts"]
+    has_nonproducible = any(
+        _attempt_disposition(a) in (DISPOSITION_STORY, DISPOSITION_VISUAL_GROUNDING)
+        for a in ledger["attempts"]
     )
     return (
-        f"{'ALL_RANKED_NOT_FACTORY_PRODUCIBLE' if has_story else 'ALL_ELIGIBLE_SKIPPED'} "
+        f"{'ALL_RANKED_NOT_FACTORY_PRODUCIBLE' if has_nonproducible else 'ALL_ELIGIBLE_SKIPPED'} "
         f"count={len(parts)} attempts=[{', '.join(parts)}]"
     )
 
@@ -530,6 +574,54 @@ def self_test() -> None:
     assert end["decision"] == DECISION_ALL_SKIPPED
     assert end["domain_outcome"] == "NO_ACTION"
     assert "STORY_NOT_FACTORY_PRODUCIBLE" in end["reason"]
+
+    # VISUAL_GROUNDING_UNMET: Factory-non-producible without a receipt.
+    gl = new_ledger(editorial_date="2026-10-03", ranked_candidate_ids=["g", "p"])
+    record_visual_grounding_disposition(gl, candidate_id="g")
+    assert next_candidate(gl)["candidate_id"] == "p"
+    try:
+        record_acceptance(gl, candidate_id="g")
+    except DraftFallbackError:
+        pass
+    else:
+        raise AssertionError("grounding candidate was later accepted")
+    try:
+        record_visual_grounding_disposition(gl, candidate_id="g")
+    except DraftFallbackError:
+        pass
+    else:
+        raise AssertionError("grounding double attempt did not fail closed")
+    try:
+        record_visual_grounding_disposition(gl, candidate_id="injected")
+    except DraftFallbackError:
+        pass
+    else:
+        raise AssertionError("grounding injected candidate did not fail closed")
+    record_acceptance(gl, candidate_id="p")
+    assert ledger_summary(gl)["attempts"] == [
+        {"candidate_id": "g", "disposition": DISPOSITION_VISUAL_GROUNDING}
+    ]
+    gallexhausted = new_ledger(
+        editorial_date="2026-10-03", ranked_candidate_ids=["s", "g", "k"]
+    )
+    record_story_disposition(
+        gallexhausted, candidate_id="s",
+        format_reason="TWO_ITEM_COMPARISON_FITS_STORY",
+    )
+    record_visual_grounding_disposition(gallexhausted, candidate_id="g")
+    record_skip(
+        gallexhausted, candidate_id="k", skip_reason="LOW_AUDIENCE_VALUE"
+    )
+    gend = next_candidate(gallexhausted)
+    assert gend["decision"] == DECISION_ALL_SKIPPED
+    assert gend["domain_outcome"] == "NO_ACTION"
+    assert "ALL_RANKED_NOT_FACTORY_PRODUCIBLE" in gend["reason"]
+    assert "g:VISUAL_GROUNDING_UNMET" in gend["reason"]
+    gonly = new_ledger(editorial_date="2026-10-03", ranked_candidate_ids=["g"])
+    record_visual_grounding_disposition(gonly, candidate_id="g")
+    gonlyend = next_candidate(gonly)
+    assert gonlyend["decision"] == DECISION_ALL_SKIPPED
+    assert "ALL_RANKED_NOT_FACTORY_PRODUCIBLE" in gonlyend["reason"]
 
     print("DRAFT_CANDIDATE_FALLBACK_SELF_TEST=PASS")
 
