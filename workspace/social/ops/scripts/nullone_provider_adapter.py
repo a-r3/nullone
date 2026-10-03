@@ -132,9 +132,17 @@ def _invoke_opencode_cycle(profile: ProviderProfile, call: AdapterCall) -> None:
 def _invoke_claude_cycle(profile: ProviderProfile, call: AdapterCall) -> None:
     if profile.role == "draft_factory":
         from nullone_claude_draft_provider import invoke_draft
+        from nullone_draft_stage_error import DraftStageError, stage_error_from
 
-        invoke_draft(prompt=call.prompt, workspace=call.workspace,
-                     model=profile.model, timeout=profile.timeout_seconds)
+        try:
+            invoke_draft(prompt=call.prompt, workspace=call.workspace,
+                         model=profile.model, timeout=profile.timeout_seconds)
+        except DraftStageError:
+            raise
+        except BridgeError as exc:
+            # Observability only: same fail-closed BridgeError family,
+            # carrying just a safe stage code (never the original text).
+            raise stage_error_from(exc) from None
         return
     if profile.role == "weekly_strategy":
         from nullone_claude_weekly_provider import invoke_weekly
