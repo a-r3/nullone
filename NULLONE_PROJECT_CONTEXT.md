@@ -1,9 +1,59 @@
 # NULLONE_PROJECT_CONTEXT
 
-Last updated: 2026-10-02 Asia/Baku
+Last updated: 2026-10-03 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
-## Draft Factory SELECT packaging contract — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
+## Draft Factory STORY non-producible fallback — 2026-10-03 Asia/Baku (REPO FIX; NOT DEPLOYED)
+
+- PR #200 (Draft SELECT packaging-request/asset contract) is MERGED and
+  DEPLOYED. Controlled deploy: 2026-10-03 03:49 Asia/Baku. Deployed
+  provider SHA256:
+  `6d56473b0eabc6971cedb2bd8134b2b1c3fbe2c35d4c5928965db3ca1967a38d`.
+- Natural 2026-10-03 09:45 Asia/Baku Draft Factory run succeeded
+  (`status=ok`, `completionStatus=succeeded`, `draft_factory ->
+  claude/sonnet`, `ROLE_OUTCOME=COMPLETED`, exit 0).
+- PR #200 packaging boundary natural proof: PASS. Packaging request,
+  packaging asset, canonical packaging decision receipt, and fallback
+  ledger were all written for candidate
+  `anthropic-robots-physical-work-exposure-2026-10-02`.
+- Receipt: `POST_DECISION=POST`, `FORMAT_DECISION=STORY`,
+  `FORMAT_REASON=TWO_ITEM_COMPARISON_FITS_STORY`,
+  `VISUAL_STYLE=DATA_VISUALIZATION`, `visual_requirement=NONE`.
+  Fallback ledger: ranked
+  `[anthropic-robots-physical-work-exposure-2026-10-02,
+  github-copilot-computer-use-preview-2026-10-03,
+  apple-macos-full-disk-access-ai-agents-2026-10-03]`, accepted the
+  first, `attempts=[]`.
+- No FEED/CAROUSEL draft was produced: the provider recorded the STORY
+  candidate as the accepted candidate and returned `DELEGATED`. No
+  caption/render/manifest/Zernio/Telegram artifacts followed.
+- Morning Story handoff for 2026-10-03
+  (`social/research/daily/2026-10-03-editorial-candidates.json`) exists
+  but does NOT contain this candidate (`CANDIDATE_PRESENT=False`); the
+  10:30 Story job succeeded without it. The queue candidate remains
+  `READY` / `PASS` / `EXPLAINER`.
+- Confirmed new issue: Draft Factory's STORY "delegation" is a no-op
+  (no Draft->Story handoff exists) and prematurely terminates ranked
+  main-production fallback.
+- This branch (`fix/draft-factory-story-fallback`): Draft Factory stays
+  FEED/CAROUSEL-only. POST/STORY is a typed Factory-local
+  non-producible disposition (`STORY_NOT_FACTORY_PRODUCIBLE`, reason =
+  validated `FORMAT_REASON`): not accepted, not rendered, no
+  manifest/Zernio/Telegram, no handoff; the cycle continues in the
+  frozen ranked order; all-skip/STORY ends as truthful `NO_ACTION`; at
+  most one FEED/CAROUSEL candidate is accepted. An already-existing
+  canonical STORY receipt is verified (fail closed on malformed or
+  tampered) and honored before any request/asset rewrite or evaluator
+  run, so a later cycle is not trapped on the known STORY candidate.
+  Legacy fallback ledgers remain valid. StoryWorkflow's Morning-handoff
+  authority and publication authority are unchanged.
+- Repo-only until reviewed and deployed. #194 remains OPEN; full
+  FEED/CAROUSEL -> Zernio -> Telegram natural acceptance proof remains
+  pending.
+
+## Draft Factory SELECT packaging contract — 2026-10-03 Asia/Baku (DEPLOYED; NATURAL PACKAGING-BOUNDARY PROOF PASS)
+
+(Originally recorded 2026-10-02 as a repo fix; the failure and root-cause details below are preserved as history.)
 
 - PR #198 parser deploy remains successful (live queue parses:
   `TOTAL_ENTRIES=124`, `ELIGIBLE_READY=36`).
@@ -27,8 +77,21 @@ Status: canonical project context for repository/project continuity. Production 
   valid `nullone.packaging-asset.v1` descriptor; receipt/style authority
   stays downstream). Malformed SELECT output now fails before any
   request/asset production write.
-- This new fix is repo-only until separately deployed. #194 remains OPEN;
-  no natural acceptance proof yet. Radar recovery remains separate.
+- Delivered as PR #200. Reviewed head
+  `1ce5dbddfb05e77c384edc2e69e8217109d38c92`; squash merge
+  `e862fb87372a8e134645106142c361a9ac34f276`.
+- Controlled production deploy: 2026-10-03 03:49 Asia/Baku. Deployed
+  runtime file `social/ops/scripts/nullone_claude_draft_provider.py`,
+  SHA256
+  `6d56473b0eabc6971cedb2bd8134b2b1c3fbe2c35d4c5928965db3ca1967a38d`.
+- Natural 2026-10-03 09:45 Asia/Baku run created the packaging
+  request, asset, canonical receipt, and fallback ledger, proving the
+  PR #200 SELECT/packaging boundary in production. The old
+  `candidate must be an object` failure is fixed and proved.
+- Full FEED/CAROUSEL -> Zernio -> Telegram natural acceptance proof is
+  still PENDING (that run's candidate resolved to STORY; see the STORY
+  fallback section above). #194 remains OPEN. Radar recovery remains
+  separate.
 
 ## Breaking Radar safe failure-stage telemetry — 2026-10-02 Asia/Baku (REPO FIX; NOT DEPLOYED)
 
