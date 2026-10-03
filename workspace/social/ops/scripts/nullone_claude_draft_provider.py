@@ -81,6 +81,7 @@ fail-closed; the wrapper maps it to BLOCKED.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -98,6 +99,38 @@ from nullone_bridge_common import BridgeError
 from nullone_claude import run_structured
 from nullone_draft_candidate_queue import (
     QUEUE_PATH, flip_ready_to_drafted, load_queue,
+)
+from nullone_draft_stage_error import (
+    DRAFT_REASON_CAPTION_WRITE,
+    DRAFT_REASON_CLAUDE_BINARY_MISSING,
+    DRAFT_REASON_CLAUDE_COMPLETE,
+    DRAFT_REASON_CLAUDE_EXIT_NONZERO,
+    DRAFT_REASON_CLAUDE_OUTPUT_INVALID,
+    DRAFT_REASON_CLAUDE_PRODUCE,
+    DRAFT_REASON_CLAUDE_SELECT,
+    DRAFT_REASON_CLAUDE_TIMEOUT,
+    DRAFT_REASON_DRAFT_BRIDGE,
+    DRAFT_REASON_EXISTING_RECEIPT_VALIDATION,
+    DRAFT_REASON_FALLBACK_LEDGER_INIT,
+    DRAFT_REASON_FALLBACK_NEXT,
+    DRAFT_REASON_FALLBACK_RECORD,
+    DRAFT_REASON_INTERRUPTED_STATE_VALIDATION,
+    DRAFT_REASON_LEDGER_WRITE,
+    DRAFT_REASON_MANIFEST,
+    DRAFT_REASON_PACKAGING_CLASSIFICATION,
+    DRAFT_REASON_PACKAGING_EVALUATOR,
+    DRAFT_REASON_PACKAGING_INPUT_WRITE,
+    DRAFT_REASON_PACKAGING_RECEIPT_VALIDATION,
+    DRAFT_REASON_PREVIEW_PAYLOAD,
+    DRAFT_REASON_PRODUCE_VALIDATION,
+    DRAFT_REASON_QUEUE_LOAD,
+    DRAFT_REASON_QUEUE_STATUS_FLIP,
+    DRAFT_REASON_RENDER,
+    DRAFT_REASON_REPORT_WRITE,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY,
+    DRAFT_REASON_SELECT_VALIDATION,
+    DRAFT_REASON_TELEGRAM_DELIVERY,
+    mark_stage,
 )
 from nullone_packaging_policy import (
     AUDIENCE_VALUE_VALUES,
@@ -132,6 +165,49 @@ class _PackagingGroundingUnmet(Exception):
     content: the fallback loop records VISUAL_GROUNDING_UNMET and
     continues to the next frozen-ranked candidate.
     """
+
+
+_CLAUDE_EXIT_RE = re.compile(r"^Claude invocation failed \(exit=(-?\d+)\)$")
+
+
+def _claude_transport_stage(exc: BaseException) -> tuple[str, int | None] | None:
+    """Map a `run_structured` BridgeError to a safe transport stage code.
+
+    Matches ONLY the known locally-generated messages from
+    `nullone_claude.run_structured` (exact strings; the exit message
+    must be exactly the reviewed shape with a numeric exit). Returns
+    None for anything else -- the caller then uses its phase code --
+    and never echoes the original message.
+    """
+    message = str(exc) if isinstance(exc, BridgeError) else ""
+    if message == "Claude invocation timed out":
+        return (DRAFT_REASON_CLAUDE_TIMEOUT, None)
+    if message == "claude binary not found":
+        return (DRAFT_REASON_CLAUDE_BINARY_MISSING, None)
+    matched = _CLAUDE_EXIT_RE.match(message)
+    if matched is not None:
+        return (DRAFT_REASON_CLAUDE_EXIT_NONZERO, int(matched.group(1)))
+    if message in (
+        "Claude returned non-JSON output",
+        "Claude JSON output is not an object",
+    ):
+        return (DRAFT_REASON_CLAUDE_OUTPUT_INVALID, None)
+    return None
+
+
+@contextlib.contextmanager
+def _stage(reason_code: str):
+    """Tag any escaping failure with a safe stage code (observability only).
+
+    Re-raises the SAME exception object: type, message, traceback,
+    and control flow are unchanged. Only an attribute tag is added
+    (innermost stage wins). The tag never carries exception text.
+    """
+    try:
+        yield
+    except Exception as exc:
+        mark_stage(exc, reason_code)
+        raise
 
 ALLOWED_TOOLS = ["Read", "WebSearch", "WebFetch", "Glob"]
 
@@ -957,91 +1033,116 @@ def invoke_draft(
         minimum = MIN_CONSEQUENTIAL_HELPER_SECONDS if name in ("bridge", "deliver") else 1
         return bounded_timeout(deadline, helper_cap=HELPER_TIMEOUTS[name], minimum=minimum)
 
-    def structured(schema: dict[str, Any], phase_prompt: str) -> dict[str, Any]:
-        return run_structured(
-            prompt=phase_prompt,
-            allowed_tools=ALLOWED_TOOLS,
-            schema=schema,
-            model=model,
-            max_turns=MAX_TURNS_PER_ROUND,
-            timeout=bounded_timeout(deadline, minimum=MIN_ROUND_SECONDS),
-            workspace=root,
-            weekly_security_settings=draft_security_settings(root),
-        )
+    def structured(
+        schema: dict[str, Any], phase_prompt: str, phase_code: str
+    ) -> dict[str, Any]:
+        try:
+            return run_structured(
+                prompt=phase_prompt,
+                allowed_tools=ALLOWED_TOOLS,
+                schema=schema,
+                model=model,
+                max_turns=MAX_TURNS_PER_ROUND,
+                timeout=bounded_timeout(deadline, minimum=MIN_ROUND_SECONDS),
+                workspace=root,
+                weekly_security_settings=draft_security_settings(root),
+            )
+        except Exception as exc:
+            # Known local transport failures keep their transport code;
+            # anything else carries the phase code. Tag only: the same
+            # exception propagates unchanged.
+            transport = _claude_transport_stage(exc)
+            if transport is not None:
+                mark_stage(exc, transport[0], exit_code=transport[1])
+            else:
+                mark_stage(exc, phase_code)
+            raise
 
     today = _today(root)
     drafts = root / "social/drafts/production"
 
     # ---- SELECT ----
-    queue_snapshot = load_queue(root)
-    eligible = queue_snapshot.eligible()
+    with _stage(DRAFT_REASON_QUEUE_LOAD):
+        queue_snapshot = load_queue(root)
+        eligible = queue_snapshot.eligible()
     eligible_prompt = [
         {"candidate_id": candidate_id, "topic": entry.topic,
          "topic_cluster": entry.fields["topic_cluster"],
          "content_type": entry.fields["content_type"]}
         for candidate_id, entry in eligible.items()
     ]
-    selected = _validated_select(
-        structured(SELECT_SCHEMA, prompt + SELECT_APPENDIX % {
+    select_raw = structured(
+        SELECT_SCHEMA,
+        prompt + SELECT_APPENDIX % {
             "max_ranked": MAX_RANKED,
             "eligible": json.dumps(eligible_prompt, ensure_ascii=False),
-        })
+        },
+        DRAFT_REASON_CLAUDE_SELECT,
     )
+    with _stage(DRAFT_REASON_SELECT_VALIDATION):
+        selected = _validated_select(select_raw)
     if selected["decision"] == "NO_ACTION" or not selected["ranked"]:
         return {"status": "NO_ACTION", "candidate_id": None}
-    for item in selected["ranked"]:
-        _check_candidate_id(item["candidate_id"])
-        entry = eligible.get(item["candidate_id"])
-        if entry is None:
-            raise BridgeError("Draft SELECT candidate is not eligible")
-        if item["topic"] != entry.topic or item["topic_cluster"] != entry.fields["topic_cluster"] or item["content_type"] != entry.fields["content_type"]:
-            raise BridgeError("Draft SELECT identity disagrees with queue")
-        if entry.fields["content_type"] not in CONTENT_TYPES:
-            raise BridgeError("Draft candidate content_type not reviewable")
-    ranked_ids = [item["candidate_id"] for item in selected["ranked"]]
-    if len(set(ranked_ids)) != len(ranked_ids):
-        raise BridgeError("Draft ranked candidates contain duplicates")
-    by_id = {item["candidate_id"]: item for item in selected["ranked"]}
+    with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY):
+        for item in selected["ranked"]:
+            _check_candidate_id(item["candidate_id"])
+            entry = eligible.get(item["candidate_id"])
+            if entry is None:
+                raise BridgeError("Draft SELECT candidate is not eligible")
+            if item["topic"] != entry.topic or item["topic_cluster"] != entry.fields["topic_cluster"] or item["content_type"] != entry.fields["content_type"]:
+                raise BridgeError("Draft SELECT identity disagrees with queue")
+            if entry.fields["content_type"] not in CONTENT_TYPES:
+                raise BridgeError("Draft candidate content_type not reviewable")
+        ranked_ids = [item["candidate_id"] for item in selected["ranked"]]
+        if len(set(ranked_ids)) != len(ranked_ids):
+            raise BridgeError("Draft ranked candidates contain duplicates")
+        by_id = {item["candidate_id"]: item for item in selected["ranked"]}
 
-    try:
-        ledger = new_ledger(editorial_date=today, ranked_candidate_ids=ranked_ids)
-    except DraftFallbackError as exc:
-        raise BridgeError(f"Draft fallback ledger refused: {exc}") from exc
-    ledger_path = drafts / f"{today}-draft-fallback-ledger.json"
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    with _stage(DRAFT_REASON_FALLBACK_LEDGER_INIT):
+        try:
+            ledger = new_ledger(editorial_date=today, ranked_candidate_ids=ranked_ids)
+        except DraftFallbackError as exc:
+            raise BridgeError(f"Draft fallback ledger refused: {exc}") from exc
+        ledger_path = drafts / f"{today}-draft-fallback-ledger.json"
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
 
     accepted_id: str | None = None
     receipt: dict[str, Any] | None = None
     while True:
-        try:
-            step = next_candidate(ledger)
-        except DraftFallbackError as exc:
-            raise BridgeError(f"Draft fallback refused: {exc}") from exc
+        with _stage(DRAFT_REASON_FALLBACK_NEXT):
+            try:
+                step = next_candidate(ledger)
+            except DraftFallbackError as exc:
+                raise BridgeError(f"Draft fallback refused: {exc}") from exc
         if step.get("decision") == "ALL_SKIPPED":
-            save_ledger(ledger_path, ledger)
+            with _stage(DRAFT_REASON_FALLBACK_RECORD):
+                save_ledger(ledger_path, ledger)
             return {"status": "NO_ACTION", "candidate_id": None}
         candidate_id = step.get("candidate_id")
         item = by_id.get(candidate_id or "")
         if item is None:
-            raise BridgeError("Draft fallback returned an unranked candidate")
+            with _stage(DRAFT_REASON_FALLBACK_NEXT):
+                raise BridgeError("Draft fallback returned an unranked candidate")
         # A canonical receipt that already exists is authoritative and is
         # verified BEFORE any request/asset write or evaluator run. A
         # malformed/tampered one fails closed (BridgeError from
         # load_receipt). An existing STORY decision is handled
         # deterministically without re-evaluating changed model bytes.
-        receipt_file = canonical_receipt_path(candidate_id, root=root)
+        with _stage(DRAFT_REASON_EXISTING_RECEIPT_VALIDATION):
+            receipt_file = canonical_receipt_path(candidate_id, root=root)
         receipt = None
         kind = reason = None
         if receipt_file.exists() or receipt_file.is_symlink():
-            try:
-                receipt = load_receipt(receipt_file, root=root)
-                if receipt.get("candidate_id") != candidate_id:
-                    raise BridgeError("Draft receipt candidate mismatch")
-                kind, reason = classify_packaging_receipt(receipt)
-            except BridgeError:
-                raise
-            except Exception as exc:
-                raise BridgeError(f"Draft receipt classification failed: {exc}") from exc
+            with _stage(DRAFT_REASON_EXISTING_RECEIPT_VALIDATION):
+                try:
+                    receipt = load_receipt(receipt_file, root=root)
+                    if receipt.get("candidate_id") != candidate_id:
+                        raise BridgeError("Draft receipt candidate mismatch")
+                    kind, reason = classify_packaging_receipt(receipt)
+                except BridgeError:
+                    raise
+                except Exception as exc:
+                    raise BridgeError(f"Draft receipt classification failed: {exc}") from exc
             if kind != "STORY_FALLBACK":
                 # Existing SKIP/POST receipts keep the idempotent
                 # evaluator path below (same bytes or CONFLICT).
@@ -1055,24 +1156,26 @@ def invoke_draft(
             # reuse the EXISTING bytes through the authoritative
             # evaluator instead of overwriting them with newly selected
             # model bytes. Fresh candidates take the write path.
-            recovered = _recover_interrupted_request_asset(
-                candidate_id=candidate_id,
-                request_path=request_path,
-                asset_path=asset_path,
-                workspace_root=root,
-            )
+            with _stage(DRAFT_REASON_INTERRUPTED_STATE_VALIDATION):
+                recovered = _recover_interrupted_request_asset(
+                    candidate_id=candidate_id,
+                    request_path=request_path,
+                    asset_path=asset_path,
+                    workspace_root=root,
+                )
             recovered_asset: dict[str, Any] | None = None
             if recovered is None:
-                _write_new_file(
-                    request_path,
-                    json.dumps(item["packaging_request"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                    workspace_root=root,
-                )
-                _write_new_file(
-                    asset_path,
-                    json.dumps(item["asset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                    workspace_root=root,
-                )
+                with _stage(DRAFT_REASON_PACKAGING_INPUT_WRITE):
+                    _write_new_file(
+                        request_path,
+                        json.dumps(item["packaging_request"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                        workspace_root=root,
+                    )
+                    _write_new_file(
+                        asset_path,
+                        json.dumps(item["asset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                        workspace_root=root,
+                    )
             else:
                 existing_request, existing_asset = recovered
                 recovered_asset = existing_asset
@@ -1082,46 +1185,51 @@ def invoke_draft(
                 # model bytes) and the asset descriptor structurally. A
                 # malformed asset therefore fails closed here and can
                 # never be recorded as grounding-unmet nor accepted.
-                _check_packaging_request_contract(
-                    existing_request,
-                    expected_content_type=eligible[candidate_id].fields[
-                        "content_type"
-                    ],
-                )
-                _check_asset_descriptor_contract(
-                    existing_asset, candidate_id=candidate_id
-                )
+                with _stage(DRAFT_REASON_INTERRUPTED_STATE_VALIDATION):
+                    _check_packaging_request_contract(
+                        existing_request,
+                        expected_content_type=eligible[candidate_id].fields[
+                            "content_type"
+                        ],
+                    )
+                    _check_asset_descriptor_contract(
+                        existing_asset, candidate_id=candidate_id
+                    )
             try:
-                _run_helper(
-                    [
-                        sys.executable,
-                        str(SCRIPTS_DIR / "nullone-packaging-evaluator.py"),
-                        "evaluate",
-                        "--candidate-id",
-                        candidate_id,
-                        "--request-file",
-                        str(request_path),
-                    ],
-                    workspace_root=root,
-                    timeout=helper_timeout("evaluate"),
-                    marker="RECEIPT_PATH=",
-                    grounding_unmet_ok=True,
-                )
+                with _stage(DRAFT_REASON_PACKAGING_EVALUATOR):
+                    _run_helper(
+                        [
+                            sys.executable,
+                            str(SCRIPTS_DIR / "nullone-packaging-evaluator.py"),
+                            "evaluate",
+                            "--candidate-id",
+                            candidate_id,
+                            "--request-file",
+                            str(request_path),
+                        ],
+                        workspace_root=root,
+                        timeout=helper_timeout("evaluate"),
+                        marker="RECEIPT_PATH=",
+                        grounding_unmet_ok=True,
+                    )
             except _PackagingGroundingUnmet:
                 # Candidate-local visual-grounding impossibility: no
                 # receipt exists and none is manufactured. Record the
                 # typed disposition and continue to the next candidate.
-                try:
-                    ledger = record_visual_grounding_disposition(
-                        ledger, candidate_id=candidate_id
-                    )
-                    save_ledger(ledger_path, ledger)
-                except DraftFallbackError as exc:
-                    raise BridgeError(f"Draft fallback refused: {exc}") from exc
+                with _stage(DRAFT_REASON_FALLBACK_RECORD):
+                    try:
+                        ledger = record_visual_grounding_disposition(
+                            ledger, candidate_id=candidate_id
+                        )
+                        save_ledger(ledger_path, ledger)
+                    except DraftFallbackError as exc:
+                        raise BridgeError(f"Draft fallback refused: {exc}") from exc
                 continue
             try:
-                receipt = load_receipt(receipt_file, root=root)
-                kind, reason = classify_packaging_receipt(receipt)
+                with _stage(DRAFT_REASON_PACKAGING_RECEIPT_VALIDATION):
+                    receipt = load_receipt(receipt_file, root=root)
+                with _stage(DRAFT_REASON_PACKAGING_CLASSIFICATION):
+                    kind, reason = classify_packaging_receipt(receipt)
             except BridgeError:
                 raise
             except Exception as exc:
@@ -1135,42 +1243,46 @@ def invoke_draft(
                 # create before anything can accept it or PRODUCE from
                 # it. Fresh-path assets were SELECT-validated from this
                 # cycle's bytes and meet the render gate downstream.
-                try:
-                    validate_asset_descriptor(
-                        recovered_asset, receipt, root=root
-                    )
-                except BridgeError:
-                    raise
-                except Exception as exc:
-                    raise BridgeError(
-                        f"Draft recovered asset rejected: {exc}"
-                    ) from exc
+                with _stage(DRAFT_REASON_INTERRUPTED_STATE_VALIDATION):
+                    try:
+                        validate_asset_descriptor(
+                            recovered_asset, receipt, root=root
+                        )
+                    except BridgeError:
+                        raise
+                    except Exception as exc:
+                        raise BridgeError(
+                            f"Draft recovered asset rejected: {exc}"
+                        ) from exc
         if kind == "SKIP_FALLBACK":
-            try:
-                ledger = record_skip(
-                    ledger, candidate_id=candidate_id, skip_reason=reason or ""
-                )
-                save_ledger(ledger_path, ledger)
-            except DraftFallbackError as exc:
-                raise BridgeError(f"Draft fallback refused: {exc}") from exc
+            with _stage(DRAFT_REASON_FALLBACK_RECORD):
+                try:
+                    ledger = record_skip(
+                        ledger, candidate_id=candidate_id, skip_reason=reason or ""
+                    )
+                    save_ledger(ledger_path, ledger)
+                except DraftFallbackError as exc:
+                    raise BridgeError(f"Draft fallback refused: {exc}") from exc
             continue
         if kind == "STORY_FALLBACK":
             # Draft Factory is FEED/CAROUSEL-only. StoryWorkflow owns
             # normal Story from its own Morning handoff; this is NOT a
             # handoff, acceptance, or render. Record and continue.
+            with _stage(DRAFT_REASON_FALLBACK_RECORD):
+                try:
+                    ledger = record_story_disposition(
+                        ledger, candidate_id=candidate_id, format_reason=reason or ""
+                    )
+                    save_ledger(ledger_path, ledger)
+                except DraftFallbackError as exc:
+                    raise BridgeError(f"Draft fallback refused: {exc}") from exc
+            continue
+        with _stage(DRAFT_REASON_FALLBACK_RECORD):
             try:
-                ledger = record_story_disposition(
-                    ledger, candidate_id=candidate_id, format_reason=reason or ""
-                )
+                ledger = record_acceptance(ledger, candidate_id=candidate_id)
                 save_ledger(ledger_path, ledger)
             except DraftFallbackError as exc:
                 raise BridgeError(f"Draft fallback refused: {exc}") from exc
-            continue
-        try:
-            ledger = record_acceptance(ledger, candidate_id=candidate_id)
-            save_ledger(ledger_path, ledger)
-        except DraftFallbackError as exc:
-            raise BridgeError(f"Draft fallback refused: {exc}") from exc
         accepted_id = candidate_id
         break
 
@@ -1178,209 +1290,224 @@ def invoke_draft(
     format_decision = receipt.get("FORMAT_DECISION")
     manifest_format = FORMAT_TO_MANIFEST_FORMAT.get(format_decision or "")
     if manifest_format is None:
-        raise BridgeError(f"Draft receipt format not producible: {format_decision!r}")
+        with _stage(DRAFT_REASON_PRODUCE_VALIDATION):
+            raise BridgeError(f"Draft receipt format not producible: {format_decision!r}")
     carousel = manifest_format == "CAROUSEL"
     # ---- PRODUCE ----
-    produced = _validated_produce(
-        structured(
-            PRODUCE_SCHEMA,
-            prompt
-            + PRODUCE_APPENDIX
-            % {"format": format_decision, "candidate_id": accepted_id},
-        ),
-        carousel=carousel,
+    produce_raw = structured(
+        PRODUCE_SCHEMA,
+        prompt
+        + PRODUCE_APPENDIX
+        % {"format": format_decision, "candidate_id": accepted_id},
+        DRAFT_REASON_CLAUDE_PRODUCE,
     )
+    with _stage(DRAFT_REASON_PRODUCE_VALIDATION):
+        produced = _validated_produce(produce_raw, carousel=carousel)
     caption_path = drafts / f"{today}-{accepted_id}-caption.txt"
-    _write_new_file(
-        caption_path, produced["caption"].strip() + "\n", workspace_root=root
-    )
-    from nullone_packaging_receipt import (
-        canonical_receipt_path,
-        canonical_render_record_path,
-    )
-
-    render_argv = [
-        sys.executable,
-        str(SCRIPTS_DIR / "nullone-packaging-render.py"),
-        "render",
-        "--receipt",
-        str(canonical_receipt_path(accepted_id, root=root)),
-        "--asset-file",
-        str(asset_path_for(accepted_id, today, root)),
-    ]
-    if carousel:
-        spec_path = drafts / f"{today}-{accepted_id}-carousel-spec.json"
+    with _stage(DRAFT_REASON_CAPTION_WRITE):
         _write_new_file(
-            spec_path,
-            json.dumps(produced["slides"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            workspace_root=root,
+            caption_path, produced["caption"].strip() + "\n", workspace_root=root
         )
-        render_argv += ["--spec", str(spec_path)]
-        output_path = drafts / f"{today}-{accepted_id}-carousel-slides"
-        output_path.mkdir(parents=True, exist_ok=True)
-    else:
-        for key in ("kicker", "headline", "stat", "source_name"):
-            value = produced["render_text"].get(key)
-            if value:
-                render_argv += [f"--{key.replace('_', '-')}", value]
-        output_path = drafts / f"{today}-{accepted_id}-feed.png"
-    render_argv += ["--output", str(output_path)]
-    render_out = _run_helper(
-        render_argv,
-        workspace_root=root,
-        timeout=helper_timeout("render"),
-        marker="RENDER_FORMAT=",
-    )
-    _ = render_out
+    with _stage(DRAFT_REASON_RENDER):
+        from nullone_packaging_receipt import (
+            canonical_receipt_path,
+            canonical_render_record_path,
+        )
 
-    from nullone_packaging_receipt import canonical_render_record_path
+        render_argv = [
+            sys.executable,
+            str(SCRIPTS_DIR / "nullone-packaging-render.py"),
+            "render",
+            "--receipt",
+            str(canonical_receipt_path(accepted_id, root=root)),
+            "--asset-file",
+            str(asset_path_for(accepted_id, today, root)),
+        ]
+        if carousel:
+            spec_path = drafts / f"{today}-{accepted_id}-carousel-spec.json"
+            _write_new_file(
+                spec_path,
+                json.dumps(produced["slides"], ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                workspace_root=root,
+            )
+            render_argv += ["--spec", str(spec_path)]
+            output_path = drafts / f"{today}-{accepted_id}-carousel-slides"
+            output_path.mkdir(parents=True, exist_ok=True)
+        else:
+            for key in ("kicker", "headline", "stat", "source_name"):
+                value = produced["render_text"].get(key)
+                if value:
+                    render_argv += [f"--{key.replace('_', '-')}", value]
+            output_path = drafts / f"{today}-{accepted_id}-feed.png"
+        render_argv += ["--output", str(output_path)]
+        render_out = _run_helper(
+            render_argv,
+            workspace_root=root,
+            timeout=helper_timeout("render"),
+            marker="RENDER_FORMAT=",
+        )
+        _ = render_out
 
-    record = load_render_record(
-        canonical_render_record_path(accepted_id, root=root), root=root
-    )
-    media_rels = []
-    for entry in record.get("outputs", []):
-        rel = entry.get("path")
-        if not isinstance(rel, str) or not rel:
-            raise BridgeError("Draft render record output malformed")
-        media_rels.append(str((root / rel).resolve()))
-    manifest_id = f"{today}-{accepted_id}"
-    manifest_argv = [
-        sys.executable,
-        str(SCRIPTS_DIR / "nullone-manifest.py"),
-        "build",
-        "--candidate-id",
-        accepted_id,
-        "--topic",
-        eligible[accepted_id].topic,
-        "--topic-cluster",
-        eligible[accepted_id].fields["topic_cluster"],
-        "--content-type",
-        eligible[accepted_id].fields["content_type"],
-        "--format",
-        manifest_format,
-        "--caption-file",
-        str(caption_path),
-        "--manifest-id",
-        manifest_id,
-    ]
-    for media in media_rels:
-        manifest_argv += ["--media", media]
-    manifest_argv += [
-        "--packaging-receipt",
-        str(canonical_receipt_path(accepted_id, root=root)),
-        "--render-record",
-        str(canonical_render_record_path(accepted_id, root=root)),
-    ]
-    _run_helper(
-        manifest_argv,
-        workspace_root=root,
-        timeout=helper_timeout("manifest"),
-        marker="MANIFEST_CREATED=",
-    )
-    manifest_path = root / "social/ops/manifests" / f"{manifest_id}.json"
-    if not manifest_path.is_file():
-        raise BridgeError("Draft manifest missing after build")
+        from nullone_packaging_receipt import canonical_render_record_path
+
+        record = load_render_record(
+            canonical_render_record_path(accepted_id, root=root), root=root
+        )
+        media_rels = []
+        for entry in record.get("outputs", []):
+            rel = entry.get("path")
+            if not isinstance(rel, str) or not rel:
+                raise BridgeError("Draft render record output malformed")
+            media_rels.append(str((root / rel).resolve()))
+    with _stage(DRAFT_REASON_MANIFEST):
+        manifest_id = f"{today}-{accepted_id}"
+        manifest_argv = [
+            sys.executable,
+            str(SCRIPTS_DIR / "nullone-manifest.py"),
+            "build",
+            "--candidate-id",
+            accepted_id,
+            "--topic",
+            eligible[accepted_id].topic,
+            "--topic-cluster",
+            eligible[accepted_id].fields["topic_cluster"],
+            "--content-type",
+            eligible[accepted_id].fields["content_type"],
+            "--format",
+            manifest_format,
+            "--caption-file",
+            str(caption_path),
+            "--manifest-id",
+            manifest_id,
+        ]
+        for media in media_rels:
+            manifest_argv += ["--media", media]
+        manifest_argv += [
+            "--packaging-receipt",
+            str(canonical_receipt_path(accepted_id, root=root)),
+            "--render-record",
+            str(canonical_render_record_path(accepted_id, root=root)),
+        ]
+        _run_helper(
+            manifest_argv,
+            workspace_root=root,
+            timeout=helper_timeout("manifest"),
+            marker="MANIFEST_CREATED=",
+        )
+        manifest_path = root / "social/ops/manifests" / f"{manifest_id}.json"
+        if not manifest_path.is_file():
+            raise BridgeError("Draft manifest missing after build")
 
     # ---- BRIDGE ----
-    load_queue(root).ready_entry(accepted_id, baseline=eligible[accepted_id])
-    bridge_out = _run_helper(
-        [
-            sys.executable,
-            str(SCRIPTS_DIR / "nullone-draft-bridge.py"),
-            "execute",
-            str(manifest_path),
-        ],
-        workspace_root=root,
-        timeout=helper_timeout("bridge"),
-        marker="DRAFT_BRIDGE=PASS",
-    )
-    review_post_id = None
-    for line in bridge_out.splitlines():
-        if line.startswith("REVIEW_POST_ID="):
-            review_post_id = line.split("=", 1)[1].strip()
-    if not review_post_id or "REVIEW_STATE=DRAFT_CREATED" not in bridge_out.splitlines():
-        raise BridgeError("Draft bridge proof missing created review post")
-    # The review draft now exists. A later delivery or COMPLETE failure must
-    # never leave this candidate eligible for another scheduled draft.
-    flip_ready_to_drafted(root, accepted_id, eligible[accepted_id])
-
-    # ---- PAYLOAD (deterministic assembly) ----
-    media_entries = _media_entries(
-        record.get("outputs", []), workspace_root=root
-    )
-    payload = {
-        "schema": "nullone.main-preview.v1",
-        "brand": "NullOne",
-        "review_post_id": review_post_id,
-        "text": produced["caption"].strip(),
-        "media": media_entries,
-        "presentation": _approval_blocks(review_post_id),
-    }
-    try:
-        validate_preview_payload(payload)
-    except Exception as exc:
-        raise BridgeError(f"Draft preview payload invalid: {exc}") from exc
-    payload_path = drafts / f"{today}-{accepted_id}-preview-payload.json"
-    _write_new_file(
-        payload_path,
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        workspace_root=root,
-    )
-    delivery_timeout = helper_timeout("deliver")
-    notify_state = "SENT"
-    try:
-        delivery_out = _run_helper(
+    with _stage(DRAFT_REASON_QUEUE_LOAD):
+        load_queue(root).ready_entry(accepted_id, baseline=eligible[accepted_id])
+    with _stage(DRAFT_REASON_DRAFT_BRIDGE):
+        bridge_out = _run_helper(
             [
                 sys.executable,
-                str(SCRIPTS_DIR / "nullone_telegram_review_delivery_adapter.py"),
-                "deliver",
-                "--payload-file",
-                str(payload_path),
+                str(SCRIPTS_DIR / "nullone-draft-bridge.py"),
+                "execute",
+                str(manifest_path),
             ],
             workspace_root=root,
-            timeout=delivery_timeout,
-            marker="DELIVERY_STATUS=SENT",
+            timeout=helper_timeout("bridge"),
+            marker="DRAFT_BRIDGE=PASS",
         )
-        if "DELIVERY_STATUS=SENT" not in delivery_out.splitlines():
-            raise BridgeError("Draft delivery did not prove SENT")
+        review_post_id = None
+        for line in bridge_out.splitlines():
+            if line.startswith("REVIEW_POST_ID="):
+                review_post_id = line.split("=", 1)[1].strip()
+        if not review_post_id or "REVIEW_STATE=DRAFT_CREATED" not in bridge_out.splitlines():
+            raise BridgeError("Draft bridge proof missing created review post")
+    # The review draft now exists. A later delivery or COMPLETE failure must
+    # never leave this candidate eligible for another scheduled draft.
+    with _stage(DRAFT_REASON_QUEUE_STATUS_FLIP):
+        flip_ready_to_drafted(root, accepted_id, eligible[accepted_id])
+
+    # ---- PAYLOAD (deterministic assembly) ----
+    with _stage(DRAFT_REASON_PREVIEW_PAYLOAD):
+        media_entries = _media_entries(
+            record.get("outputs", []), workspace_root=root
+        )
+        payload = {
+            "schema": "nullone.main-preview.v1",
+            "brand": "NullOne",
+            "review_post_id": review_post_id,
+            "text": produced["caption"].strip(),
+            "media": media_entries,
+            "presentation": _approval_blocks(review_post_id),
+        }
+        try:
+            validate_preview_payload(payload)
+        except Exception as exc:
+            raise BridgeError(f"Draft preview payload invalid: {exc}") from exc
+        payload_path = drafts / f"{today}-{accepted_id}-preview-payload.json"
+        _write_new_file(
+            payload_path,
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            workspace_root=root,
+        )
+    with _stage(DRAFT_REASON_TELEGRAM_DELIVERY):
+        delivery_timeout = helper_timeout("deliver")
+    notify_state = "SENT"
+    try:
+        with _stage(DRAFT_REASON_TELEGRAM_DELIVERY):
+            delivery_out = _run_helper(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "nullone_telegram_review_delivery_adapter.py"),
+                    "deliver",
+                    "--payload-file",
+                    str(payload_path),
+                ],
+                workspace_root=root,
+                timeout=delivery_timeout,
+                marker="DELIVERY_STATUS=SENT",
+            )
+            if "DELIVERY_STATUS=SENT" not in delivery_out.splitlines():
+                raise BridgeError("Draft delivery did not prove SENT")
     except BridgeError:
         # An ambiguous or partial send must never be duplicated.
         notify_state = "NOTIFY_FAILED"
 
     # ---- COMPLETE ----
-    completed = _validated_complete(
-        structured(
-            COMPLETE_SCHEMA,
-            prompt
-            + COMPLETE_APPENDIX
-            % {
-                "bridge": "DRAFT_CREATED",
-                "candidate_id": accepted_id,
-                "review": review_post_id,
-                "notify": notify_state,
-            },
-        )
+    complete_raw = structured(
+        COMPLETE_SCHEMA,
+        prompt
+        + COMPLETE_APPENDIX
+        % {
+            "bridge": "DRAFT_CREATED",
+            "candidate_id": accepted_id,
+            "review": review_post_id,
+            "notify": notify_state,
+        },
+        DRAFT_REASON_CLAUDE_COMPLETE,
     )
+    with _stage(DRAFT_REASON_CLAUDE_COMPLETE):
+        completed = _validated_complete(complete_raw)
     ledger_record = completed["ledger_record"]
-    if ledger_record.get("candidate_id") != accepted_id:
-        raise BridgeError("Draft ledger record names a different candidate")
-    _scan_for_secrets(
-        json.dumps(ledger_record, ensure_ascii=False), what="ledger record"
-    )
-    _scan_for_secrets(completed["report_markdown"], what="production report")
+    with _stage(DRAFT_REASON_LEDGER_WRITE):
+        if ledger_record.get("candidate_id") != accepted_id:
+            raise BridgeError("Draft ledger record names a different candidate")
+        _scan_for_secrets(
+            json.dumps(ledger_record, ensure_ascii=False), what="ledger record"
+        )
+    with _stage(DRAFT_REASON_REPORT_WRITE):
+        _scan_for_secrets(completed["report_markdown"], what="production report")
     ledger_file = root / LEDGER_PATH
-    try:
-        with ledger_file.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(ledger_record, ensure_ascii=False, sort_keys=True) + "\n"
-            )
-    except OSError as exc:
-        raise BridgeError("Draft topic ledger unwritable") from exc
+    with _stage(DRAFT_REASON_LEDGER_WRITE):
+        try:
+            with ledger_file.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(ledger_record, ensure_ascii=False, sort_keys=True) + "\n"
+                )
+        except OSError as exc:
+            raise BridgeError("Draft topic ledger unwritable") from exc
     report_path = root / f"social/publisher/{today}-{accepted_id}-draft.md"
-    _write_new_file(
-        report_path, completed["report_markdown"].strip() + "\n", workspace_root=root
-    )
+    with _stage(DRAFT_REASON_REPORT_WRITE):
+        _write_new_file(
+            report_path, completed["report_markdown"].strip() + "\n", workspace_root=root
+        )
 
     return {
         "status": "DRAFT_CREATED",

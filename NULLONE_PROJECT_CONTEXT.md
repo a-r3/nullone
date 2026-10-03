@@ -3,6 +3,46 @@
 Last updated: 2026-10-03 Asia/Baku
 Status: canonical project context for repository/project continuity. Production deployment of this document is NOT PERFORMED.
 
+## Draft Factory safe stage telemetry — 2026-10-03 Asia/Baku (REPO OBSERVABILITY; NOT DEPLOYED)
+
+- PR #202 merged: main `d36dc12c8bd4d164373a70e26122a5a837571e63`
+  (visual-grounding fallback + interrupted-state recovery).
+- PR #202 controlled production deploy: PASS. Backup:
+  `/home/oem/.openclaw/nullone-deploy-backups/pr202-20261003-172722`.
+- Natural 20:45 Asia/Baku Draft Factory run FAILED BEFORE any persisted
+  Draft mutation: `draft_factory -> claude/sonnet`, `ROLE_OUTCOME=BLOCKED
+  reason=BridgeError`, exit 1, ~17.8s, scheduler `consecutiveErrors=2`.
+  No authoritative Draft artifact changed during 20:44-20:46 (only Python
+  `__pycache__`); fallback-ledger mtime stayed 16:15 (still only
+  `anthropic... -> STORY_NOT_FACTORY_PRODUCIBLE`); the
+  `github-copilot...` request + asset from 16:15 remain; its canonical
+  receipt and caption remain absent.
+- The #202 recovery path was NOT reached in that run.
+- The exact inner cause remains UNCONFIRMED. Current observability
+  collapses every failure to the generic `reason=BridgeError`, which is
+  insufficient for production diagnosis.
+- This branch adds SAFE, deterministic failure-stage telemetry ONLY
+  (same pattern as Radar #199). New neutral contract
+  `nullone_draft_stage_error.py` (`DraftStageError(BridgeError)` with a
+  fixed reason-code set and a numeric `exit_code` for
+  `CLAUDE_EXIT_NONZERO` only). The Claude provider attaches an
+  attribute-only stage tag to the ORIGINAL exception (type/message
+  unchanged inside the provider); the adapter boundary converts a
+  tagged `BridgeError` into `DraftStageError` without carrying any
+  original text; the runner prints
+  `ROLE_OUTCOME=BLOCKED reason=DraftStageError code=<CODE>` (plus
+  `exit=<INT>` for `CLAUDE_EXIT_NONZERO`). Generic `BridgeError` still
+  fails closed; exit status, backstop, and all Draft behavior are
+  unchanged. No raw stdout/stderr, prompts, fetched content, URLs,
+  signed URLs, tokens, credentials, caption text, or model output is
+  ever emitted.
+- Behavior NOT changed: #201/#202 fallback semantics, packaging
+  evaluator decisions, ranking, at-most-one acceptance, request/asset
+  recovery, render, manifest, Zernio, Telegram, queue state,
+  publication authority, DRAFT_FIRST, timeout, model, schedule.
+- Repo-only until reviewed/deployed. #194 remains OPEN. FEED/CAROUSEL ->
+  Zernio -> Telegram natural proof still pending.
+
 ## Draft Factory visual-grounding fallback — 2026-10-03 Asia/Baku (REPO FIX; NOT DEPLOYED)
 
 - PR #201 merged: `4026729ea10532e53f16af8cadbc8bdf86f92e30`.

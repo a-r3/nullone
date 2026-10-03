@@ -28,6 +28,7 @@ from pathlib import Path
 
 from nullone_bridge_common import BridgeError, WORKSPACE
 from nullone_draft_bridge_action import ensure_pending_bridge
+from nullone_draft_stage_error import DraftStageError, format_draft_stage_blocked
 import nullone_provider_adapter as provider_adapter
 import nullone_provider_router as provider_router
 
@@ -108,6 +109,11 @@ def execute() -> int:
     cycle_start = _utcnow()
     try:
         outcome = provider_adapter.invoke_role_cycle(profile, prompt, WORKSPACE)
+    except DraftStageError as e:
+        print(format_draft_stage_blocked(e))
+        print(provider_router.format_routing_metadata(profile, "BLOCKED"))
+        _run_bridge_backstop(cycle_start)
+        return 1
     except BridgeError as e:
         print(f"ROLE_OUTCOME=BLOCKED reason={type(e).__name__}")
         print(provider_router.format_routing_metadata(profile, "BLOCKED"))

@@ -45,6 +45,7 @@ COMMANDS = [
     [sys.executable, "tests/test_draft_select_packaging_contract.py"],
     [sys.executable, "tests/test_draft_visual_grounding_fallback.py"],
     [sys.executable, "tests/test_draft_factory_story_fallback.py"],
+    [sys.executable, "tests/test_draft_factory_stage_telemetry.py"],
     [sys.executable, "tests/test_breaking_consumer_delivery_contract.py"],
     [sys.executable, "tests/test_breaking_production_capability_negative.py"],
     [sys.executable, "tests/test_run_outcomes.py"],
@@ -234,6 +235,10 @@ COMMANDS = [
     [
         sys.executable,
         "workspace/social/ops/scripts/nullone_radar_stage_error.py",
+    ],
+    [
+        sys.executable,
+        "workspace/social/ops/scripts/nullone_draft_stage_error.py",
     ],
     [
         sys.executable,
