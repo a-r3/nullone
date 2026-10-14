@@ -253,9 +253,21 @@ class StageCodeTests(unittest.TestCase):
         self.expect("QUEUE_LOAD", Case(self, patches=[patch]))
 
     def test_select_validation_distinct(self):
+        # Outer decision enum is a result-shape failure (substage code).
         bad = select_result([ranked_item(CID)])
         bad["decision"] = "BOGUS"
-        self.expect("SELECT_VALIDATION", Case(self, select=bad))
+        self.expect("SELECT_RESULT_SHAPE", Case(self, select=bad))
+
+    def test_select_validation_generic_fallback_fails_closed(self):
+        # Any untagged failure inside SELECT validation keeps the
+        # generic SELECT_VALIDATION code (fail closed, no text).
+        def patch():
+            return mock.patch.object(
+                draft, "_validated_select", side_effect=BridgeError(HOSTILE))
+        err = self.expect("SELECT_VALIDATION", Case(self, patches=[patch]))
+        for marker in HOSTILE_MARKERS:
+            self.assertNotIn(marker, runner_line(err))
+            self.assertNotIn(marker, str(err))
 
     def test_select_queue_identity_distinct(self):
         item = ranked_item(CID)
@@ -400,11 +412,13 @@ class StageCodeTests(unittest.TestCase):
         )
 
     def test_all_stage_codes_covered_by_allowed_set(self):
-        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 30)
+        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 33)
         required = {
             "CLAUDE_TIMEOUT", "CLAUDE_BINARY_MISSING", "CLAUDE_EXIT_NONZERO",
             "CLAUDE_OUTPUT_INVALID", "QUEUE_LOAD", "CLAUDE_SELECT",
-            "SELECT_VALIDATION", "SELECT_QUEUE_IDENTITY", "FALLBACK_LEDGER_INIT",
+            "SELECT_VALIDATION", "SELECT_RESULT_SHAPE",
+            "SELECT_PACKAGING_REQUEST", "SELECT_ASSET_DESCRIPTOR",
+            "SELECT_QUEUE_IDENTITY", "FALLBACK_LEDGER_INIT",
             "FALLBACK_NEXT", "EXISTING_RECEIPT_VALIDATION",
             "INTERRUPTED_STATE_VALIDATION", "PACKAGING_EVALUATOR",
             "PACKAGING_RECEIPT_VALIDATION", "PACKAGING_CLASSIFICATION",
@@ -720,6 +734,167 @@ class RunnerBoundaryTests(unittest.TestCase):
         wrapper = load_draft_wrapper()
         self.assertEqual(wrapper.DRAFT_FACTORY_TIMEOUT_SECONDS, 900)
         self.assertEqual(wrapper.self_test(), 0)
+
+
+def _mutated(mutate):
+    item = ranked_item(CID)
+    result = select_result([item])
+    mutate(result, item)
+    return result
+
+
+class SelectSubstageTests(unittest.TestCase):
+    """SELECT validation substages map to fixed, secret-safe codes."""
+
+    def expect_code(self, code, mutate):
+        case = Case(self, select=_mutated(mutate))
+        with self.assertRaises(stage.DraftStageError) as ctx:
+            case.run_adapter()
+        err = ctx.exception
+        self.assertEqual(err.reason_code, code)
+        line = runner_line(err)
+        self.assertEqual(
+            line, f"ROLE_OUTCOME=BLOCKED reason=DraftStageError code={code}")
+        self.assertEqual(str(err), f"Draft stage failure: {code}")
+        for marker in HOSTILE_MARKERS:
+            self.assertNotIn(marker, line)
+            self.assertNotIn(marker, str(err))
+        self.assertNotIn("Malformed", line)
+        # Fail closed before any helper side effect; only SELECT ran.
+        self.assertEqual(case.helpers, [])
+        self.assertEqual(case.rounds, ["SELECT"])
+        # Provider-internal exception is unchanged (type + message).
+        raw = Case(self, select=_mutated(mutate))
+        with self.assertRaises(BridgeError) as raw_ctx:
+            raw.run_raw()
+        self.assertNotIsInstance(raw_ctx.exception, stage.DraftStageError)
+        self.assertEqual(str(raw_ctx.exception), "Malformed Draft Factory SELECT result")
+        self.assertEqual(raw_ctx.exception._draft_stage_code, code)
+
+    # -- SELECT_RESULT_SHAPE ------------------------------------------
+    def test_outer_result_extra_key(self):
+        self.expect_code("SELECT_RESULT_SHAPE",
+                         lambda r, i: r.update(extra=HOSTILE))
+
+    def test_outer_ranked_not_list(self):
+        self.expect_code("SELECT_RESULT_SHAPE",
+                         lambda r, i: r.update(ranked=HOSTILE))
+
+    def test_outer_notes_type(self):
+        self.expect_code("SELECT_RESULT_SHAPE", lambda r, i: r.update(notes=7))
+
+    def test_ranked_item_missing_key(self):
+        self.expect_code("SELECT_RESULT_SHAPE", lambda r, i: i.pop("topic_cluster"))
+
+    def test_ranked_item_blank_string(self):
+        self.expect_code("SELECT_RESULT_SHAPE", lambda r, i: i.update(topic="  "))
+
+    def test_ranked_item_not_dict(self):
+        self.expect_code("SELECT_RESULT_SHAPE",
+                         lambda r, i: r.update(ranked=[HOSTILE]))
+
+    # -- SELECT_PACKAGING_REQUEST -------------------------------------
+    def test_packaging_candidate_field_set(self):
+        self.expect_code(
+            "SELECT_PACKAGING_REQUEST",
+            lambda r, i: i["packaging_request"]["candidate"].update(extra=HOSTILE))
+
+    def test_packaging_forbidden_candidate_field(self):
+        self.expect_code(
+            "SELECT_PACKAGING_REQUEST",
+            lambda r, i: i["packaging_request"]["candidate"].update(
+                FORMAT_DECISION=HOSTILE))
+
+    def test_packaging_enum(self):
+        self.expect_code(
+            "SELECT_PACKAGING_REQUEST",
+            lambda r, i: i["packaging_request"]["candidate"].update(timeliness=HOSTILE))
+
+    def test_packaging_int_type(self):
+        self.expect_code(
+            "SELECT_PACKAGING_REQUEST",
+            lambda r, i: i["packaging_request"]["candidate"].update(
+                distinct_beat_count=True))
+
+    def test_packaging_nested_content_type_mismatch(self):
+        self.expect_code(
+            "SELECT_PACKAGING_REQUEST",
+            lambda r, i: i["packaging_request"]["candidate"].update(
+                content_type="EXPLAINER"))
+
+    def test_packaging_assets_bool_field(self):
+        self.expect_code(
+            "SELECT_PACKAGING_REQUEST",
+            lambda r, i: i["packaging_request"]["assets"].update(image_on_topic="yes"))
+
+    def test_packaging_request_not_dict(self):
+        self.expect_code("SELECT_PACKAGING_REQUEST",
+                         lambda r, i: i.update(packaging_request=HOSTILE))
+
+    # -- SELECT_ASSET_DESCRIPTOR --------------------------------------
+    def test_asset_schema(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+                         lambda r, i: i["asset"].update(schema=HOSTILE))
+
+    def test_asset_candidate_id_mismatch(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+                         lambda r, i: i["asset"].update(candidate_id=OTHER))
+
+    def test_asset_kind(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+                         lambda r, i: i["asset"].update(asset_kind="GENERATED_IMAGE"))
+
+    def test_asset_file_backed_path_provenance_shape(self):
+        self.expect_code(
+            "SELECT_ASSET_DESCRIPTOR",
+            lambda r, i: i["asset"].update(
+                asset_kind="REAL_PHOTO", local_path="/home/oem/private/caption.txt",
+                provenance=None))
+        self.expect_code(
+            "SELECT_ASSET_DESCRIPTOR",
+            lambda r, i: i["asset"].update(asset_kind="REAL_PHOTO", local_path=None))
+        self.expect_code(
+            "SELECT_ASSET_DESCRIPTOR",
+            lambda r, i: i["asset"].update(local_path="/home/oem/private/caption.txt"))
+
+    def test_asset_optional_field_type(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+                         lambda r, i: i["asset"].update(source_url=["x"]))
+        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+                         lambda r, i: i["asset"].update(sha256=123))
+
+    def test_asset_not_dict(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+                         lambda r, i: i.update(asset=SIGNED_URL))
+
+    # -- precedence / unchanged ---------------------------------------
+    def test_queue_identity_unchanged(self):
+        item = ranked_item(CID)
+        item["content_type"] = "EXPLAINER"
+        item["packaging_request"]["candidate"]["content_type"] = "EXPLAINER"
+        case = Case(self, select=select_result([item]))
+        with self.assertRaises(stage.DraftStageError) as ctx:
+            case.run_adapter()
+        self.assertEqual(ctx.exception.reason_code, "SELECT_QUEUE_IDENTITY")
+
+    def test_valid_select_unchanged(self):
+        case = Case(self)
+        summary = case.run_raw()
+        self.assertEqual(summary["status"], "DRAFT_CREATED")
+        self.assertEqual(case.rounds, ["SELECT", "PRODUCE", "COMPLETE"])
+        result = select_result([ranked_item(CID)])
+        self.assertIs(draft._validated_select(result), result)
+
+    def test_recovery_helpers_not_select_tagged(self):
+        # Shared contract helpers stay untagged so interrupted-state
+        # recovery keeps its own INTERRUPTED_STATE_VALIDATION stage.
+        with self.assertRaises(BridgeError) as ctx:
+            draft._check_packaging_request_contract(
+                HOSTILE, expected_content_type="NEWS")
+        self.assertIsNone(getattr(ctx.exception, "_draft_stage_code", None))
+        with self.assertRaises(BridgeError) as ctx:
+            draft._check_asset_descriptor_contract(HOSTILE, candidate_id=CID)
+        self.assertIsNone(getattr(ctx.exception, "_draft_stage_code", None))
 
 
 if __name__ == "__main__":

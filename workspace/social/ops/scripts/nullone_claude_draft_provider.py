@@ -127,7 +127,10 @@ from nullone_draft_stage_error import (
     DRAFT_REASON_QUEUE_STATUS_FLIP,
     DRAFT_REASON_RENDER,
     DRAFT_REASON_REPORT_WRITE,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR,
+    DRAFT_REASON_SELECT_PACKAGING_REQUEST,
     DRAFT_REASON_SELECT_QUEUE_IDENTITY,
+    DRAFT_REASON_SELECT_RESULT_SHAPE,
     DRAFT_REASON_SELECT_VALIDATION,
     DRAFT_REASON_TELEGRAM_DELIVERY,
     mark_stage,
@@ -541,35 +544,42 @@ def _validated_select(result: object) -> dict:
     (`nullone.packaging-asset.v1`). Receipt/style semantic authority
     stays downstream with the deterministic render validator.
     """
-    if not isinstance(result, dict) or set(result) != set(SELECT_FIELDS):
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    if result["decision"] not in SELECT_DECISIONS:
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    ranked = result["ranked"]
-    if not isinstance(ranked, list) or len(ranked) > MAX_RANKED:
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    if result["decision"] == "SELECT" and not ranked:
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    if not isinstance(result["notes"], str):
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    for item in ranked:
-        if not isinstance(item, dict):
+    # Observability only: each boundary below is wrapped in an
+    # attribute-only safe stage tag (innermost wins). Checks, order,
+    # exceptions, and messages are unchanged.
+    with _stage(DRAFT_REASON_SELECT_RESULT_SHAPE):
+        if not isinstance(result, dict) or set(result) != set(SELECT_FIELDS):
             raise BridgeError("Malformed Draft Factory SELECT result")
-        for key in (
-            "candidate_id",
-            "topic",
-            "topic_cluster",
-            "content_type",
-            "packaging_request",
-            "asset",
-        ):
-            if key not in item:
+        if result["decision"] not in SELECT_DECISIONS:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+        ranked = result["ranked"]
+        if not isinstance(ranked, list) or len(ranked) > MAX_RANKED:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+        if result["decision"] == "SELECT" and not ranked:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+        if not isinstance(result["notes"], str):
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    for item in ranked:
+        with _stage(DRAFT_REASON_SELECT_RESULT_SHAPE):
+            if not isinstance(item, dict):
                 raise BridgeError("Malformed Draft Factory SELECT result")
-        for key in ("candidate_id", "topic", "topic_cluster", "content_type"):
-            if not isinstance(item[key], str) or not item[key].strip():
-                raise BridgeError("Malformed Draft Factory SELECT result")
-        _validate_select_packaging_request(item)
-        _validate_select_asset_descriptor(item)
+            for key in (
+                "candidate_id",
+                "topic",
+                "topic_cluster",
+                "content_type",
+                "packaging_request",
+                "asset",
+            ):
+                if key not in item:
+                    raise BridgeError("Malformed Draft Factory SELECT result")
+            for key in ("candidate_id", "topic", "topic_cluster", "content_type"):
+                if not isinstance(item[key], str) or not item[key].strip():
+                    raise BridgeError("Malformed Draft Factory SELECT result")
+        with _stage(DRAFT_REASON_SELECT_PACKAGING_REQUEST):
+            _validate_select_packaging_request(item)
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR):
+            _validate_select_asset_descriptor(item)
     return result
 
 
