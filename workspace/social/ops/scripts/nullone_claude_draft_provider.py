@@ -115,6 +115,8 @@ from nullone_draft_stage_error import (
     DRAFT_REASON_FALLBACK_NEXT,
     DRAFT_REASON_FALLBACK_RECORD,
     DRAFT_REASON_INTERRUPTED_STATE_VALIDATION,
+    DRAFT_REASON_LEDGER_RECORD_VALIDATION,
+    DRAFT_REASON_LEDGER_SECRET_SCAN,
     DRAFT_REASON_LEDGER_WRITE,
     DRAFT_REASON_MANIFEST,
     DRAFT_REASON_PACKAGING_CLASSIFICATION,
@@ -1496,9 +1498,10 @@ def invoke_draft(
     with _stage(DRAFT_REASON_CLAUDE_COMPLETE):
         completed = _validated_complete(complete_raw)
     ledger_record = completed["ledger_record"]
-    with _stage(DRAFT_REASON_LEDGER_WRITE):
+    with _stage(DRAFT_REASON_LEDGER_RECORD_VALIDATION):
         if ledger_record.get("candidate_id") != accepted_id:
             raise BridgeError("Draft ledger record names a different candidate")
+    with _stage(DRAFT_REASON_LEDGER_SECRET_SCAN):
         _scan_for_secrets(
             json.dumps(ledger_record, ensure_ascii=False), what="ledger record"
         )

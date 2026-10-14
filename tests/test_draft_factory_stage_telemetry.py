@@ -379,10 +379,20 @@ class StageCodeTests(unittest.TestCase):
     def test_claude_complete(self):
         self.expect("CLAUDE_COMPLETE", Case(self, complete={"ledger_record": {}, "report_markdown": " "}))
 
-    def test_ledger_write(self):
+    def test_ledger_record_validation(self):
         bad = copy.deepcopy(COMPLETE_RESULT)
         bad["ledger_record"]["candidate_id"] = "someone-else"
-        self.expect("LEDGER_WRITE", Case(self, complete=bad))
+        self.expect("LEDGER_RECORD_VALIDATION", Case(self, complete=bad))
+
+    def test_ledger_secret_scan(self):
+        bad = copy.deepcopy(COMPLETE_RESULT)
+        bad["ledger_record"]["note"] = "token: abcdef123456"
+        self.expect("LEDGER_SECRET_SCAN", Case(self, complete=bad))
+
+    def test_ledger_write(self):
+        case = Case(self)
+        (case.root / "social/state/topic-ledger.jsonl").mkdir()
+        self.expect("LEDGER_WRITE", case)
 
     def test_report_write(self):
         bad = copy.deepcopy(COMPLETE_RESULT)
@@ -412,7 +422,7 @@ class StageCodeTests(unittest.TestCase):
         )
 
     def test_all_stage_codes_covered_by_allowed_set(self):
-        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 33)
+        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 35)
         required = {
             "CLAUDE_TIMEOUT", "CLAUDE_BINARY_MISSING", "CLAUDE_EXIT_NONZERO",
             "CLAUDE_OUTPUT_INVALID", "QUEUE_LOAD", "CLAUDE_SELECT",
@@ -425,7 +435,8 @@ class StageCodeTests(unittest.TestCase):
             "FALLBACK_RECORD", "CLAUDE_PRODUCE", "PRODUCE_VALIDATION",
             "CAPTION_WRITE", "RENDER", "MANIFEST", "DRAFT_BRIDGE",
             "QUEUE_STATUS_FLIP", "PREVIEW_PAYLOAD", "TELEGRAM_DELIVERY",
-            "CLAUDE_COMPLETE", "LEDGER_WRITE", "REPORT_WRITE",
+            "CLAUDE_COMPLETE", "LEDGER_RECORD_VALIDATION",
+            "LEDGER_SECRET_SCAN", "LEDGER_WRITE", "REPORT_WRITE",
             "UNKNOWN_DRAFT_FAILURE",
         }
         self.assertTrue(required <= stage.ALLOWED_DRAFT_REASON_CODES)
