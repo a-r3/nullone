@@ -41,6 +41,7 @@ import nullone_draft_candidate_fallback as fallback  # noqa: E402
 import nullone_packaging_receipt as receipt_mod  # noqa: E402
 from test_draft_factory_claude_route import (  # noqa: E402
     evaluator_cli,
+    load_hyphenated,
     queue_entry,
     ranked_item,
     select_result,
@@ -81,6 +82,15 @@ def story_item(candidate_id):
     item["packaging_request"]["candidate"].update(
         content_shape="COMPARISON", distinct_beat_count=2
     )
+    item["packaging_request"]["assets"]["data_visualization_possible"] = True
+    return item
+
+
+def source_grounded_none_item(candidate_id):
+    """Exact 2026-10-15 production shape: SOURCE_GROUNDED layout with a
+    NONE asset descriptor, but one coarse request evidence flag truthy
+    so the evaluator emits POST instead of the grounding signal."""
+    item = grounding_item(candidate_id)
     item["packaging_request"]["assets"]["data_visualization_possible"] = True
     return item
 
@@ -320,6 +330,89 @@ class GroundingFallbackCycleTests(unittest.TestCase):
         self.assertFalse(
             h.receipt_path(
                 "github-copilot-computer-use-preview-2026-10-03").exists())
+
+    def test_30_source_grounded_none_asset_is_not_accepted(self):
+        # 2026-10-15 natural run: SOURCE_GROUNDED + NONE asset sailed
+        # through the evaluator (coarse flag truthy) and was accepted,
+        # failing later at RENDER. It must be diverted to the
+        # candidate-local disposition BEFORE PRODUCE/caption/render.
+        bad_id = "openai-gpt-5-5-retirement-2026-10-12"
+        h = Harness(self, [source_grounded_none_item(bad_id), post_item("post-2")])
+        with self.assertRaises(StopAtProduce):
+            h.run()
+        # Next frozen-ranked candidate attempted and accepted.
+        self.assertEqual([c[1] for c in h.helper_calls], [bad_id, "post-2"])
+        ledger = h.ledger()
+        self.assertEqual(ledger["accepted_candidate_id"], "post-2")
+        self.assertEqual(
+            [(a["candidate_id"], a.get("disposition")) for a in ledger["attempts"]],
+            [(bad_id, "VISUAL_GROUNDING_UNMET")],
+        )
+        # PRODUCE ran exactly once, gated by acceptance of post-2 only.
+        self.assertEqual(h.rounds, ["SELECT", "PRODUCE"])
+        # Renderer never invoked: every helper call is the evaluator.
+        self.assertTrue(h.helper_calls)
+        self.assertTrue(
+            all(n == "nullone-packaging-evaluator.py" for n, _ in h.helper_calls)
+        )
+        # No caption/render/manifest/preview/report/ledger artifacts.
+        h.assert_no_consequential_output(bad_id)
+
+    def test_31_all_source_grounded_none_is_truthful_no_action(self):
+        h = Harness(
+            self,
+            [source_grounded_none_item("g-1"), source_grounded_none_item("g-2")],
+        )
+        self.assertEqual(h.run(), {"status": "NO_ACTION", "candidate_id": None})
+        self.assertEqual(h.rounds, ["SELECT"])
+        ledger = h.ledger()
+        self.assertIsNone(ledger["accepted_candidate_id"])
+        self.assertEqual(
+            [a.get("disposition") for a in ledger["attempts"]],
+            ["VISUAL_GROUNDING_UNMET", "VISUAL_GROUNDING_UNMET"],
+        )
+        h.assert_no_consequential_output("g-1")
+        h.assert_no_consequential_output("g-2")
+
+    def test_32_renderer_guard_unchanged(self):
+        # The deterministic render guard still refuses SOURCE_GROUNDED
+        # + NONE independently of the new pre-acceptance gate.
+        import argparse
+
+        render_mod = load_hyphenated(
+            "draft_test_packaging_render", "nullone-packaging-render.py")
+        h = Harness(self, [post_item("post-2")])
+        with self.assertRaises(StopAtProduce):
+            h.run()
+        decision = json.loads(h.receipt_path("post-2").read_text(encoding="utf-8"))
+        grounded_request = copy.deepcopy(
+            source_grounded_none_item("render-guard-probe")["packaging_request"])
+        receipt = receipt_mod.build_receipt_body(
+            candidate_id="render-guard-probe",
+            validated_request=grounded_request,
+            decision=decision,
+        )
+        self.assertEqual(receipt["visual_requirement"], "SOURCE_GROUNDED")
+        receipt_path = receipt_mod.canonical_receipt_path(
+            "render-guard-probe", root=h.root)
+        atomic_write_json(receipt_path, receipt)
+        asset_path = h.prod / "render-guard-probe-asset.json"
+        atomic_write_json(asset_path, {
+            "schema": "nullone.packaging-asset.v1",
+            "candidate_id": "render-guard-probe",
+            "asset_kind": "NONE",
+            "local_path": None,
+            "provenance": None,
+        })
+        args = argparse.Namespace(
+            receipt=str(receipt_path), asset_file=str(asset_path),
+            output=str(h.prod / "out.png"), spec=None, source=None,
+            kicker="k", headline="h", stat="", source_name="s",
+        )
+        with self.assertRaises(BridgeError) as ctx:
+            render_mod.render_command(args, root=h.root)
+        self.assertTrue(
+            str(ctx.exception).startswith(GROUNDING_CODE), str(ctx.exception))
 
 
 class InterruptedRecoveryTests(unittest.TestCase):
