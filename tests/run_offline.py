@@ -91,6 +91,7 @@ COMMANDS = [
     [sys.executable, "tests/test_runtime_inventory.py"],
     [sys.executable, "tests/test_offline_render_reproducibility.py"],
     [sys.executable, "tests/test_v2_renderer_layout_correctness.py"],
+    [sys.executable, "tests/test_v2_brand_compliance.py"],
     [sys.executable, "tests/test_carousel_semantic_validation.py"],
     [sys.executable, "tests/test_carousel_source_images.py"],
     [sys.executable, "tests/test_p0_orchestration_recovery.py"],
