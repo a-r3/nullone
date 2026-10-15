@@ -1289,6 +1289,31 @@ def invoke_draft(
                 except DraftFallbackError as exc:
                     raise BridgeError(f"Draft fallback refused: {exc}") from exc
             continue
+        # Pre-acceptance visual-grounding gate. The receipt declares a
+        # visual block (SOURCE_GROUNDED) but the candidate's asset
+        # descriptor claims no usable evidence (NONE). This mirrors the
+        # deterministic render guard exactly, so a candidate diverted
+        # here could never have rendered: the evaluator's grounding
+        # gate reads only the request's coarse asset flags, which can
+        # disagree with the descriptor. Record the candidate-local
+        # disposition and continue; never accept, never PRODUCE.
+        descriptor = (
+            recovered_asset if recovered_asset is not None else item["asset"]
+        )
+        if (
+            receipt.get("visual_requirement") == "SOURCE_GROUNDED"
+            and isinstance(descriptor, dict)
+            and descriptor.get("asset_kind") == "NONE"
+        ):
+            with _stage(DRAFT_REASON_FALLBACK_RECORD):
+                try:
+                    ledger = record_visual_grounding_disposition(
+                        ledger, candidate_id=candidate_id
+                    )
+                    save_ledger(ledger_path, ledger)
+                except DraftFallbackError as exc:
+                    raise BridgeError(f"Draft fallback refused: {exc}") from exc
+            continue
         with _stage(DRAFT_REASON_FALLBACK_RECORD):
             try:
                 ledger = record_acceptance(ledger, candidate_id=candidate_id)
