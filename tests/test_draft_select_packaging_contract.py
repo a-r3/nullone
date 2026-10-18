@@ -492,6 +492,108 @@ class SelectPackagingContractTests(unittest.TestCase):
             )
         self.assertEqual(workspace_prod_snapshot(), before)
 
+    def test_19_empty_string_nullables_normalize_to_none(self):
+        # Structured transports may emit "" where null is meant for
+        # nullable descriptor fields. The boundary normalizes those
+        # spellings deterministically instead of failing the cycle.
+        item = ranked_item()
+        item["asset"] = valid_descriptor(
+            item["candidate_id"],
+            local_path="",
+            provenance="  ",
+            sha256="",
+            source_url="",
+        )
+        validated = draft._validated_select(select_result([item]))
+        asset = validated["ranked"][0]["asset"]
+        self.assertIsNone(asset["local_path"])
+        self.assertIsNone(asset["provenance"])
+        self.assertIsNone(asset["sha256"])
+        self.assertIsNone(asset["source_url"])
+        # Non-empty strings are never altered.
+        item = ranked_item()
+        item["asset"] = valid_descriptor(
+            item["candidate_id"],
+            asset_kind="REAL_PHOTO",
+            local_path="social/drafts/production/evidence.png",
+            provenance="Official source",
+            sha256="abc",
+            source_url="https://example.invalid/x",
+        )
+        validated = draft._validated_select(select_result([item]))
+        asset = validated["ranked"][0]["asset"]
+        self.assertEqual(asset["local_path"], "social/drafts/production/evidence.png")
+        self.assertEqual(asset["provenance"], "Official source")
+        self.assertEqual(asset["sha256"], "abc")
+
+    def test_20_asset_descriptor_substage_telemetry_is_safe(self):
+        # Each descriptor check reports its own safe sub-stage code;
+        # no model text ever reaches the telemetry.
+        import nullone_draft_stage_error as stage_mod  # noqa: E402
+
+        hostile = "https://example.invalid/x?sig=SECRET caption SECRET"
+        cases = {
+            "missing-schema": ("SELECT_ASSET_DESCRIPTOR_SHAPE", lambda d: d.pop("schema")),
+            "wrong-schema": (
+                "SELECT_ASSET_DESCRIPTOR_SCHEMA",
+                lambda d: d.update(schema="nullone.packaging-asset.v9"),
+            ),
+            "candidate-mismatch": (
+                "SELECT_ASSET_DESCRIPTOR_IDENTITY",
+                lambda d: d.update(candidate_id="someone-else"),
+            ),
+            "unknown-kind": (
+                "SELECT_ASSET_DESCRIPTOR_KIND",
+                lambda d: d.update(asset_kind="GENERATED_IMAGE"),
+            ),
+            "file-backed-no-path": (
+                "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+                lambda d: d.update(asset_kind="REAL_PHOTO", local_path=None),
+            ),
+            "file-backed-no-provenance": (
+                "SELECT_ASSET_DESCRIPTOR_PROVENANCE",
+                lambda d: d.update(
+                    asset_kind="REAL_PHOTO",
+                    local_path="social/drafts/production/evidence.png",
+                    provenance="  ",
+                ),
+            ),
+            "none-names-file": (
+                "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+                lambda d: d.update(
+                    local_path="social/drafts/production/evidence.png"
+                ),
+            ),
+            "extra-key": (
+                "SELECT_ASSET_DESCRIPTOR_SHAPE",
+                lambda d: d.update(VISUAL_STYLE="REAL_PHOTO"),
+            ),
+            "bad-optional": (
+                "SELECT_ASSET_DESCRIPTOR_OPTIONAL",
+                lambda d: d.update(sha256=12345),
+            ),
+        }
+        for name, (code, mutate) in cases.items():
+            with self.subTest(case=name):
+                item = ranked_item()
+                descriptor = valid_descriptor(item["candidate_id"])
+                descriptor["provenance"] = hostile
+                mutate(descriptor)
+                item["asset"] = descriptor
+                try:
+                    draft._validated_select(select_result([item]))
+                except BridgeError as exc:
+                    tagged = stage_mod.stage_error_from(exc)
+                    self.assertEqual(tagged.reason_code, code, name)
+                    self.assertNotIn("SECRET", str(tagged))
+                    self.assertNotIn("sig=", str(tagged))
+                else:
+                    self.fail(f"expected BridgeError for {name}")
+        # The parent code stays registered for backward compatibility.
+        self.assertIn(
+            "SELECT_ASSET_DESCRIPTOR", stage_mod.ALLOWED_DRAFT_REASON_CODES
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

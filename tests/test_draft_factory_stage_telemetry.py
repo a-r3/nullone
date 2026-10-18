@@ -422,12 +422,19 @@ class StageCodeTests(unittest.TestCase):
         )
 
     def test_all_stage_codes_covered_by_allowed_set(self):
-        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 35)
+        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 42)
         required = {
             "CLAUDE_TIMEOUT", "CLAUDE_BINARY_MISSING", "CLAUDE_EXIT_NONZERO",
             "CLAUDE_OUTPUT_INVALID", "QUEUE_LOAD", "CLAUDE_SELECT",
             "SELECT_VALIDATION", "SELECT_RESULT_SHAPE",
             "SELECT_PACKAGING_REQUEST", "SELECT_ASSET_DESCRIPTOR",
+            "SELECT_ASSET_DESCRIPTOR_SHAPE",
+            "SELECT_ASSET_DESCRIPTOR_SCHEMA",
+            "SELECT_ASSET_DESCRIPTOR_IDENTITY",
+            "SELECT_ASSET_DESCRIPTOR_KIND",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+            "SELECT_ASSET_DESCRIPTOR_PROVENANCE",
+            "SELECT_ASSET_DESCRIPTOR_OPTIONAL",
             "SELECT_QUEUE_IDENTITY", "FALLBACK_LEDGER_INIT",
             "FALLBACK_NEXT", "EXISTING_RECEIPT_VALIDATION",
             "INTERRUPTED_STATE_VALIDATION", "PACKAGING_EVALUATOR",
@@ -844,39 +851,47 @@ class SelectSubstageTests(unittest.TestCase):
 
     # -- SELECT_ASSET_DESCRIPTOR --------------------------------------
     def test_asset_schema(self):
-        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_SCHEMA",
                          lambda r, i: i["asset"].update(schema=HOSTILE))
 
     def test_asset_candidate_id_mismatch(self):
-        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_IDENTITY",
                          lambda r, i: i["asset"].update(candidate_id=OTHER))
 
     def test_asset_kind(self):
-        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_KIND",
                          lambda r, i: i["asset"].update(asset_kind="GENERATED_IMAGE"))
 
     def test_asset_file_backed_path_provenance_shape(self):
         self.expect_code(
-            "SELECT_ASSET_DESCRIPTOR",
+            "SELECT_ASSET_DESCRIPTOR_PROVENANCE",
             lambda r, i: i["asset"].update(
                 asset_kind="REAL_PHOTO", local_path="/home/oem/private/caption.txt",
                 provenance=None))
         self.expect_code(
-            "SELECT_ASSET_DESCRIPTOR",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
             lambda r, i: i["asset"].update(asset_kind="REAL_PHOTO", local_path=None))
         self.expect_code(
-            "SELECT_ASSET_DESCRIPTOR",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
             lambda r, i: i["asset"].update(local_path="/home/oem/private/caption.txt"))
 
     def test_asset_optional_field_type(self):
-        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_OPTIONAL",
                          lambda r, i: i["asset"].update(source_url=["x"]))
-        self.expect_code("SELECT_ASSET_DESCRIPTOR",
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_OPTIONAL",
                          lambda r, i: i["asset"].update(sha256=123))
 
     def test_asset_not_dict(self):
         self.expect_code("SELECT_ASSET_DESCRIPTOR",
                          lambda r, i: i.update(asset=SIGNED_URL))
+
+    def test_asset_extra_key(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_SHAPE",
+                         lambda r, i: i["asset"].update(extra=HOSTILE))
+
+    def test_asset_missing_key(self):
+        self.expect_code("SELECT_ASSET_DESCRIPTOR_SHAPE",
+                         lambda r, i: i["asset"].pop("schema"))
 
     # -- precedence / unchanged ---------------------------------------
     def test_queue_identity_unchanged(self):
