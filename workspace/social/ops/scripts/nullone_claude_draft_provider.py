@@ -1508,7 +1508,16 @@ def invoke_draft(
         )
     with _stage(DRAFT_REASON_TELEGRAM_DELIVERY):
         delivery_timeout = helper_timeout("deliver")
+        # Durable delivery proof (observability + recovery): the marker
+        # is written BEFORE the single send, so an interrupted send is
+        # recorded as unconfirmed and can never be mistaken for either
+        # "never attempted" or "delivered".
+        receipt_path = delivery_receipt_path(accepted_id, today, root)
+        _write_delivery_receipt(
+            receipt_path, accepted_id, review_post_id, "SENDING", workspace_root=root
+        )
     notify_state = "SENT"
+    approval_message_id = None
     try:
         with _stage(DRAFT_REASON_TELEGRAM_DELIVERY):
             delivery_out = _run_helper(
@@ -1525,9 +1534,25 @@ def invoke_draft(
             )
             if "DELIVERY_STATUS=SENT" not in delivery_out.splitlines():
                 raise BridgeError("Draft delivery did not prove SENT")
+            for line in delivery_out.splitlines():
+                if line.startswith("APPROVAL_MESSAGE_ID="):
+                    approval_message_id = line.split("=", 1)[1].strip() or None
     except BridgeError:
         # An ambiguous or partial send must never be duplicated.
         notify_state = "NOTIFY_FAILED"
+    try:
+        _write_delivery_receipt(
+            receipt_path,
+            accepted_id,
+            review_post_id,
+            notify_state,
+            approval_message_id=approval_message_id,
+            workspace_root=root,
+        )
+    except (BridgeError, OSError):
+        # Best effort: the SENDING marker stays, which truthfully reads
+        # as delivery-unconfirmed. Never abort the cycle after the send.
+        pass
 
     # ---- COMPLETE ----
     complete_raw = structured(
@@ -1576,6 +1601,58 @@ def invoke_draft(
         "review_post_id": review_post_id,
         "notify_state": notify_state,
     }
+
+
+def delivery_receipt_path(candidate_id: str, today: str, root: Path) -> Path:
+    """Deterministic Telegram delivery-receipt path for one candidate/day."""
+    return (
+        root
+        / f"social/drafts/production/{today}-{candidate_id}-telegram-delivery.json"
+    )
+
+
+DELIVERY_RECEIPT_SCHEMA = "nullone.draft-telegram-delivery.v1"
+DELIVERY_RECEIPT_STATES = frozenset({"SENDING", "SENT", "NOTIFY_FAILED"})
+
+
+def _write_delivery_receipt(
+    path: Path,
+    candidate_id: str,
+    review_post_id: str,
+    state: str,
+    *,
+    approval_message_id: str | None = None,
+    workspace_root: Path,
+) -> None:
+    """Persist the deterministic Telegram delivery state (atomic replace).
+
+    Facts only: candidate, review post id, state, and the Telegram
+    approval message id when the adapter proved SENT. No payload text,
+    URL, or target is ever stored. Progression is SENDING -> SENT or
+    NOTIFY_FAILED; a lingering SENDING means delivery is UNCONFIRMED.
+    """
+    from nullone_bridge_common import atomic_write_json, now_iso
+
+    if state not in DELIVERY_RECEIPT_STATES:
+        raise BridgeError("Draft delivery receipt state invalid")
+    root = workspace_root.resolve(strict=True)
+    try:
+        path.resolve().relative_to(root)
+    except (ValueError, OSError) as exc:
+        raise BridgeError("Draft output path escapes workspace") from exc
+    if path.is_symlink():
+        raise BridgeError("Draft output path is a symlink")
+    atomic_write_json(
+        path,
+        {
+            "schema": DELIVERY_RECEIPT_SCHEMA,
+            "candidate_id": candidate_id,
+            "review_post_id": review_post_id,
+            "state": state,
+            "approval_message_id": approval_message_id if state == "SENT" else None,
+            "updated_at": now_iso(),
+        },
+    )
 
 
 def asset_path_for(candidate_id: str, today: str, root: Path) -> Path:
