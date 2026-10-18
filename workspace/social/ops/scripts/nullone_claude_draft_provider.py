@@ -492,17 +492,9 @@ ranked candidates strongest-first (at most %(max_ranked)d) ONLY from
 this deterministic eligible ID map: %(eligible)s. Each returned item
 includes candidate_id, topic, topic_cluster, content_type, the
 packaging signals object, and the asset descriptor object. Assess
-signals; never decide formats. The asset descriptor object has
-exactly these fields: schema (literal "nullone.packaging-asset.v1"),
-candidate_id (must equal the item's candidate_id), asset_kind (one
-of REAL_PHOTO / SOURCE_SCREENSHOT / DATA_VISUALIZATION / NONE),
-local_path (the workspace evidence file for file-backed kinds,
-null when there is no file), provenance (official/source evidence
-string for file-backed kinds, null when there is no evidence),
-sha256 (optional, null when unknown), source_url (optional, null
-when unknown). For NONE-kind descriptors use null local_path and
-null provenance. Deterministic Python writes every file and runs
-every helper; never supply filesystem paths or commands.
+signals; never decide formats. Deterministic Python writes every
+file and runs every helper; never supply filesystem paths or
+commands.
 """
 
 PRODUCE_APPENDIX = """
@@ -679,23 +671,6 @@ def _validate_select_asset_descriptor(item: dict) -> None:
     )
 
 
-def _normalize_select_asset_descriptor_nullables(descriptor: dict) -> None:
-    """Normalize structured-output nullables in place (deterministic).
-
-    The structured SELECT schema types nullable fields as
-    ``["string", "null"]``. Some transports emit an empty/whitespace
-    string where null is meant for ``local_path`` / ``provenance`` /
-    ``sha256`` / ``source_url``. Normalizing those to None here keeps
-    the fail-closed shape checks exact while accepting the transport's
-    equivalent null spelling. Non-empty strings are never altered;
-    missing keys are never added (absence still fails closed).
-    """
-    for field in ("local_path", "provenance", "sha256", "source_url"):
-        if field in descriptor and isinstance(descriptor[field], str):
-            if not descriptor[field].strip():
-                descriptor[field] = None
-
-
 def _check_asset_descriptor_contract(
     descriptor: object, *, candidate_id: str
 ) -> None:
@@ -710,8 +685,7 @@ def _check_asset_descriptor_contract(
     Each boundary below is wrapped in an attribute-only safe stage
     tag (innermost wins) so natural-run telemetry names the exact
     failing check without echoing any model text. Checks, order,
-    exceptions, and messages are unchanged except the deterministic
-    empty-string-to-null normalization above.
+    exceptions, and messages are unchanged.
     """
     if not isinstance(descriptor, dict):
         raise BridgeError("Malformed Draft Factory SELECT result")
@@ -721,7 +695,6 @@ def _check_asset_descriptor_contract(
         )
         if not set(SELECT_ASSET_DESCRIPTOR_REQUIRED) <= set(descriptor) <= allowed_keys:
             raise BridgeError("Malformed Draft Factory SELECT result")
-    _normalize_select_asset_descriptor_nullables(descriptor)
     with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_SCHEMA):
         if descriptor["schema"] != ASSET_DESCRIPTOR_SCHEMA:
             raise BridgeError("Malformed Draft Factory SELECT result")
