@@ -402,6 +402,103 @@ class RecoveryTests(unittest.TestCase):
                 rec.apply_one(root, MID)
             self.assertEqual(snapshot(root), before)
 
+    # -- COMPLETE requires a DRAFTED queue ----------------------------
+    def test_complete_never_reported_with_bad_queue(self):
+        queues = {
+            "QUEUE_NOT_DRAFTED:READY": queue_entry(status="READY"),
+            "QUEUE_NOT_DRAFTED:PUBLISHED": queue_entry(status="PUBLISHED"),
+            "QUEUE_MISSING": queue_entry(cid="other-candidate"),
+            "QUEUE_UNREADABLE": queue_entry() + "\n" + queue_entry(),  # duplicates
+            "QUEUE_IDENTITY_MISMATCH": queue_entry(topic="A different topic"),
+            "QUEUE_UNREADABLE_MISSING_FILE": None,
+        }
+        for label, bad_queue in queues.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as td:
+                root = make_root(td)
+                rec.apply_one(root, MID)  # matching ledger + exact report
+                self.assertEqual(rec.inspect_all(root)[0]["completion"], "COMPLETE")
+                qpath = root / "social/state/candidate-queue.md"
+                if bad_queue is None:
+                    qpath.unlink()
+                else:
+                    qpath.write_text(bad_queue)
+                item = rec.inspect_all(root)[0]
+                self.assertEqual(item["ledger"], "MATCH")
+                self.assertEqual(item["report"], "REPORT_MATCH")
+                self.assertNotEqual(item["queue"], "QUEUE_DRAFTED")
+                self.assertEqual(item["completion"], "QUEUE_INCONSISTENT", label)
+                self.assertNotEqual(item["completion"], "COMPLETE")
+
+    # -- ledger path safety -------------------------------------------
+    def _assert_ledger_refused(self, root):
+        before = snapshot(root)
+        self.assertEqual(rec.inspect_all(root)[0]["completion"], "LEDGER_UNREADABLE")
+        with self.assertRaises(rec.RecoveryError):
+            rec.apply_one(root, MID)
+        self.assertEqual(snapshot(root), before)
+
+    def test_ledger_symlink_refused_and_never_followed(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+            root = make_root(td)
+            target = Path(outside) / "real-ledger.jsonl"
+            target.write_text("")
+            ledger = root / rec.LEDGER_PATH
+            ledger.unlink()
+            ledger.symlink_to(target)
+            self._assert_ledger_refused(root)
+            self.assertEqual(target.read_text(), "")
+            self.assertFalse((root / rec.PUBLISHER_DIR).exists())
+
+    def test_ledger_non_regular_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            ledger = root / rec.LEDGER_PATH
+            ledger.unlink()
+            ledger.mkdir()
+            self._assert_ledger_refused(root)
+
+    def test_ledger_parent_symlink_outside_root_refused(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+            root = make_root(td)
+            state = root / "social/state"
+            (state / "candidate-queue.md").rename(Path(outside) / "candidate-queue.md")
+            (state / "topic-ledger.jsonl").rename(Path(outside) / "topic-ledger.jsonl")
+            state.rmdir()
+            state.symlink_to(outside)
+            self.assertEqual(rec.inspect_all(root)[0]["completion"], "LEDGER_UNREADABLE")
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual((Path(outside) / "topic-ledger.jsonl").read_text(), "")
+
+    def test_ledger_unwritable_refused_before_any_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            ledger = root / rec.LEDGER_PATH
+            os.chmod(ledger, 0o444)
+            try:
+                if os.access(ledger, os.W_OK):
+                    self.skipTest("running with privileges that ignore file modes")
+                before = snapshot(root)
+                with self.assertRaises(rec.RecoveryError):
+                    rec.apply_one(root, MID)
+                self.assertEqual(snapshot(root), before)
+                self.assertFalse((root / rec.PUBLISHER_DIR).exists())
+            finally:
+                os.chmod(ledger, 0o644)
+
+    def test_ledger_unreadable_bytes_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            (root / rec.LEDGER_PATH).write_bytes(b"\xff\xfe\n")
+            self._assert_ledger_refused(root)
+
+    def test_valid_missing_ledger_file_is_created_normally(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            (root / rec.LEDGER_PATH).unlink()
+            self.assertEqual(rec.apply_one(root, MID)["written"], ["LEDGER_ROW", "REPORT"])
+            self.assertEqual(len((root / rec.LEDGER_PATH).read_text().splitlines()), 1)
+
     # -- surface / parity ---------------------------------------------
     def test_module_has_no_external_surface(self):
         import ast

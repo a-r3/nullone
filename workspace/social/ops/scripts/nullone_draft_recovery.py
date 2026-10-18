@@ -83,13 +83,42 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _ledger_path_safe(root: Path) -> bool:
+    """True only for a regular, non-symlink ledger (or none yet) inside root."""
+    path = root / LEDGER_PATH
+    try:
+        base = root.resolve(strict=True)
+        path.parent.resolve(strict=True).relative_to(base)
+        if path.is_symlink():
+            return False
+        if path.exists():
+            if not path.is_file():
+                return False
+            path.resolve(strict=True).relative_to(base)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _ledger_writable(root: Path) -> bool:
+    path = root / LEDGER_PATH
+    target = path if path.exists() else path.parent
+    return os.access(target, os.W_OK)
+
+
 def _ledger_rows(root: Path) -> tuple[list[dict[str, Any]], bool]:
-    """(rows, readable). Any unparseable/non-object line => not readable."""
+    """(rows, readable). Unsafe path or any unparseable line => not readable."""
     path = root / LEDGER_PATH
     rows: list[dict[str, Any]] = []
+    if not _ledger_path_safe(root):
+        return rows, False
     if not path.is_file():
         return rows, True
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return rows, False
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -279,6 +308,9 @@ def inspect_manifest(
         )
         if ident == "CONFLICT":
             completion = "LEDGER_CONFLICT"
+        elif queue != "QUEUE_DRAFTED":
+            # Exact reason stays in the `queue` field; never COMPLETE.
+            completion = "QUEUE_INCONSISTENT"
         elif rstate in {"REPORT_DIFFERS", "REPORT_UNSAFE", "REPORT_UNBUILDABLE"}:
             completion = "REPORT_INCONSISTENT"
         elif ident == "MATCH" and rstate == "REPORT_MATCH":
@@ -346,16 +378,24 @@ def write_report_atomic(path: Path, content: str) -> str:
 
 
 def _append_ledger_row(root: Path, row: dict[str, Any]) -> None:
+    if not _ledger_path_safe(root) or not _ledger_writable(root):
+        raise RecoveryError("ledger path unsafe or unwritable")
     ledger = root / LEDGER_PATH
-    ledger.parent.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if ledger.is_file() and ledger.stat().st_size:
         with ledger.open("rb") as handle:
             handle.seek(-1, os.SEEK_END)
             if handle.read(1) != b"\n":
                 prefix = "\n"
-    line = prefix + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-    with ledger.open("a", encoding="utf-8") as handle:
+    line = (prefix + json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(ledger, flags, 0o644)
+    except OSError as exc:
+        raise RecoveryError("ledger could not be opened safely") from exc
+    with os.fdopen(fd, "ab") as handle:
         handle.write(line)
         handle.flush()
         os.fsync(handle.fileno())
@@ -396,6 +436,8 @@ def apply_one(root: Path, manifest_id: str) -> dict[str, Any]:
         raise RecoveryError(f"queue state refuses recovery: {item['queue']}")
     if item["completion"] in {"LEDGER_UNREADABLE", "LEDGER_CONFLICT"}:
         raise RecoveryError(f"ledger refuses recovery: {item['completion']}")
+    if not _ledger_path_safe(root) or not _ledger_writable(root):
+        raise RecoveryError("ledger path unsafe or unwritable")
     # Report pre-flight: fail closed BEFORE any mutation (including the
     # ledger append) if an existing report is not the exact expected one.
     if item["report"] not in {"REPORT_ABSENT", "REPORT_MATCH"}:
