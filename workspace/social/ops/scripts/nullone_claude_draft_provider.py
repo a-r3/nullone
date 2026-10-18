@@ -69,7 +69,7 @@ Weekly / Radar prompt):
                 payload deterministically (caption text, hashed
                 render outputs, exact approval buttons), validates
                 it with the existing preview validator, runs the
-                delivery helper exactly once (failure becomes NOTIFY_FAILED),
+                delivery helper exactly once (failure or missing message-id proof becomes NOTIFY_FAILED),
                 appends the ledger line, and writes
                 the report.
 
@@ -1534,18 +1534,27 @@ def invoke_draft(
             )
             if "DELIVERY_STATUS=SENT" not in delivery_out.splitlines():
                 raise BridgeError("Draft delivery did not prove SENT")
+            # The adapter contract: SENT only after every send returned a
+            # non-empty messageId, emitted as APPROVAL_MESSAGE_ID=<id>.
+            # SENT without that proof is never recorded or claimed.
             for line in delivery_out.splitlines():
                 if line.startswith("APPROVAL_MESSAGE_ID="):
-                    approval_message_id = line.split("=", 1)[1].strip() or None
+                    approval_message_id = line.split("=", 1)[1].strip()
+            if not valid_approval_message_id(approval_message_id):
+                approval_message_id = None
+                raise BridgeError("Draft delivery lacked approval message id proof")
     except BridgeError:
-        # An ambiguous or partial send must never be duplicated.
+        # Timeout, transport failure, or missing proof: a send may still
+        # have happened. Never duplicated, never claimed. (In-memory
+        # label "NOTIFY_FAILED" = not proven delivered; the durable
+        # receipt below says DELIVERY_UNCONFIRMED.)
         notify_state = "NOTIFY_FAILED"
     try:
         _write_delivery_receipt(
             receipt_path,
             accepted_id,
             review_post_id,
-            notify_state,
+            "SENT" if notify_state == "SENT" else "DELIVERY_UNCONFIRMED",
             approval_message_id=approval_message_id,
             workspace_root=root,
         )
@@ -1612,7 +1621,13 @@ def delivery_receipt_path(candidate_id: str, today: str, root: Path) -> Path:
 
 
 DELIVERY_RECEIPT_SCHEMA = "nullone.draft-telegram-delivery.v1"
-DELIVERY_RECEIPT_STATES = frozenset({"SENDING", "SENT", "NOTIFY_FAILED"})
+DELIVERY_RECEIPT_STATES = frozenset({"SENDING", "SENT", "DELIVERY_UNCONFIRMED"})
+_APPROVAL_MESSAGE_ID = re.compile(r"^[0-9A-Za-z_.:-]{1,64}$")
+
+
+def valid_approval_message_id(value: object) -> bool:
+    """True only for a non-empty, bounded, whitespace-free message id."""
+    return isinstance(value, str) and bool(_APPROVAL_MESSAGE_ID.fullmatch(value))
 
 
 def _write_delivery_receipt(
@@ -1628,13 +1643,18 @@ def _write_delivery_receipt(
 
     Facts only: candidate, review post id, state, and the Telegram
     approval message id when the adapter proved SENT. No payload text,
-    URL, or target is ever stored. Progression is SENDING -> SENT or
-    NOTIFY_FAILED; a lingering SENDING means delivery is UNCONFIRMED.
+    URL, or target is ever stored. SENDING = a send was attempted;
+    SENT = exact message-id proof exists (required, validated here);
+    DELIVERY_UNCONFIRMED = attempted but durable proof is absent. A
+    lingering SENDING is also unconfirmed. No state implies "known not
+    delivered": that cannot be proven once a send was attempted.
     """
     from nullone_bridge_common import atomic_write_json, now_iso
 
     if state not in DELIVERY_RECEIPT_STATES:
         raise BridgeError("Draft delivery receipt state invalid")
+    if (state == "SENT") != valid_approval_message_id(approval_message_id):
+        raise BridgeError("Draft delivery receipt SENT requires approval message id")
     root = workspace_root.resolve(strict=True)
     try:
         path.resolve().relative_to(root)

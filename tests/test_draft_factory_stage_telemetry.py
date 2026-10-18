@@ -190,7 +190,7 @@ class Case:
             return ("DRAFT_BRIDGE=PASS\nMANIFEST=m\n"
                     "REVIEW_POST_ID=review-probe-1\nREVIEW_STATE=DRAFT_CREATED\n")
         if short == "deliver":
-            return "DELIVERY_STATUS=SENT\n"
+            return "DELIVERY_STATUS=SENT\nMEDIA_MESSAGE_IDS=1\nAPPROVAL_MESSAGE_ID=1\n"
         raise AssertionError(short)
 
     # -- run -----------------------------------------------------------
