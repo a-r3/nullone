@@ -294,13 +294,113 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(out["written"], ["REPORT"])
             self.assertEqual(rec.apply_one(root, MID)["written"], [])
 
-    def test_existing_differing_report_is_never_replaced(self):
+    # -- report pre-flight (fail closed before ANY mutation) -----------
+    def _expected_report(self, root):
+        item = rec.inspect_all(root)[0]
+        manifest = json.loads((root / rec.MANIFEST_DIR / f"{MID}.json").read_text())
+        return rec._report_text(manifest, item)
+
+    def _report_file(self, root):
+        return root / rec.PUBLISHER_DIR / f"{MID}-draft.md"
+
+    def test_identical_existing_report_and_missing_ledger_writes_ledger_only(self):
         with tempfile.TemporaryDirectory() as td:
-            root = make_root(td, report=True)
-            before = (root / rec.PUBLISHER_DIR / f"{MID}-draft.md").read_bytes()
-            out = rec.apply_one(root, MID)
-            self.assertEqual(out["written"], ["LEDGER_ROW"])
-            self.assertEqual((root / rec.PUBLISHER_DIR / f"{MID}-draft.md").read_bytes(), before)
+            root = make_root(td)
+            report = self._report_file(root)
+            report.parent.mkdir(parents=True)
+            report.write_text(self._expected_report(root), encoding="utf-8")
+            before = report.read_bytes()
+            item = rec.inspect_all(root)[0]
+            self.assertEqual((item["completion"], item["report"]),
+                             ("MISSING_LEDGER", "REPORT_MATCH"))
+            self.assertEqual(rec.apply_one(root, MID)["written"], ["LEDGER_ROW"])
+            self.assertEqual(report.read_bytes(), before)
+            self.assertEqual(rec.inspect_all(root)[0]["completion"], "COMPLETE")
+
+    def test_different_existing_report_and_missing_ledger_refuses_zero_mutation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td, report=True)  # contains "x\n"
+            before = snapshot(root)
+            item = rec.inspect_all(root)[0]
+            self.assertEqual((item["completion"], item["report"]),
+                             ("REPORT_INCONSISTENT", "REPORT_DIFFERS"))
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual(snapshot(root), before)
+            self.assertNotIn("DRAFT_CREATED", (root / rec.LEDGER_PATH).read_text())
+
+    def test_different_existing_report_with_matching_ledger_is_inconsistent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td, report=True, ledger_rows=[
+                {"candidate_id": CID, "review_post_id": RPID, "state": "DRAFT_CREATED"}])
+            before = snapshot(root)
+            item = rec.inspect_all(root)[0]
+            self.assertEqual(item["completion"], "REPORT_INCONSISTENT")
+            self.assertEqual(item["ledger"], "MATCH")
+            self.assertNotEqual(item["completion"], "COMPLETE")
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual(snapshot(root), before)
+
+    def test_report_symlink_refuses(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            report = self._report_file(root)
+            report.parent.mkdir(parents=True)
+            target = Path(td) / "elsewhere.md"
+            target.write_text(self._expected_report(root))
+            report.symlink_to(target)
+            before = snapshot(root)
+            self.assertEqual(rec.inspect_all(root)[0]["report"], "REPORT_UNSAFE")
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual(snapshot(root), before)
+            self.assertTrue(report.is_symlink())
+
+    def test_report_non_regular_or_unreadable_refuses(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            report = self._report_file(root)
+            report.mkdir(parents=True)  # a directory where the file belongs
+            before = snapshot(root)
+            self.assertEqual(rec.inspect_all(root)[0]["report"], "REPORT_UNSAFE")
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual(snapshot(root), before)
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            report = self._report_file(root)
+            report.parent.mkdir(parents=True)
+            report.write_bytes(b"\xff\xfe not utf-8")  # undecodable
+            before = snapshot(root)
+            self.assertEqual(rec.inspect_all(root)[0]["report"], "REPORT_UNSAFE")
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual(snapshot(root), before)
+
+    def test_complete_requires_matching_report_not_just_any_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td)
+            rec.apply_one(root, MID)
+            self.assertEqual(rec.inspect_all(root)[0]["completion"], "COMPLETE")
+            self._report_file(root).write_text("historical model report\n")
+            item = rec.inspect_all(root)[0]
+            self.assertEqual((item["completion"], item["report"]),
+                             ("REPORT_INCONSISTENT", "REPORT_DIFFERS"))
+
+    def test_delivery_change_after_report_is_surfaced_not_repaired(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = make_root(td, receipt={"state": "SENDING"})
+            rec.apply_one(root, MID)
+            (root / rec.DRAFTS_DIR / f"2026-10-14-{CID}-telegram-delivery.json").write_text(
+                json.dumps({"schema": rec.DELIVERY_RECEIPT_SCHEMA, "candidate_id": CID,
+                            "review_post_id": RPID, "state": "SENT",
+                            "approval_message_id": "9"}))
+            before = snapshot(root)
+            self.assertEqual(rec.inspect_all(root)[0]["completion"], "REPORT_INCONSISTENT")
+            with self.assertRaises(rec.RecoveryError):
+                rec.apply_one(root, MID)
+            self.assertEqual(snapshot(root), before)
 
     # -- surface / parity ---------------------------------------------
     def test_module_has_no_external_surface(self):

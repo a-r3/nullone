@@ -206,6 +206,31 @@ def report_path_for(root: Path, manifest_id: str) -> Path:
     return root / PUBLISHER_DIR / f"{manifest_id}-draft.md"
 
 
+def report_state(root: Path, manifest: dict[str, Any], item: dict[str, Any]) -> str:
+    """REPORT_ABSENT | REPORT_MATCH | REPORT_DIFFERS | REPORT_UNSAFE | REPORT_UNBUILDABLE.
+
+    MATCH means the existing file is byte-identical to the exact
+    deterministic recovered report. A differing historical/model-authored
+    report is reported as DIFFERS and is never overwritten or repaired.
+    """
+    path = report_path_for(root, item["manifest_id"])
+    try:
+        expected = _report_text(manifest, item)
+    except RecoveryError:
+        return "REPORT_UNBUILDABLE"
+    if path.is_symlink():
+        return "REPORT_UNSAFE"
+    if not path.exists():
+        return "REPORT_ABSENT"
+    if not path.is_file():
+        return "REPORT_UNSAFE"
+    try:
+        current = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "REPORT_UNSAFE"
+    return "REPORT_MATCH" if current == expected else "REPORT_DIFFERS"
+
+
 def inspect_manifest(
     root: Path,
     manifest_path: Path,
@@ -233,7 +258,16 @@ def inspect_manifest(
     review_post_id = review["zernio_draft_id"]
     delivery, message_id = _delivery_state(root, m)
     queue = queue_state(root, m)
-    has_report = report_path_for(root, manifest_id).is_file()
+    base = {
+        "manifest_id": manifest_id,
+        "candidate_id": candidate_id,
+        "review_post_id": review_post_id,
+        "queue": queue,
+        "telegram_delivery": delivery,
+        "approval_message_id": message_id,
+    }
+    rstate = report_state(root, m, base)
+    ident = "UNREADABLE"
     if not ledger_readable:
         completion = "LEDGER_UNREADABLE"
     else:
@@ -245,23 +279,17 @@ def inspect_manifest(
         )
         if ident == "CONFLICT":
             completion = "LEDGER_CONFLICT"
-        elif ident == "MATCH" and has_report:
+        elif rstate in {"REPORT_DIFFERS", "REPORT_UNSAFE", "REPORT_UNBUILDABLE"}:
+            completion = "REPORT_INCONSISTENT"
+        elif ident == "MATCH" and rstate == "REPORT_MATCH":
             completion = "COMPLETE"
         elif ident == "MATCH":
             completion = "MISSING_REPORT"
-        elif has_report:
+        elif rstate == "REPORT_MATCH":
             completion = "MISSING_LEDGER"
         else:
             completion = "MISSING_LEDGER_AND_REPORT"
-    return {
-        "manifest_id": manifest_id,
-        "candidate_id": candidate_id,
-        "review_post_id": review_post_id,
-        "completion": completion,
-        "queue": queue,
-        "telegram_delivery": delivery,
-        "approval_message_id": message_id,
-    }
+    return {**base, "completion": completion, "report": rstate, "ledger": ident}
 
 
 def inspect_all(root: Path) -> list[dict[str, Any]]:
@@ -368,6 +396,10 @@ def apply_one(root: Path, manifest_id: str) -> dict[str, Any]:
         raise RecoveryError(f"queue state refuses recovery: {item['queue']}")
     if item["completion"] in {"LEDGER_UNREADABLE", "LEDGER_CONFLICT"}:
         raise RecoveryError(f"ledger refuses recovery: {item['completion']}")
+    # Report pre-flight: fail closed BEFORE any mutation (including the
+    # ledger append) if an existing report is not the exact expected one.
+    if item["report"] not in {"REPORT_ABSENT", "REPORT_MATCH"}:
+        raise RecoveryError(f"report refuses recovery: {item['report']}")
     m = _read_json(manifest_path)
     report = report_path_for(root, manifest_id)
     written: list[str] = []
@@ -398,7 +430,7 @@ def apply_one(root: Path, manifest_id: str) -> dict[str, Any]:
         _append_ledger_row(root, row)
         written.append("LEDGER_ROW")
 
-    if not report.is_file() and item["completion"] != "COMPLETE":
+    if item["report"] == "REPORT_ABSENT":
         if write_report_atomic(report, _report_text(m, item)) == "WRITTEN":
             written.append("REPORT")
 
@@ -428,7 +460,8 @@ def main(argv: list[str] | None = None) -> int:
         if item["completion"] != "COMPLETE":
             print(
                 f"{item['manifest_id']} completion={item['completion']} "
-                f"queue={item['queue']} telegram={item['telegram_delivery']}"
+                f"report={item['report']} queue={item['queue']} "
+                f"telegram={item['telegram_delivery']}"
             )
     print("DRAFT_RECOVERY=INSPECT_DONE")
     return 0
