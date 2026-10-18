@@ -130,6 +130,13 @@ from nullone_draft_stage_error import (
     DRAFT_REASON_RENDER,
     DRAFT_REASON_REPORT_WRITE,
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_SHAPE,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_SCHEMA,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_IDENTITY,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_KIND,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_PROVENANCE,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_OPTIONAL,
     DRAFT_REASON_SELECT_PACKAGING_REQUEST,
     DRAFT_REASON_SELECT_QUEUE_IDENTITY,
     DRAFT_REASON_SELECT_RESULT_SHAPE,
@@ -674,40 +681,55 @@ def _check_asset_descriptor_contract(
     model bytes): exact/allowed field set, schema literal, candidate
     binding, authoritative asset-kind vocabulary, file-backed vs NONE
     path/provenance shape, optional sha256/source_url types.
+
+    Each boundary below is wrapped in an attribute-only safe stage
+    tag (innermost wins) so natural-run telemetry names the exact
+    failing check without echoing any model text. Checks, order,
+    exceptions, and messages are unchanged.
     """
     if not isinstance(descriptor, dict):
         raise BridgeError("Malformed Draft Factory SELECT result")
-    allowed_keys = set(SELECT_ASSET_DESCRIPTOR_REQUIRED) | set(
-        SELECT_ASSET_DESCRIPTOR_OPTIONAL
-    )
-    if not set(SELECT_ASSET_DESCRIPTOR_REQUIRED) <= set(descriptor) <= allowed_keys:
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    if descriptor["schema"] != ASSET_DESCRIPTOR_SCHEMA:
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    if (
-        not isinstance(descriptor["candidate_id"], str)
-        or not descriptor["candidate_id"].strip()
-        or descriptor["candidate_id"] != candidate_id
-    ):
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    kind = descriptor["asset_kind"]
-    if kind not in SELECT_ASSET_KINDS:
-        raise BridgeError("Malformed Draft Factory SELECT result")
+    with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_SHAPE):
+        allowed_keys = set(SELECT_ASSET_DESCRIPTOR_REQUIRED) | set(
+            SELECT_ASSET_DESCRIPTOR_OPTIONAL
+        )
+        if not set(SELECT_ASSET_DESCRIPTOR_REQUIRED) <= set(descriptor) <= allowed_keys:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_SCHEMA):
+        if descriptor["schema"] != ASSET_DESCRIPTOR_SCHEMA:
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_IDENTITY):
+        if (
+            not isinstance(descriptor["candidate_id"], str)
+            or not descriptor["candidate_id"].strip()
+            or descriptor["candidate_id"] != candidate_id
+        ):
+            raise BridgeError("Malformed Draft Factory SELECT result")
+    with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_KIND):
+        kind = descriptor["asset_kind"]
+        if kind not in SELECT_ASSET_KINDS:
+            raise BridgeError("Malformed Draft Factory SELECT result")
     local_path = descriptor["local_path"]
     provenance = descriptor["provenance"]
     if kind in FILE_BACKED_ASSET_KINDS:
-        if not isinstance(local_path, str) or not local_path.strip():
-            raise BridgeError("Malformed Draft Factory SELECT result")
-        if not isinstance(provenance, str) or not provenance.strip():
-            raise BridgeError("Malformed Draft Factory SELECT result")
-    elif local_path is not None:
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    elif provenance is not None and not isinstance(provenance, str):
-        raise BridgeError("Malformed Draft Factory SELECT result")
-    for field in SELECT_ASSET_DESCRIPTOR_OPTIONAL:
-        value = descriptor.get(field)
-        if value is not None and not isinstance(value, str):
-            raise BridgeError("Malformed Draft Factory SELECT result")
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH):
+            if not isinstance(local_path, str) or not local_path.strip():
+                raise BridgeError("Malformed Draft Factory SELECT result")
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_PROVENANCE):
+            if not isinstance(provenance, str) or not provenance.strip():
+                raise BridgeError("Malformed Draft Factory SELECT result")
+    else:
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH):
+            if local_path is not None:
+                raise BridgeError("Malformed Draft Factory SELECT result")
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_PROVENANCE):
+            if provenance is not None and not isinstance(provenance, str):
+                raise BridgeError("Malformed Draft Factory SELECT result")
+    with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_OPTIONAL):
+        for field in SELECT_ASSET_DESCRIPTOR_OPTIONAL:
+            value = descriptor.get(field)
+            if value is not None and not isinstance(value, str):
+                raise BridgeError("Malformed Draft Factory SELECT result")
 
 
 def _validated_produce(result: object, *, carousel: bool) -> dict:
