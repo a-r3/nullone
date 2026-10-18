@@ -2553,3 +2553,25 @@ Review hardens the #111 wiring without changing the architecture:
   from-imported name instead of the adapter registry entry; fixed
   by module-attribute access at all execution seams. No production
   touched at any point.
+
+## Production deploy record — PR #207 and PR #199 (2026-10-19)
+
+Verified facts only (local time Asia/Baku, UTC+4).
+
+- PR #207 (Draft SELECT_ASSET_DESCRIPTOR sub-stage telemetry, observability only) squash-merged as
+  `65bdc86c650babe7678d12dfa6ae76c066483dab` on 2026-10-19 02:30.
+- PR #207 DEPLOYED to production 2026-10-19 02:39. Backup of previous live files:
+  `~/.openclaw/nullone-deploy-backups/pr207-20261019-023919/`.
+  - `nullone_claude_draft_provider.py` sha256 `40f2f587534370e087acc99ceebf44488f8420c875c9cee81f0d13f87e004e79` (was `39f351296d56f70b…`)
+  - `nullone_draft_stage_error.py` sha256 `7d47fded7f6c1d2852c7034373a8eb9fd9d5cf7a71b85e273f3a2de5a04f18e5` (was `22e5b1514f005dc4…`)
+  - Source (origin/main) == live for both. `--self-test`: DRAFT_STAGE_ERROR_SELF_TEST=PASS, DRAFT_CLAUDE_PROVIDER_SELF_TEST=PASS, NO_EXTERNAL_CALLS=PASS.
+- PR #199 (Breaking Radar failure-stage telemetry, `1d3ca8b`) DEPLOYED 2026-10-19 02:39. No later commits touched its three runtime files. Backup:
+  `~/.openclaw/nullone-deploy-backups/pr199-radar-20261019-023934/` (`nullone_radar_stage_error.py` LIVE_PREVIOUS_STATE=ABSENT).
+  - `nullone_radar_stage_error.py` `e085c98d9b4311b8d3f4a13b7c6d7d4630e51f38f13529ba7d5e498c9ea1cec0`
+  - `nullone-breaking-radar-run.py` `45b77bc67341acfa7e3eed3fa24a820b7d01f07cf48e86f12fccb1b8576576c4`
+  - `nullone_claude_radar_provider.py` `5ca5031fd41bc85a82934bcd14b5f9f99bd1bf1481f05a346ab7a5a4c7a77edc`
+  - Radar files have no `--self-test`; verified syntax + import only, plus offline `tests/test_breaking_radar_stage_telemetry.py` (24 OK) on origin/main.
+- Draft Factory (`acd7e801-7645-4fed-a88a-13c3f5783c98`) was ENABLED (not auto-disabled), `45 9,15,20 * * *` Asia/Baku,
+  consecutiveErrors=5, last natural run 2026-10-18 20:45 failed at parent code `SELECT_ASSET_DESCRIPTOR` (pre-#207). No config change made.
+- NATURAL_PROOF=PENDING. Next natural Draft run: 2026-10-19 09:45; next natural Radar run: 2026-10-19 11:30.
+- Not healthy-claimed: no post-deploy natural Draft/Radar run has occurred yet.
