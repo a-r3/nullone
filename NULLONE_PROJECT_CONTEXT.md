@@ -2575,3 +2575,11 @@ Verified facts only (local time Asia/Baku, UTC+4).
   consecutiveErrors=5, last natural run 2026-10-18 20:45 failed at parent code `SELECT_ASSET_DESCRIPTOR` (pre-#207). No config change made.
 - NATURAL_PROOF=PENDING. Next natural Draft run: 2026-10-19 09:45; next natural Radar run: 2026-10-19 11:30.
 - Not healthy-claimed: no post-deploy natural Draft/Radar run has occurred yet.
+
+## Reconciliation findings — 2026-10-19 (read-only; no production state changed)
+
+- **PUBLISHING backlog:** 9 manifests are local `PUBLISHING` (attempts=1, no `platform_post_id`, two-step approval recorded, receipts `SETTLED_PUBLISHING`):
+  2026-09-29 Sonnet 5.5 launch and Story manifests of 10-01, 10-02, 10-03, 10-05, 10-09, 10-12, 10-13 (`gpt-6-intelligent-ui`), 10-14 (`az-zeka`).
+  Read-only Zernio `posts_get` reports `published` (Instagram) for all 9. Classification: STATE_INCONSISTENT (Zernio status alone does not prove platform ids).
+- **Cause (PR #170 design, documented in `nullone-publish-reconcile.py`):** bridge does one PUT + one readback and settles `PUBLISHING`; async Zernio delivery then finishes later. The GET-only reconciler is deployed but manual and not scheduled, so nothing re-checks. This is an operational gap, not a bridge defect. Remediation = explicit human decision to run `nullone-publish-reconcile.py scan` (or schedule it); not performed.
+- **Draft 2026-10-14 case** (`microsoft-execution-containers-agent-containment-2026-10-14`, Zernio `6acfb1c95c334804b44ef452`, remote status `draft`): the 20:45 run failed at `LEDGER_WRITE` after the Zernio draft and queue DRAFTED flip. No ledger row, no report, and Telegram delivery is UNCONFIRMED (no durable receipt existed). Fix proposal: PR #209 (not merged, not deployed).
