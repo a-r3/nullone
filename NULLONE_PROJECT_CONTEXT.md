@@ -2554,32 +2554,32 @@ Review hardens the #111 wiring without changing the architecture:
   by module-attribute access at all execution seams. No production
   touched at any point.
 
-## Production deploy record — PR #207 and PR #199 (2026-10-19)
+## Production reliability status — 2026-10-19 (verified facts only)
 
-Verified facts only (local time Asia/Baku, UTC+4).
+Local time Asia/Baku (UTC+4). System status: **DEGRADED**. Natural Draft and Radar proof are **PENDING**.
 
-- PR #207 (Draft SELECT_ASSET_DESCRIPTOR sub-stage telemetry, observability only) squash-merged as
-  `65bdc86c650babe7678d12dfa6ae76c066483dab` on 2026-10-19 02:30.
-- PR #207 DEPLOYED to production 2026-10-19 02:39. Backup of previous live files:
+- **PR #207** (Draft `SELECT_ASSET_DESCRIPTOR_*` sub-stage telemetry, observability only) squash-merged as
+  `65bdc86c650babe7678d12dfa6ae76c066483dab` and **DEPLOYED** 2026-10-19 02:39. Backup:
   `~/.openclaw/nullone-deploy-backups/pr207-20261019-023919/`.
   - `nullone_claude_draft_provider.py` sha256 `40f2f587534370e087acc99ceebf44488f8420c875c9cee81f0d13f87e004e79` (was `39f351296d56f70b…`)
   - `nullone_draft_stage_error.py` sha256 `7d47fded7f6c1d2852c7034373a8eb9fd9d5cf7a71b85e273f3a2de5a04f18e5` (was `22e5b1514f005dc4…`)
-  - Source (origin/main) == live for both. `--self-test`: DRAFT_STAGE_ERROR_SELF_TEST=PASS, DRAFT_CLAUDE_PROVIDER_SELF_TEST=PASS, NO_EXTERNAL_CALLS=PASS.
-- PR #199 (Breaking Radar failure-stage telemetry, `1d3ca8b`) DEPLOYED 2026-10-19 02:39. No later commits touched its three runtime files. Backup:
-  `~/.openclaw/nullone-deploy-backups/pr199-radar-20261019-023934/` (`nullone_radar_stage_error.py` LIVE_PREVIOUS_STATE=ABSENT).
-  - `nullone_radar_stage_error.py` `e085c98d9b4311b8d3f4a13b7c6d7d4630e51f38f13529ba7d5e498c9ea1cec0`
-  - `nullone-breaking-radar-run.py` `45b77bc67341acfa7e3eed3fa24a820b7d01f07cf48e86f12fccb1b8576576c4`
-  - `nullone_claude_radar_provider.py` `5ca5031fd41bc85a82934bcd14b5f9f99bd1bf1481f05a346ab7a5a4c7a77edc`
-  - Radar files have no `--self-test`; verified syntax + import only, plus offline `tests/test_breaking_radar_stage_telemetry.py` (24 OK) on origin/main.
-- Draft Factory (`acd7e801-7645-4fed-a88a-13c3f5783c98`) was ENABLED (not auto-disabled), `45 9,15,20 * * *` Asia/Baku,
-  consecutiveErrors=5, last natural run 2026-10-18 20:45 failed at parent code `SELECT_ASSET_DESCRIPTOR` (pre-#207). No config change made.
-- NATURAL_PROOF=PENDING. Next natural Draft run: 2026-10-19 09:45; next natural Radar run: 2026-10-19 11:30.
-- Not healthy-claimed: no post-deploy natural Draft/Radar run has occurred yet.
-
-## Reconciliation findings — 2026-10-19 (read-only; no production state changed)
-
-- **PUBLISHING backlog:** 9 manifests are local `PUBLISHING` (attempts=1, no `platform_post_id`, two-step approval recorded, receipts `SETTLED_PUBLISHING`):
-  2026-09-29 Sonnet 5.5 launch and Story manifests of 10-01, 10-02, 10-03, 10-05, 10-09, 10-12, 10-13 (`gpt-6-intelligent-ui`), 10-14 (`az-zeka`).
-  Read-only Zernio `posts_get` reports `published` (Instagram) for all 9. Classification: STATE_INCONSISTENT (Zernio status alone does not prove platform ids).
-- **Cause (PR #170 design, documented in `nullone-publish-reconcile.py`):** bridge does one PUT + one readback and settles `PUBLISHING`; async Zernio delivery then finishes later. The GET-only reconciler is deployed but manual and not scheduled, so nothing re-checks. This is an operational gap, not a bridge defect. Remediation = explicit human decision to run `nullone-publish-reconcile.py scan` (or schedule it); not performed.
-- **Draft 2026-10-14 case** (`microsoft-execution-containers-agent-containment-2026-10-14`, Zernio `6acfb1c95c334804b44ef452`, remote status `draft`): the 20:45 run failed at `LEDGER_WRITE` after the Zernio draft and queue DRAFTED flip. No ledger row, no report, and Telegram delivery is UNCONFIRMED (no durable receipt existed). Fix proposal: PR #209 (not merged, not deployed).
+  - source == live; `--self-test` PASS (`DRAFT_STAGE_ERROR_SELF_TEST`, `DRAFT_CLAUDE_PROVIDER_SELF_TEST`, `NO_EXTERNAL_CALLS`).
+- **PR #199** (Breaking Radar failure-stage telemetry, `1d3ca8b`) **DEPLOYED** 2026-10-19 02:39; no later commit touched its files.
+  Backup: `~/.openclaw/nullone-deploy-backups/pr199-radar-20261019-023934/` (`nullone_radar_stage_error.py` was ABSENT live).
+  `nullone_radar_stage_error.py` `e085c98d…`, `nullone-breaking-radar-run.py` `45b77bc6…`, `nullone_claude_radar_provider.py` `5ca5031f…`; source == live.
+  Radar files have no `--self-test`; verified by syntax/import and the offline `test_breaking_radar_stage_telemetry.py`.
+- **PR #209** (durable Draft Telegram delivery receipt `SENDING`/`SENT`/`DELIVERY_UNCONFIRMED`; local-only `nullone_draft_recovery.py`)
+  squash-merged as `01b2d857b3f944e491468e665be7c6377d5a5262`. **NOT DEPLOYED.** Production still runs the #207 version; the next natural Draft
+  run will not write the new receipt (its absence is expected, not a regression). Deployment needs a separate controlled decision.
+- **Draft Factory** (`acd7e801-7645-4fed-a88a-13c3f5783c98`) is enabled, `45 9,15,20 * * *` Asia/Baku, consecutiveErrors=5; last natural run
+  2026-10-18 20:45 failed at the parent code `SELECT_ASSET_DESCRIPTOR` (pre-#207). Next natural run 2026-10-19 09:45. **Breaking Radar** last run
+  2026-10-19 00:42 failed with an untagged `BridgeError` (pre-#199 deploy); next natural run 11:30.
+- **PUBLISHING backlog:** 9 manifests are local `PUBLISHING` (attempts=1, no `platform_post_id`, two-step approval recorded); read-only Zernio
+  `posts_get` reports `published` for all 9 (classification STATE_INCONSISTENT; Zernio status alone is not platform-id proof): 2026-09-29 Sonnet 5.5
+  launch and Story manifests of 10-01, 10-02, 10-03, 10-05, 10-09, 10-12, 10-13 (gpt-6-intelligent-ui), 10-14 (az-zeka). Cause: bridge settles
+  `PUBLISHING` after one PUT + one readback by design; the GET-only reconciler (`nullone-publish-reconcile.py`, #170/#181) is deployed but manual and
+  unscheduled. No manifest was changed. A scheduled job is deferred and tracked in issue #211 (PR #210 closed).
+- **Draft 2026-10-14 case** (`microsoft-execution-containers-agent-containment-2026-10-14`, Zernio `6acfb1c95c334804b44ef452`, remote status `draft`):
+  the 20:45 run failed at `LEDGER_WRITE` after Zernio/queue DRAFTED. No ledger row, no report, Telegram delivery UNCONFIRMED. Not repaired.
+- **PR hygiene 2026-10-19:** open PRs reduced to this one. #115 closed (superseded by the Claude/Sonnet packaging stack), #128/#130 closed (obsolete:
+  synthetic acceptance path conflicts with natural-proof policy; tracked in #127/#129), #164/#165 closed (visual work deferred; tracked in #163/#166).
