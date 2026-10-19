@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Draft Factory packaging-receipt-conflict fallback regression tests (offline only)."""
+"""Draft Factory packaging-receipt-conflict fallback regression tests."""
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -31,6 +33,15 @@ from test_draft_factory_claude_route import (  # noqa: E402
 
 CONFLICT_CODE = receipt_mod.PACKAGING_RECEIPT_CONFLICT_CODE
 CONFLICT_CODE_LINE = f"BLOCKED_CODE={CONFLICT_CODE}"
+GROUNDING_CODE = receipt_mod.VISUAL_GROUNDING_UNMET_CODE
+GROUNDING_CODE_LINE = f"BLOCKED_CODE={GROUNDING_CODE}"
+
+import importlib.util
+_evaluator_spec = importlib.util.spec_from_file_location(
+    "nullone_packaging_evaluator_test", SCRIPTS / "nullone-packaging-evaluator.py")
+_evaluator_module = importlib.util.module_from_spec(_evaluator_spec)
+_evaluator_spec.loader.exec_module(_evaluator_module)
+blocked_code_line = _evaluator_module.blocked_code_line
 
 WORKSPACE_PROD = ROOT / "workspace/social/drafts/production"
 
@@ -44,10 +55,7 @@ def post_item(candidate_id):
 
 
 class ConflictHarness:
-    """Run invoke_draft in a temp workspace with faithful evaluator seams,
-    including receipt-conflict detection (existing receipt differs -> typed
-    candidate-local signal, not a whole-cycle BridgeError).
-    """
+    """Run invoke_draft in a temp workspace with faithful evaluator seams."""
 
     def __init__(self, test, ranked_items):
         self.test = test
@@ -93,7 +101,7 @@ class ConflictHarness:
         try:
             receipt = receipt_mod.evaluate_request(cid, request)
         except BridgeError as exc:
-            if grounding_unmet_ok and str(exc).startswith(receipt_mod.VISUAL_GROUNDING_UNMET_CODE):
+            if grounding_unmet_ok and str(exc).startswith(GROUNDING_CODE):
                 raise draft._PackagingGroundingUnmet()
             if grounding_unmet_ok and str(exc).startswith(CONFLICT_CODE):
                 raise draft._PackagingReceiptConflict()
@@ -191,12 +199,7 @@ class ReceiptConflictCycleTests(unittest.TestCase):
         stale_receipt["VISUAL_STYLE"] = "DATA_VISUALIZATION"
         stale_receipt["visual_requirement"] = "SOURCE_GROUNDED"
         stale_receipt["input_fingerprint"] = "stale-fingerprint-bytes"
-        import hashlib
-        stale_receipt["receipt_hash"] = hashlib.sha256(
-            receipt_mod.canonical_json_bytes(
-                {k: v for k, v in stale_receipt.items() if k != "receipt_hash"}
-            )
-        ).hexdigest()
+        stale_receipt["receipt_hash"] = _receipt_hash(stale_receipt)
 
         h = ConflictHarness(
             self,
@@ -215,16 +218,11 @@ class ReceiptConflictCycleTests(unittest.TestCase):
         ]
         self.assertIn(("conflict-candidate", "PACKAGING_RECEIPT_CONFLICT"), dispositions)
         self.assertEqual(
-            json.loads(
-                h.receipt_path("conflict-candidate").read_text(encoding="utf-8")
-            ),
+            json.loads(h.receipt_path("conflict-candidate").read_text(encoding="utf-8")),
             stale_receipt,
         )
         self.assertIn("PRODUCE", h.rounds)
         h.assert_no_consequential_output("conflict-candidate")
-
-    def _receipt_path(self, cid):
-        return receipt_mod.canonical_receipt_path(cid, root=self.root)
 
     def test_02_identical_receipt_is_idempotent_no_conflict(self):
         post = post_item("post-1")
@@ -283,24 +281,17 @@ class ReceiptConflictCycleTests(unittest.TestCase):
         stale2["receipt_hash"] = _receipt_hash(stale2)
         atomic_write_json(h.receipt_path("conflict-2"), stale2)
 
-        # Re-create the harness with actual ranked items but same root
-        # (the stale receipts were already written to its prod dir).
-        h2 = ConflictHarness(
-            self,
-            [c1, c2, post_item("post-3")],
-        )
-        h2.root = h.root
-        h2.prod = h.prod
-        # Rewrite the queue on the shared root with all three candidates.
         entries = "\n".join(
             queue_entry(i["candidate_id"], content_type=i["content_type"])
             for i in [c1, c2, post_item("post-3")]
         )
-        h2.queue_text = "# Probe queue\n\n" + entries
-        write_queue(h2.root, h2.queue_text)
+        h.queue_text = "# Probe queue\n\n" + entries
+        write_queue(h.root, h.queue_text)
+        h.items = [c1, c2, post_item("post-3")]
+
         with self.assertRaises(StopAtProduce):
-            h2.run()
-        ledger = h2.ledger()
+            h.run()
+        ledger = h.ledger()
         self.assertEqual(ledger["accepted_candidate_id"], "post-3")
         dispositions = [
             (a["candidate_id"], a.get("disposition", "SKIP"))
@@ -312,12 +303,113 @@ class ReceiptConflictCycleTests(unittest.TestCase):
 
 
 def _receipt_hash(receipt):
-    import hashlib
     return hashlib.sha256(
         receipt_mod.canonical_json_bytes(
             {k: v for k, v in receipt.items() if k != "receipt_hash"}
         )
     ).hexdigest()
+
+
+class BlockedCodeLineTests(unittest.TestCase):
+    """blocked_code_line() returns exact fixed constants, never echoing
+    dynamic exception text."""
+
+    def test_grounding_exact_fixed_line(self):
+        pass  # blocked_code_line imported at module level
+        exc = BridgeError("PACKAGING_VISUAL_GROUNDING_UNMET")
+        self.assertEqual(
+            blocked_code_line(exc),
+            f"BLOCKED_CODE={GROUNDING_CODE}",
+        )
+
+    def test_grounding_with_suffix_exact_fixed_line(self):
+        pass  # blocked_code_line imported at module level
+        exc = BridgeError("PACKAGING_VISUAL_GROUNDING_UNMET: layout declares a visual block")
+        self.assertEqual(
+            blocked_code_line(exc),
+            f"BLOCKED_CODE={GROUNDING_CODE}",
+        )
+
+    def test_conflict_exact_fixed_line(self):
+        pass  # blocked_code_line imported at module level
+        exc = BridgeError("PACKAGING_RECEIPT_CONFLICT")
+        self.assertEqual(
+            blocked_code_line(exc),
+            f"BLOCKED_CODE={CONFLICT_CODE}",
+        )
+
+    def test_conflict_with_suffix_exact_fixed_line(self):
+        pass  # blocked_code_line imported at module level
+        exc = BridgeError("PACKAGING_RECEIPT_CONFLICT: a different receipt already exists")
+        self.assertEqual(
+            blocked_code_line(exc),
+            f"BLOCKED_CODE={CONFLICT_CODE}",
+        )
+
+    def test_other_errors_return_none(self):
+        pass  # blocked_code_line imported at module level
+        self.assertIsNone(blocked_code_line(BridgeError("PACKAGING_INPUT_INVALID: x")))
+        self.assertIsNone(blocked_code_line(ValueError("x")))
+        self.assertIsNone(blocked_code_line(BridgeError("PACKAGING_RECEIPT_TAMPERED: hash mismatch")))
+        self.assertIsNone(blocked_code_line(BridgeError("PACKAGING_SKIPPED: receipt is not a POST decision")))
+
+
+class ReceiptValidationSafetyTests(unittest.TestCase):
+    """Existing receipt validation safety: only valid receipts qualify for
+    typed candidate-local conflict. Malformed/tampered/unsafe receipts
+    fail closed as whole-cycle integrity errors."""
+
+    def test_malformed_existing_json_fails_closed(self):
+        from nullone_packaging_receipt import load_receipt
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "social/drafts/production").mkdir(parents=True)
+            receipt_path = receipt_mod.canonical_receipt_path("post-1", root=root)
+            receipt_path.write_text("{not valid json", encoding="utf-8")
+
+            with self.assertRaises(BridgeError) as ctx:
+                load_receipt(receipt_path, root=root)
+            self.assertIn("PACKAGING_INPUT_INVALID", str(ctx.exception))
+            exc = BridgeError(str(ctx.exception))
+            self.assertIsNone(blocked_code_line(exc))
+
+    def test_tampered_receipt_hash_fails_closed(self):
+        from nullone_packaging_receipt import load_receipt
+        post = ranked_item("post-1")
+        post["content_type"] = "PRACTICAL"
+        post["packaging_request"]["candidate"]["content_type"] = "PRACTICAL"
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "social/drafts/production").mkdir(parents=True)
+            receipt_path = receipt_mod.canonical_receipt_path("post-1", root=root)
+
+            valid = receipt_mod.evaluate_request("post-1", post["packaging_request"])
+            tampered = dict(valid)
+            tampered["receipt_hash"] = "tampered-hash-value"
+            atomic_write_json(receipt_path, tampered)
+
+            with self.assertRaises(BridgeError) as ctx:
+                load_receipt(receipt_path, root=root)
+            self.assertIn("TAMPERED", str(ctx.exception))
+            exc = BridgeError(str(ctx.exception))
+            self.assertIsNone(blocked_code_line(exc))
+
+    def test_symlink_unsafe_receipt_fails_closed(self):
+        from nullone_packaging_receipt import load_receipt
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "social/drafts/production").mkdir(parents=True)
+            receipt_path = receipt_mod.canonical_receipt_path("post-1", root=root)
+            target = root / "social/drafts/production/other.json"
+            target.write_text("{}", encoding="utf-8")
+            os.symlink(target, receipt_path)
+
+            with self.assertRaises(BridgeError) as ctx:
+                load_receipt(receipt_path, root=root)
+            self.assertIn("symlink", str(ctx.exception).lower())
+            exc = BridgeError(str(ctx.exception))
+            self.assertIsNone(blocked_code_line(exc))
 
 
 class HelperSeamContractTests(unittest.TestCase):
