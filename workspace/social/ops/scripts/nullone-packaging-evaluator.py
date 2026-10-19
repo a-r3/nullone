@@ -47,6 +47,7 @@ from nullone_packaging_receipt import (
     check_candidate_id,
     contained_path,
     evaluate_request,
+    load_receipt,
 )
 
 MODEL_FACING_ROOT = WORKSPACE / "social/drafts/production"
@@ -110,24 +111,27 @@ def load_validated_request(path: Path, *, root: Path = WORKSPACE) -> dict[str, A
 def blocked_code_line(exc: BaseException) -> str | None:
     """Fixed machine-readable BLOCKED_CODE line for typed candidate-local blocks.
 
-    Pure function (no I/O): returns
+    Pure function (no I/O): returns exactly
     ``BLOCKED_CODE=PACKAGING_VISUAL_GROUNDING_UNMET`` for the
-    candidate-local visual-grounding impossibility, or
+    candidate-local visual-grounding impossibility, or exactly
     ``BLOCKED_CODE=PACKAGING_RECEIPT_CONFLICT`` for the candidate-local
     receipt conflict, else None.
     Matches only this module's own locally-generated literals; every
     other rejection (including PACKAGING_INPUT_INVALID and system
     failures) stays a plain fail-closed BLOCKED with a non-zero exit
-    and no code line.
+    and no code line. Never echoes dynamic exception text.
     """
     message = str(exc)
     if isinstance(exc, BridgeError) and (
         message == VISUAL_GROUNDING_UNMET_CODE
         or message.startswith(VISUAL_GROUNDING_UNMET_CODE + ":")
-        or message == PACKAGING_RECEIPT_CONFLICT_CODE
+    ):
+        return f"BLOCKED_CODE={VISUAL_GROUNDING_UNMET_CODE}"
+    if isinstance(exc, BridgeError) and (
+        message == PACKAGING_RECEIPT_CONFLICT_CODE
         or message.startswith(PACKAGING_RECEIPT_CONFLICT_CODE + ":")
     ):
-        return f"BLOCKED_CODE={message}"
+        return f"BLOCKED_CODE={PACKAGING_RECEIPT_CONFLICT_CODE}"
     return None
 
 
@@ -138,10 +142,17 @@ def evaluate_command(args: argparse.Namespace) -> int:
     out = canonical_receipt_path(candidate_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
+        # Validate the existing canonical receipt before any conflict check.
+        # Malformed / tampered / unsafe existing receipt fails closed as a
+        # whole-cycle integrity error, never as candidate-local fallback.
+        try:
+            load_receipt(out)
+        except BridgeError:
+            raise
         try:
             existing = json.loads(out.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            existing = None
+        except (OSError, ValueError) as exc:
+            raise BridgeError("PACKAGING_INPUT_INVALID: existing receipt is not valid JSON") from exc
         if existing == receipt:
             print(f"RECEIPT_PATH={out}")
             print("RECEIPT_STATUS=UNCHANGED")
@@ -175,6 +186,10 @@ def self_test() -> int:
     )
     assert blocked_code_line(BridgeError("PACKAGING_INPUT_INVALID: x")) is None
     assert blocked_code_line(ValueError("x")) is None
+    assert (
+        blocked_code_line(BridgeError(f"{PACKAGING_RECEIPT_CONFLICT_CODE}: x"))
+        == f"BLOCKED_CODE={PACKAGING_RECEIPT_CONFLICT_CODE}"
+    )
     print("PACKAGING_EVALUATOR_SELF_TEST=PASS")
     print("NO_EXTERNAL_CALLS=PASS")
     return 0
