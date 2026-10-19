@@ -40,6 +40,7 @@ from typing import Any
 
 from nullone_bridge_common import BridgeError, WORKSPACE, atomic_write_json
 from nullone_packaging_receipt import (
+    PACKAGING_RECEIPT_CONFLICT_CODE,
     VISUAL_GROUNDING_UNMET_CODE,
     canonical_json_bytes,
     canonical_receipt_path,
@@ -107,22 +108,26 @@ def load_validated_request(path: Path, *, root: Path = WORKSPACE) -> dict[str, A
 
 
 def blocked_code_line(exc: BaseException) -> str | None:
-    """Fixed machine-readable BLOCKED_CODE line for typed grounding blocks.
+    """Fixed machine-readable BLOCKED_CODE line for typed candidate-local blocks.
 
     Pure function (no I/O): returns
     ``BLOCKED_CODE=PACKAGING_VISUAL_GROUNDING_UNMET`` for the
-    candidate-local visual-grounding impossibility, else None.
-    Matches only this module's own locally-generated grounding
-    literal; every other rejection (including PACKAGING_INPUT_INVALID
-    and system failures) stays a plain fail-closed BLOCKED with a
-    non-zero exit and no code line.
+    candidate-local visual-grounding impossibility, or
+    ``BLOCKED_CODE=PACKAGING_RECEIPT_CONFLICT`` for the candidate-local
+    receipt conflict, else None.
+    Matches only this module's own locally-generated literals; every
+    other rejection (including PACKAGING_INPUT_INVALID and system
+    failures) stays a plain fail-closed BLOCKED with a non-zero exit
+    and no code line.
     """
     message = str(exc)
     if isinstance(exc, BridgeError) and (
         message == VISUAL_GROUNDING_UNMET_CODE
         or message.startswith(VISUAL_GROUNDING_UNMET_CODE + ":")
+        or message == PACKAGING_RECEIPT_CONFLICT_CODE
+        or message.startswith(PACKAGING_RECEIPT_CONFLICT_CODE + ":")
     ):
-        return f"BLOCKED_CODE={VISUAL_GROUNDING_UNMET_CODE}"
+        return f"BLOCKED_CODE={message}"
     return None
 
 
