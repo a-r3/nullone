@@ -272,10 +272,11 @@ class StageCodeTests(unittest.TestCase):
     def test_select_queue_identity_distinct(self):
         item = ranked_item(CID)
         item["topic"] = "Different topic"
-        self.expect("SELECT_QUEUE_IDENTITY", Case(self, select=select_result([item])))
+        self.expect("SELECT_QUEUE_IDENTITY_TOPIC",
+                    Case(self, select=select_result([item])))
 
     def test_select_unknown_candidate_is_queue_identity(self):
-        self.expect("SELECT_QUEUE_IDENTITY",
+        self.expect("SELECT_QUEUE_IDENTITY_ELIGIBILITY",
                     Case(self, select=select_result([ranked_item("not-in-queue")])))
 
     def test_fallback_ledger_init(self):
@@ -422,7 +423,7 @@ class StageCodeTests(unittest.TestCase):
         )
 
     def test_all_stage_codes_covered_by_allowed_set(self):
-        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 42)
+        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 49)
         required = {
             "CLAUDE_TIMEOUT", "CLAUDE_BINARY_MISSING", "CLAUDE_EXIT_NONZERO",
             "CLAUDE_OUTPUT_INVALID", "QUEUE_LOAD", "CLAUDE_SELECT",
@@ -435,7 +436,14 @@ class StageCodeTests(unittest.TestCase):
             "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
             "SELECT_ASSET_DESCRIPTOR_PROVENANCE",
             "SELECT_ASSET_DESCRIPTOR_OPTIONAL",
-            "SELECT_QUEUE_IDENTITY", "FALLBACK_LEDGER_INIT",
+            "SELECT_QUEUE_IDENTITY", "SELECT_QUEUE_IDENTITY_ID",
+            "SELECT_QUEUE_IDENTITY_ELIGIBILITY",
+            "SELECT_QUEUE_IDENTITY_TOPIC",
+            "SELECT_QUEUE_IDENTITY_TOPIC_CLUSTER",
+            "SELECT_QUEUE_IDENTITY_CONTENT_TYPE",
+            "SELECT_QUEUE_IDENTITY_REVIEWABILITY",
+            "SELECT_QUEUE_IDENTITY_DUPLICATE",
+            "FALLBACK_LEDGER_INIT",
             "FALLBACK_NEXT", "EXISTING_RECEIPT_VALIDATION",
             "INTERRUPTED_STATE_VALIDATION", "PACKAGING_EVALUATOR",
             "PACKAGING_RECEIPT_VALIDATION", "PACKAGING_CLASSIFICATION",
@@ -449,6 +457,152 @@ class StageCodeTests(unittest.TestCase):
         self.assertTrue(required <= stage.ALLOWED_DRAFT_REASON_CODES)
         self.assertEqual(stage.ALLOWED_DRAFT_REASON_CODES - required,
                          {"PACKAGING_INPUT_WRITE"})
+
+
+class QueueIdentitySubstageTests(unittest.TestCase):
+    """SELECT_QUEUE_IDENTITY invariants map to distinct safe codes.
+
+    Natural production failure 2026-10-19 09:45 Asia/Baku reported the
+    coarse parent code SELECT_QUEUE_IDENTITY. These tests prove each
+    distinct invariant inside that block now names itself in telemetry
+    while the original exception type/message, check order, and
+    fail-closed domain behavior stay exactly unchanged, and no hostile
+    model value can reach any emitted line.
+    """
+
+    def expect_code(self, code, case, *, forbidden=()):
+        with self.assertRaises(stage.DraftStageError) as ctx:
+            case.run_adapter()
+        err = ctx.exception
+        self.assertEqual(err.reason_code, code)
+        self.assertEqual(
+            runner_line(err),
+            f"ROLE_OUTCOME=BLOCKED reason=DraftStageError code={code}",
+        )
+        self.assertNotIn("exit=", runner_line(err))
+        self.assertEqual(str(err), f"Draft stage failure: {code}")
+        for marker in HOSTILE_MARKERS:
+            self.assertNotIn(marker, runner_line(err))
+            self.assertNotIn(marker, str(err))
+        for text in forbidden:
+            self.assertNotIn(text, runner_line(err))
+            self.assertNotIn(text, str(err))
+        return err
+
+    def raw_error(self, **case_kwargs):
+        """Provider-level run: original BridgeError, type/message unchanged."""
+        case = Case(self, **case_kwargs)
+        with self.assertRaises(BridgeError) as ctx:
+            case.run_raw()
+        self.assertNotIsInstance(ctx.exception, stage.DraftStageError)
+        return ctx.exception
+
+    def test_invalid_candidate_id_syntax_is_id_code(self):
+        # A: path-hostile id is rejected by the structural id check
+        # before any eligibility lookup.
+        bad = ranked_item("../etc/passwd")
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_ID", Case(self, select=select_result([bad])),
+            forbidden=("passwd",),
+        )
+        raw = self.raw_error(select=select_result([ranked_item("../etc/passwd")]))
+        self.assertEqual(
+            str(raw),
+            "PACKAGING_INPUT_INVALID: candidate_id must be a path-safe non-empty string",
+        )
+
+    def test_non_eligible_id_is_eligibility_code(self):
+        # B: structurally valid but absent from the frozen queue map.
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_ELIGIBILITY",
+            Case(self, select=select_result([ranked_item("not-in-queue")])),
+            forbidden=("not-in-queue",),
+        )
+        raw = self.raw_error(select=select_result([ranked_item("not-in-queue")]))
+        self.assertEqual(str(raw), "Draft SELECT candidate is not eligible")
+
+    def test_topic_mismatch_is_topic_code(self):
+        # C: only the topic field deviates from the queue echo.
+        item = ranked_item(CID, topic=HOSTILE)
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_TOPIC", Case(self, select=select_result([item]))
+        )
+        raw = self.raw_error(select=select_result([ranked_item(CID, topic=HOSTILE)]))
+        self.assertEqual(str(raw), "Draft SELECT identity disagrees with queue")
+
+    def test_topic_cluster_mismatch_is_topic_cluster_code(self):
+        # D: only the topic_cluster field deviates.
+        item = ranked_item(CID, topic_cluster=HOSTILE)
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_TOPIC_CLUSTER",
+            Case(self, select=select_result([item])),
+        )
+        raw = self.raw_error(
+            select=select_result([ranked_item(CID, topic_cluster=HOSTILE)])
+        )
+        self.assertEqual(str(raw), "Draft SELECT identity disagrees with queue")
+
+    def test_content_type_mismatch_is_content_type_code(self):
+        # E: item (and its nested packaging candidate, single authority
+        # chain) consistently claim a reviewable type the queue entry
+        # does not have.
+        item = ranked_item(CID)
+        item["content_type"] = "PRACTICAL"
+        item["packaging_request"]["candidate"]["content_type"] = "PRACTICAL"
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_CONTENT_TYPE",
+            Case(self, select=select_result([item])),
+            forbidden=("PRACTICAL",),
+        )
+        raw = self.raw_error(select=select_result([item]))
+        self.assertEqual(str(raw), "Draft SELECT identity disagrees with queue")
+
+    def test_queue_unreviewable_content_type_is_reviewability_code(self):
+        # F: queue-side content_type outside the reviewable CONTENT_TYPES
+        # vocabulary (identity fields still agree). Conforming echo of a
+        # NEWS queue entry under a vocabulary that excludes NEWS.
+        def patch():
+            return mock.patch.object(draft, "CONTENT_TYPES", ("AZ_CONTEXT",))
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_REVIEWABILITY", Case(self, patches=[patch])
+        )
+        raw = self.raw_error(patches=[patch])
+        self.assertEqual(str(raw), "Draft candidate content_type not reviewable")
+
+    def test_duplicate_ranked_id_is_duplicate_code(self):
+        # G: two conforming items naming the same ranked candidate.
+        item = ranked_item(CID)
+        dupes = select_result([item, copy.deepcopy(item)])
+        self.expect_code(
+            "SELECT_QUEUE_IDENTITY_DUPLICATE", Case(self, select=dupes)
+        )
+        raw = self.raw_error(select=dupes)
+        self.assertEqual(str(raw), "Draft ranked candidates contain duplicates")
+
+    def test_conforming_ranked_list_passes_exactly_as_before(self):
+        # H: a fully conforming ranked list completes the full cycle.
+        case = Case(self)
+        summary = case.run_raw()
+        self.assertEqual(summary["status"], "DRAFT_CREATED")
+        self.assertEqual(summary["candidate_id"], CID)
+        self.assertEqual(
+            case.helpers, ["evaluate", "render", "manifest", "bridge", "deliver"]
+        )
+
+    def test_parent_code_kept_when_no_inner_tag_applies(self):
+        # Backward compatibility: the parent code stays registered and
+        # an already-tagged (outer) failure is never re-tagged by an
+        # inner stage.
+        exc = BridgeError("Draft SELECT identity disagrees with queue")
+        stage.mark_stage(exc, "SELECT_QUEUE_IDENTITY")
+        stage.mark_stage(exc, "SELECT_QUEUE_IDENTITY_TOPIC")  # no override
+        self.assertEqual(exc._draft_stage_code, "SELECT_QUEUE_IDENTITY")
+        self.assertEqual(
+            stage.stage_error_from(exc).reason_code, "SELECT_QUEUE_IDENTITY"
+        )
+        self.assertIn(
+            "SELECT_QUEUE_IDENTITY", stage.ALLOWED_DRAFT_REASON_CODES
+        )
 
 
 class TransportMappingTests(unittest.TestCase):
@@ -599,7 +753,7 @@ class BehaviorUnchangedTests(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, stage.DraftStageError)
         self.assertEqual(str(ctx.exception), "Draft SELECT identity disagrees with queue")
         # Tag is attribute-only metadata on the same exception object.
-        self.assertEqual(ctx.exception._draft_stage_code, "SELECT_QUEUE_IDENTITY")
+        self.assertEqual(ctx.exception._draft_stage_code, "SELECT_QUEUE_IDENTITY_TOPIC")
 
     def test_innermost_stage_wins_and_transport_beats_phase(self):
         case = Case(self, structured_error=BridgeError("Claude invocation timed out"))
@@ -895,13 +1049,18 @@ class SelectSubstageTests(unittest.TestCase):
 
     # -- precedence / unchanged ---------------------------------------
     def test_queue_identity_unchanged(self):
+        # A content_type echo mismatch still fails at the queue-identity
+        # boundary (never earlier at packaging-request validation); it
+        # now names its exact invariant substage instead of the parent.
         item = ranked_item(CID)
         item["content_type"] = "EXPLAINER"
         item["packaging_request"]["candidate"]["content_type"] = "EXPLAINER"
         case = Case(self, select=select_result([item]))
         with self.assertRaises(stage.DraftStageError) as ctx:
             case.run_adapter()
-        self.assertEqual(ctx.exception.reason_code, "SELECT_QUEUE_IDENTITY")
+        self.assertEqual(
+            ctx.exception.reason_code, "SELECT_QUEUE_IDENTITY_CONTENT_TYPE"
+        )
 
     def test_valid_select_unchanged(self):
         case = Case(self)

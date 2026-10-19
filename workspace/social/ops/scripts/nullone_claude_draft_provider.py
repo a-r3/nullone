@@ -139,6 +139,13 @@ from nullone_draft_stage_error import (
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_OPTIONAL,
     DRAFT_REASON_SELECT_PACKAGING_REQUEST,
     DRAFT_REASON_SELECT_QUEUE_IDENTITY,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_CONTENT_TYPE,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_DUPLICATE,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_ELIGIBILITY,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_ID,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_REVIEWABILITY,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_TOPIC,
+    DRAFT_REASON_SELECT_QUEUE_IDENTITY_TOPIC_CLUSTER,
     DRAFT_REASON_SELECT_RESULT_SHAPE,
     DRAFT_REASON_SELECT_VALIDATION,
     DRAFT_REASON_TELEGRAM_DELIVERY,
@@ -1117,19 +1124,36 @@ def invoke_draft(
         selected = _validated_select(select_raw)
     if selected["decision"] == "NO_ACTION" or not selected["ranked"]:
         return {"status": "NO_ACTION", "candidate_id": None}
+    # Observability only: each distinct queue-identity invariant below
+    # keeps the SAME check, order, exception type, and message; only
+    # the attribute-only safe stage tag differs (innermost wins), so
+    # natural-run telemetry names the exact failing invariant without
+    # echoing any model text. Untagged failures in this block keep the
+    # parent SELECT_QUEUE_IDENTITY code (backward-compatible fallback).
     with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY):
         for item in selected["ranked"]:
-            _check_candidate_id(item["candidate_id"])
+            with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_ID):
+                _check_candidate_id(item["candidate_id"])
             entry = eligible.get(item["candidate_id"])
             if entry is None:
-                raise BridgeError("Draft SELECT candidate is not eligible")
-            if item["topic"] != entry.topic or item["topic_cluster"] != entry.fields["topic_cluster"] or item["content_type"] != entry.fields["content_type"]:
-                raise BridgeError("Draft SELECT identity disagrees with queue")
-            if entry.fields["content_type"] not in CONTENT_TYPES:
-                raise BridgeError("Draft candidate content_type not reviewable")
+                with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_ELIGIBILITY):
+                    raise BridgeError("Draft SELECT candidate is not eligible")
+            with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_TOPIC):
+                if item["topic"] != entry.topic:
+                    raise BridgeError("Draft SELECT identity disagrees with queue")
+            with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_TOPIC_CLUSTER):
+                if item["topic_cluster"] != entry.fields["topic_cluster"]:
+                    raise BridgeError("Draft SELECT identity disagrees with queue")
+            with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_CONTENT_TYPE):
+                if item["content_type"] != entry.fields["content_type"]:
+                    raise BridgeError("Draft SELECT identity disagrees with queue")
+            with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_REVIEWABILITY):
+                if entry.fields["content_type"] not in CONTENT_TYPES:
+                    raise BridgeError("Draft candidate content_type not reviewable")
         ranked_ids = [item["candidate_id"] for item in selected["ranked"]]
-        if len(set(ranked_ids)) != len(ranked_ids):
-            raise BridgeError("Draft ranked candidates contain duplicates")
+        with _stage(DRAFT_REASON_SELECT_QUEUE_IDENTITY_DUPLICATE):
+            if len(set(ranked_ids)) != len(ranked_ids):
+                raise BridgeError("Draft ranked candidates contain duplicates")
         by_id = {item["candidate_id"]: item for item in selected["ranked"]}
 
     with _stage(DRAFT_REASON_FALLBACK_LEDGER_INIT):
