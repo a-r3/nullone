@@ -2569,11 +2569,27 @@ Local time Asia/Baku (UTC+4). System status: **DEGRADED**. Natural Draft and Rad
   `nullone_radar_stage_error.py` `e085c98d…`, `nullone-breaking-radar-run.py` `45b77bc6…`, `nullone_claude_radar_provider.py` `5ca5031f…`; source == live.
   Radar files have no `--self-test`; verified by syntax/import and the offline `test_breaking_radar_stage_telemetry.py`.
 - **PR #209** (durable Draft Telegram delivery receipt `SENDING`/`SENT`/`DELIVERY_UNCONFIRMED`; local-only `nullone_draft_recovery.py`)
-  squash-merged as `01b2d857b3f944e491468e665be7c6377d5a5262`. **NOT DEPLOYED.** Production still runs the #207 version; the next natural Draft
-  run will not write the new receipt (its absence is expected, not a regression). Deployment needs a separate controlled decision.
-- **Draft Factory** (`acd7e801-7645-4fed-a88a-13c3f5783c98`) is enabled, `45 9,15,20 * * *` Asia/Baku, consecutiveErrors=5; last natural run
-  2026-10-18 20:45 failed at the parent code `SELECT_ASSET_DESCRIPTOR` (pre-#207). Next natural run 2026-10-19 09:45. **Breaking Radar** last run
-  2026-10-19 00:42 failed with an untagged `BridgeError` (pre-#199 deploy); next natural run 11:30.
+  squash-merged as `01b2d857b3f944e491468e665be7c6377d5a5262`. **DEPLOYED** 2026-10-19 11:21 Asia/Baku together with #212. Backup:
+  `~/.openclaw/nullone-deploy-backups/pr209-pr212-20261019-112133/`. The next natural Draft run writes the new receipt when SELECT passes.
+- **PR #212** (Draft `SELECT_QUEUE_IDENTITY` safe invariant substages, telemetry only) squash-merged as
+  `cabec9dd8d800b7e9fd30d6377dd34ea6649cd8c` and **DEPLOYED** 2026-10-19 11:21 Asia/Baku.
+  Backup: `~/.openclaw/nullone-deploy-backups/pr209-pr212-20261019-112133/`.
+  - New fixed safe reason codes `SELECT_QUEUE_IDENTITY_ID / _ELIGIBILITY / _TOPIC / _TOPIC_CLUSTER / _CONTENT_TYPE /
+    _REVIEWABILITY / _DUPLICATE`; parent `SELECT_QUEUE_IDENTITY` kept as backward-compatible fallback.
+  - `nullone_claude_draft_provider.py` sha256 `1798ebdbd8e6588f5208144c2ace2e524753201cbddf49ad3565d834086014ce`
+    (was `40f2f587534370e087acc99ceebf44488f8420c875c9cee81f0d13f87e004e79`)
+  - `nullone_draft_stage_error.py` sha256 `c0a05fc8e8c1c647380bcdde029baca445971b67fe4b484b950b13d37e619bbe`
+    (was `7d47fded7f6c1d2852c7034373a8eb9fd9d5cf7a71b85e273f3a2de5a04f18e5`)
+  - `nullone_draft_recovery.py` sha256 `fb220bded6c7d88e42e5a4cf2ef92e139616ffc1abd8e5d98fc1017fcc167c5b` (was ABSENT live)
+  - source == live for all three; `--self-test` PASS (`DRAFT_STAGE_ERROR_SELF_TEST`, `DRAFT_CLAUDE_PROVIDER_SELF_TEST`,
+    `NO_EXTERNAL_CALLS`); py_compile OK; `nullone_draft_recovery.py inspect` DRAFT_RECOVERY=INSPECT_DONE (read-only).
+  - Telemetry only: no SELECT schema, prompt, ranking, queue parsing, eligibility, identity comparison, duplicate-handling,
+    fallback, model, tool, timeout, or side-effect change. No raw SELECT persistence.
+- **Draft Factory** (`acd7e801-7645-4fed-a88a-13c3f5783c98`) is enabled, `45 9,15,20 * * *` Asia/Baku, consecutiveErrors=6; last natural run
+  2026-10-18 20:45 failed at the parent code `SELECT_ASSET_DESCRIPTOR` (pre-#207); natural 2026-10-19 09:45 failed at `SELECT_QUEUE_IDENTITY`
+  (post-#207 telemetry; exact failing invariant still unproven — raw model SELECT output is intentionally never persisted). Next natural run
+  2026-10-19 15:45 Asia/Baku; not auto-disabled, no re-enable needed. **Breaking Radar** last run 2026-10-19 00:42 failed with an untagged
+  `BridgeError` (pre-#199 deploy); next natural run 11:30 Asia/Baku, RADAR=PENDING (not occurred by end of this task; no wait, no trigger).
 - **PUBLISHING backlog:** 9 manifests are local `PUBLISHING` (attempts=1, no `platform_post_id`, two-step approval recorded); read-only Zernio
   `posts_get` reports `published` for all 9 (classification STATE_INCONSISTENT; Zernio status alone is not platform-id proof): 2026-09-29 Sonnet 5.5
   launch and Story manifests of 10-01, 10-02, 10-03, 10-05, 10-09, 10-12, 10-13 (gpt-6-intelligent-ui), 10-14 (az-zeka). Cause: bridge settles
