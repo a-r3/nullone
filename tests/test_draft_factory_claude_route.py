@@ -754,7 +754,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             skips = [a for a in ledger["attempts"] if a["candidate_id"] == "skip-probe-one"]
             self.assertEqual(len(skips), 1)
 
-    def _exercise_full_cycle(self, *, delivery_failure=False, exhaust_before=None,
+    def _exercise_full_cycle(self, *, delivery_failure=False, delivery_out=None, exhaust_before=None,
                              change_before_bridge=False, bridge_failure=False,
                              change_after_bridge=False, complete_failure=False):
         """SELECT→PRODUCE→COMPLETE with deterministic Python mediation.
@@ -920,9 +920,22 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                     queue_text.replace("- **status:** READY", "- **status:** DRAFTED", 1),
                 )
                 if delivery_failure:
+                    marker_receipt = json.loads(
+                        (root / "social/drafts/production" /
+                         f"{draft._today(root)}-post-probe-two-telegram-delivery.json"
+                         ).read_text(encoding="utf-8"))
+                    self.assertEqual(marker_receipt["state"], "SENDING")
                     raise BridgeError("ambiguous Telegram timeout")
                 assert marker in "DELIVERY_STATUS=SENT"
-                return "DELIVERY_STATUS=SENT\n"
+                # The durable SENDING marker exists BEFORE the single send.
+                marker_receipt = json.loads(
+                    (root / "social/drafts/production" /
+                     f"{draft._today(root)}-post-probe-two-telegram-delivery.json"
+                     ).read_text(encoding="utf-8"))
+                self.assertEqual(marker_receipt["state"], "SENDING")
+                if delivery_out is not None:
+                    return delivery_out
+                return "DELIVERY_STATUS=SENT\nMEDIA_MESSAGE_IDS=1\nAPPROVAL_MESSAGE_ID=777\n"
             raise AssertionError(f"unexpected helper: {name}")
 
         with tempfile.TemporaryDirectory() as td:
@@ -953,6 +966,17 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
                         self.assertEqual(scripts.count("nullone-draft-bridge.py"), 1)
                     if complete_failure:
                         self.assertEqual(scripts.count("nullone_telegram_review_delivery_adapter.py"), 1)
+                        # Delivery proof survives a post-send COMPLETE failure.
+                        receipt = json.loads(
+                            (root / "social/drafts/production" /
+                             f"{draft._today(root)}-post-probe-two-telegram-delivery.json"
+                             ).read_text(encoding="utf-8"))
+                        self.assertEqual(receipt["state"], "SENT")
+                        self.assertEqual(receipt["approval_message_id"], "777")
+                        self.assertEqual(receipt["review_post_id"], "review-probe-1")
+                    if exhaust_before == "deliver":
+                        self.assertFalse((root / "social/drafts/production" /
+                            f"{draft._today(root)}-post-probe-two-telegram-delivery.json").exists())
                     if complete_failure or exhaust_before == "deliver":
                         self.assertEqual((root / draft.QUEUE_PATH).read_text(encoding="utf-8"),
                                          queue_text.replace("- **status:** READY", "- **status:** DRAFTED", 1))
@@ -964,7 +988,7 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             self.assertEqual(summary["candidate_id"], "post-probe-two")
             self.assertEqual(summary["review_post_id"], "review-probe-1")
             self.assertEqual(summary["notify_state"],
-                             "NOTIFY_FAILED" if delivery_failure else "SENT")
+                             "NOTIFY_FAILED" if (delivery_failure or delivery_out is not None) else "SENT")
             # All five reviewed helpers ran with exact script argv.
             scripts = [Path(a[1]).name for a in argv_seen]
             self.assertEqual(
@@ -1014,6 +1038,19 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 validate_preview_payload(payload)["review_post_id"], "review-probe-1"
             )
+            receipt = json.loads(
+                (base / f"{today}-post-probe-two-telegram-delivery.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(receipt["schema"], "nullone.draft-telegram-delivery.v1")
+            if delivery_failure or delivery_out is not None:
+                # Ambiguous outcome: never SENT, never "known not delivered".
+                self.assertEqual(receipt["state"], "DELIVERY_UNCONFIRMED")
+                self.assertIsNone(receipt["approval_message_id"])
+            else:
+                self.assertEqual(receipt["state"], "SENT")
+                self.assertEqual(receipt["approval_message_id"], "777")
             # Constrained queue flip, ledger append, report write.
             queue = (root / "social/state/candidate-queue.md").read_text(
                 encoding="utf-8"
@@ -1038,6 +1075,20 @@ class DraftSecurityBoundaryTests(unittest.TestCase):
         self._exercise_full_cycle()
 
     def test_telegram_failure_invokes_delivery_once_and_persists(self):
+        self._exercise_full_cycle(delivery_failure=True)
+
+    def test_sent_without_approval_message_id_is_never_claimed(self):
+        for out in (
+            "DELIVERY_STATUS=SENT\n",
+            "DELIVERY_STATUS=SENT\nAPPROVAL_MESSAGE_ID=\n",
+            "DELIVERY_STATUS=SENT\nAPPROVAL_MESSAGE_ID=None x\n",
+        ):
+            with self.subTest(out=out):
+                self._exercise_full_cycle(delivery_out=out)
+
+    def test_ambiguous_send_failure_is_unconfirmed_and_not_retried(self):
+        # delivery_failure also asserts the helper ran exactly once and
+        # the durable SENDING marker preceded the send.
         self._exercise_full_cycle(delivery_failure=True)
 
     def test_bridge_not_started_without_safe_budget(self):

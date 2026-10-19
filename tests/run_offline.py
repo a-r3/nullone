@@ -42,6 +42,7 @@ COMMANDS = [
     [sys.executable, "tests/test_breaking_radar_claude_route.py"],
     [sys.executable, "tests/test_breaking_radar_stage_telemetry.py"],
     [sys.executable, "tests/test_draft_factory_claude_route.py"],
+    [sys.executable, "tests/test_draft_post_zernio_recovery.py"],
     [sys.executable, "tests/test_draft_select_packaging_contract.py"],
     [sys.executable, "tests/test_draft_visual_grounding_fallback.py"],
     [sys.executable, "tests/test_draft_factory_story_fallback.py"],
