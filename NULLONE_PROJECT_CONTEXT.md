@@ -2599,3 +2599,40 @@ Local time Asia/Baku (UTC+4). System status: **DEGRADED**. Natural Draft and Rad
   the 20:45 run failed at `LEDGER_WRITE` after Zernio/queue DRAFTED. No ledger row, no report, Telegram delivery UNCONFIRMED. Not repaired.
 - **PR hygiene 2026-10-19:** open PRs reduced to this one. #115 closed (superseded by the Claude/Sonnet packaging stack), #128/#130 closed (obsolete:
   synthetic acceptance path conflicts with natural-proof policy; tracked in #127/#129), #164/#165 closed (visual work deferred; tracked in #163/#166).
+
+### #214 + #215 combined Draft production deployment — 2026-10-21 Asia/Baku (DEPLOYED)
+
+- **PR #214** (Draft `PACKAGING_RECEIPT_CONFLICT` candidate-local fallback disposition, telemetry only)
+  squash-merged as `e26f023bcb54e99759e6ddcae1277a13ec78d477`.
+- **PR #215** (Draft `SELECT_ASSET_DESCRIPTOR_FILE_PATH` safe invariant substages,
+  telemetry only) squash-merged as `756183c8fe5398e40b9ee4acccc2cbd948962e10`.
+- Combined controlled production deploy: 2026-10-21 Asia/Baku.
+- Backup: `/home/oem/.openclaw/nullone-deploy-backups/pr214-pr215-20261021-063708/`.
+- Five runtime files deployed (source == live, SHA256 verified):
+  - `nullone_packaging_receipt.py` sha256 `f5a1442292ae0494f5dad35c1710eb7aabb99d572678a903303cb476cabb6601` (#214)
+  - `nullone-packaging-evaluator.py` sha256 `c2b4c9cf2a09eee93ca699abcd168e784dcf80930f441c9c8bdec79dd4b60e60` (#214)
+  - `nullone_claude_draft_provider.py` sha256 `7639ebc69276095136f34b44db3d753ea4aab6d9d64d82c278b4c26b614338a2` (#214 + #215)
+  - `nullone_draft_candidate_fallback.py` sha256 `e10a30125f901011b5f596933bb8d74134861ec5f7aaba0db4cb31607ed2a48c` (#214)
+  - `nullone_draft_stage_error.py` sha256 `8616ddb7def2b0cc7c6a45163e6e23d3bee5fa4908da6e795758be5b38ff3cca` (#215)
+- `--self-test` PASS for all three testable scripts:
+  `DRAFT_STAGE_ERROR_SELF_TEST=PASS`, `DRAFT_CLAUDE_PROVIDER_SELF_TEST=PASS`,
+  `PACKAGING_EVALUATOR_SELF_TEST=PASS`, `NO_EXTERNAL_CALLS=PASS`.
+- Syntax + import validation OK for `nullone_packaging_receipt.py` and
+  `nullone_draft_candidate_fallback.py`.
+- `git diff --check` clean; `OFFLINE_REGRESSION_SUITE=PASS` (run offline).
+- No tests deployed. No synthetic Draft run. No Telegram/Zernio/recovery/publisher/Gateway
+  mutation. Draft job `acd7e801-7645-4fed-a88a-13c3f5783c98` unchanged: enabled,
+  `45 9,15,20 * * *` Asia/Baku, consecutiveErrors=2, next natural run
+  2026-10-21 09:45 Asia/Baku.
+- Historical 2026-10-19 20:45 oddity now EXPLAINED: candidate 1
+  (`anthropic-claude-haiku-5-5-2026-10-09`) recorded
+  `VISUAL_GROUNDING_UNMET` (candidate-local fallback, accepted); candidate 2
+  (`openai-gpt-5-5-retirement-2026-10-12`) then hit `PACKAGING_RECEIPT_CONFLICT`
+  (fixed by #214). No separate defect.
+- Current active blocker before deploy: `SELECT_ASSET_DESCRIPTOR_FILE_PATH`
+  (exact branch REQUIRED/FORBIDDEN still UNPROVEN — raw model SELECT output
+  intentionally never persisted). #215 telemetry split names the two invariants
+  but does not change validation behavior.
+- Next natural proof pending at 2026-10-21 09:45 Asia/Baku.
+- SYSTEM VERDICT after deploy: DEGRADED (consecutiveErrors=2; last successful
+  natural run 2026-10-20 09:45 was clean NO_ACTION).
