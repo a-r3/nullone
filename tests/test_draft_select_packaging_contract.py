@@ -513,7 +513,7 @@ class SelectPackagingContractTests(unittest.TestCase):
                 lambda d: d.update(asset_kind="GENERATED_IMAGE"),
             ),
             "file-backed-no-path": (
-                "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+                "SELECT_ASSET_DESCRIPTOR_FILE_PATH_REQUIRED",
                 lambda d: d.update(asset_kind="REAL_PHOTO", local_path=None),
             ),
             "file-backed-no-provenance": (
@@ -525,7 +525,7 @@ class SelectPackagingContractTests(unittest.TestCase):
                 ),
             ),
             "none-names-file": (
-                "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+                "SELECT_ASSET_DESCRIPTOR_FILE_PATH_FORBIDDEN",
                 lambda d: d.update(
                     local_path="social/drafts/production/evidence.png"
                 ),
