@@ -98,6 +98,7 @@ KIND_STORY_FALLBACK = "STORY_FALLBACK"
 DISPOSITION_SKIP = "SKIP"
 DISPOSITION_STORY = "STORY_NOT_FACTORY_PRODUCIBLE"
 DISPOSITION_VISUAL_GROUNDING = "VISUAL_GROUNDING_UNMET"
+DISPOSITION_RECEIPT_CONFLICT = "PACKAGING_RECEIPT_CONFLICT"
 
 
 class DraftFallbackError(ValueError):
@@ -289,6 +290,32 @@ def record_visual_grounding_disposition(
         {
             "candidate_id": candidate_id,
             "disposition": DISPOSITION_VISUAL_GROUNDING,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    return ledger
+
+
+def record_packaging_receipt_conflict(
+    ledger: dict[str, Any],
+    *,
+    candidate_id: str,
+) -> dict[str, Any]:
+    """Record a packaging-receipt conflict as Factory-non-producible.
+
+    A valid canonical receipt already exists for this candidate but the
+    current request's deterministic output differs, so the evaluator
+    refuses to overwrite. This is candidate-local: this candidate cannot
+    be re-receipted this cycle, but the cycle continues in frozen ranked
+    order. Same fail-closed guards as record_skip (frozen set,
+    at-most-once, no post-accept). Nothing is produced and no receipt
+    is manufactured.
+    """
+    ledger, candidate_id = _require_attemptable(ledger, candidate_id)
+    ledger["attempts"].append(
+        {
+            "candidate_id": candidate_id,
+            "disposition": DISPOSITION_RECEIPT_CONFLICT,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
     )

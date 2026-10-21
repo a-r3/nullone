@@ -166,6 +166,17 @@ VISUAL_REQUIREMENT_VALUES = frozenset({"NONE", "SOURCE_GROUNDED"})
 # evaluator CLI surfaces as BLOCKED_CODE=<code>.
 VISUAL_GROUNDING_UNMET_CODE = "PACKAGING_VISUAL_GROUNDING_UNMET"
 
+# Typed candidate-local receipt conflict: a valid canonical receipt
+# already exists for this candidate, but the current request's
+# deterministic output differs from it. The evaluator refuses to
+# overwrite (never silently replaces a different receipt). The
+# conflict is a candidate-local condition: this candidate cannot be
+# re-receipted this cycle, but the cycle itself must continue to the
+# next frozen-ranked candidate -- never block the whole factory run.
+# The literal is the stable machine-readable code the evaluator CLI
+# surfaces as BLOCKED_CODE=<code>.
+PACKAGING_RECEIPT_CONFLICT_CODE = "PACKAGING_RECEIPT_CONFLICT"
+
 
 def visual_requirement_of(validated_request: dict[str, Any]) -> str:
     candidate = validated_request.get("candidate")

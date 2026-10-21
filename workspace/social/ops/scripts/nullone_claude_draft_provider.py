@@ -162,6 +162,7 @@ from nullone_packaging_policy import (
 from nullone_packaging_receipt import (
     ASSET_DESCRIPTOR_SCHEMA,
     FILE_BACKED_ASSET_KINDS,
+    PACKAGING_RECEIPT_CONFLICT_CODE,
     STYLE_TO_ASSET_KIND,
     VISUAL_GROUNDING_UNMET_CODE,
     VISUAL_REQUIREMENT_VALUES,
@@ -175,6 +176,14 @@ from nullone_packaging_receipt import (
 # arbitrary output.
 EVALUATOR_GROUNDING_CODE_LINE = f"BLOCKED_CODE={VISUAL_GROUNDING_UNMET_CODE}"
 
+# Reviewed fixed machine-readable evaluator outcome for the
+# candidate-local receipt conflict. The evaluator CLI prints exactly
+# this line (and keeps its non-zero exit) when a valid canonical
+# receipt already exists for this candidate but the current request's
+# deterministic output differs; the Draft runner matches the full line
+# only, never a substring of arbitrary output.
+EVALUATOR_RECEIPT_CONFLICT_CODE_LINE = f"BLOCKED_CODE={PACKAGING_RECEIPT_CONFLICT_CODE}"
+
 
 class _PackagingGroundingUnmet(Exception):
     """Typed candidate-local grounding impossibility (not a system error).
@@ -183,6 +192,18 @@ class _PackagingGroundingUnmet(Exception):
     fixed BLOCKED_CODE line. Never carries raw stdout/stderr or model
     content: the fallback loop records VISUAL_GROUNDING_UNMET and
     continues to the next frozen-ranked candidate.
+    """
+
+
+class _PackagingReceiptConflict(Exception):
+    """Typed candidate-local receipt conflict (not a system error).
+
+    Raised only when the deterministic evaluator reports the reviewed
+    fixed BLOCKED_CODE line for PACKAGING_RECEIPT_CONFLICT: a valid
+    canonical receipt already exists for this candidate but the current
+    request's deterministic output differs. The fallback loop records a
+    receipt-conflict disposition and continues to the next
+    frozen-ranked candidate -- never blocks the whole factory run.
     """
 
 
@@ -819,10 +840,13 @@ def _run_helper(
     With grounding_unmet_ok=True (packaging evaluator only), a
     non-zero exit carrying exactly the reviewed fixed grounding code
     line raises the typed _PackagingGroundingUnmet signal instead of
-    BridgeError -- and only for the evaluator's reviewed exit contract
-    (exit 2 with the exact code line). Timeout, startup failure, and
-    every other rejection (including the code line on any other exit)
-    stay BridgeError fail-closed, and no raw output is surfaced.
+    BridgeError, and a non-zero exit carrying exactly the reviewed
+    fixed receipt-conflict code line raises the typed
+    _PackagingReceiptConflict signal instead -- and only for the
+    evaluator's reviewed exit contract (exit 2 with the exact code
+    line). Timeout, startup failure, and every other rejection
+    (including a code line on any other exit) stay BridgeError
+    fail-closed, and no raw output is surfaced.
     """
     try:
         cp = subprocess.run(
@@ -844,6 +868,12 @@ def _run_helper(
             and EVALUATOR_GROUNDING_CODE_LINE in (cp.stdout or "").splitlines()
         ):
             raise _PackagingGroundingUnmet()
+        if (
+            grounding_unmet_ok
+            and cp.returncode == 2
+            and EVALUATOR_RECEIPT_CONFLICT_CODE_LINE in (cp.stdout or "").splitlines()
+        ):
+            raise _PackagingReceiptConflict()
         raise BridgeError(f"Draft helper rejected: {argv[1]} (exit={cp.returncode})")
     if marker not in (cp.stdout or ""):
         raise BridgeError(f"Draft helper missing proof marker: {argv[1]}")
@@ -1055,6 +1085,7 @@ def invoke_draft(
         new_ledger,
         next_candidate,
         record_acceptance,
+        record_packaging_receipt_conflict,
         record_skip,
         record_story_disposition,
         record_visual_grounding_disposition,
@@ -1277,6 +1308,22 @@ def invoke_draft(
                 with _stage(DRAFT_REASON_FALLBACK_RECORD):
                     try:
                         ledger = record_visual_grounding_disposition(
+                            ledger, candidate_id=candidate_id
+                        )
+                        save_ledger(ledger_path, ledger)
+                    except DraftFallbackError as exc:
+                        raise BridgeError(f"Draft fallback refused: {exc}") from exc
+                continue
+            except _PackagingReceiptConflict:
+                # Candidate-local receipt conflict: a valid canonical
+                # receipt already exists for this candidate but the
+                # current request's deterministic output differs, so the
+                # evaluator refuses to overwrite. Record the typed
+                # disposition and continue to the next candidate -- never
+                # block the whole factory run.
+                with _stage(DRAFT_REASON_FALLBACK_RECORD):
+                    try:
+                        ledger = record_packaging_receipt_conflict(
                             ledger, candidate_id=candidate_id
                         )
                         save_ledger(ledger_path, ledger)
