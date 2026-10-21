@@ -135,6 +135,8 @@ from nullone_draft_stage_error import (
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_IDENTITY,
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_KIND,
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH_FORBIDDEN,
+    DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH_REQUIRED,
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_PROVENANCE,
     DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_OPTIONAL,
     DRAFT_REASON_SELECT_PACKAGING_REQUEST,
@@ -740,14 +742,14 @@ def _check_asset_descriptor_contract(
     local_path = descriptor["local_path"]
     provenance = descriptor["provenance"]
     if kind in FILE_BACKED_ASSET_KINDS:
-        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH):
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH_REQUIRED):
             if not isinstance(local_path, str) or not local_path.strip():
                 raise BridgeError("Malformed Draft Factory SELECT result")
         with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_PROVENANCE):
             if not isinstance(provenance, str) or not provenance.strip():
                 raise BridgeError("Malformed Draft Factory SELECT result")
     else:
-        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH):
+        with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_FILE_PATH_FORBIDDEN):
             if local_path is not None:
                 raise BridgeError("Malformed Draft Factory SELECT result")
         with _stage(DRAFT_REASON_SELECT_ASSET_DESCRIPTOR_PROVENANCE):

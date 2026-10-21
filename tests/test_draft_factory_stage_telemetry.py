@@ -423,7 +423,7 @@ class StageCodeTests(unittest.TestCase):
         )
 
     def test_all_stage_codes_covered_by_allowed_set(self):
-        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 49)
+        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 51)
         required = {
             "CLAUDE_TIMEOUT", "CLAUDE_BINARY_MISSING", "CLAUDE_EXIT_NONZERO",
             "CLAUDE_OUTPUT_INVALID", "QUEUE_LOAD", "CLAUDE_SELECT",
@@ -434,6 +434,8 @@ class StageCodeTests(unittest.TestCase):
             "SELECT_ASSET_DESCRIPTOR_IDENTITY",
             "SELECT_ASSET_DESCRIPTOR_KIND",
             "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH_REQUIRED",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH_FORBIDDEN",
             "SELECT_ASSET_DESCRIPTOR_PROVENANCE",
             "SELECT_ASSET_DESCRIPTOR_OPTIONAL",
             "SELECT_QUEUE_IDENTITY", "SELECT_QUEUE_IDENTITY_ID",
@@ -1023,10 +1025,10 @@ class SelectSubstageTests(unittest.TestCase):
                 asset_kind="REAL_PHOTO", local_path="/home/oem/private/caption.txt",
                 provenance=None))
         self.expect_code(
-            "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH_REQUIRED",
             lambda r, i: i["asset"].update(asset_kind="REAL_PHOTO", local_path=None))
         self.expect_code(
-            "SELECT_ASSET_DESCRIPTOR_FILE_PATH",
+            "SELECT_ASSET_DESCRIPTOR_FILE_PATH_FORBIDDEN",
             lambda r, i: i["asset"].update(local_path="/home/oem/private/caption.txt"))
 
     def test_asset_optional_field_type(self):
