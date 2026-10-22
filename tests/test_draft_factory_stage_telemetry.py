@@ -423,9 +423,10 @@ class StageCodeTests(unittest.TestCase):
         )
 
     def test_all_stage_codes_covered_by_allowed_set(self):
-        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 51)
+        self.assertEqual(len(stage.ALLOWED_DRAFT_REASON_CODES), 53)
         required = {
             "CLAUDE_TIMEOUT", "CLAUDE_BINARY_MISSING", "CLAUDE_EXIT_NONZERO",
+            "CLAUDE_AUTH_EXPIRED", "CLAUDE_AUTH_FAILED",
             "CLAUDE_OUTPUT_INVALID", "QUEUE_LOAD", "CLAUDE_SELECT",
             "SELECT_VALIDATION", "SELECT_RESULT_SHAPE",
             "SELECT_PACKAGING_REQUEST", "SELECT_ASSET_DESCRIPTOR",

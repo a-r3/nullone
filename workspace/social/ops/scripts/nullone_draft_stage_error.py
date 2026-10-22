@@ -30,6 +30,11 @@ DRAFT_REASON_CLAUDE_TIMEOUT = "CLAUDE_TIMEOUT"
 DRAFT_REASON_CLAUDE_BINARY_MISSING = "CLAUDE_BINARY_MISSING"
 DRAFT_REASON_CLAUDE_EXIT_NONZERO = "CLAUDE_EXIT_NONZERO"
 DRAFT_REASON_CLAUDE_OUTPUT_INVALID = "CLAUDE_OUTPUT_INVALID"
+# Safe deterministic Claude transport failure sub-categories.
+# Extracted only from Claude CLI's own machine-readable JSON output
+# (is_error + result fields) on non-zero exit. Never logs raw stdout/stderr.
+DRAFT_REASON_CLAUDE_AUTH_EXPIRED = "CLAUDE_AUTH_EXPIRED"
+DRAFT_REASON_CLAUDE_AUTH_FAILED = "CLAUDE_AUTH_FAILED"
 # Pre-side-effect Draft stages
 DRAFT_REASON_QUEUE_LOAD = "QUEUE_LOAD"
 DRAFT_REASON_CLAUDE_SELECT = "CLAUDE_SELECT"
@@ -87,6 +92,8 @@ ALLOWED_DRAFT_REASON_CODES = frozenset(
         DRAFT_REASON_CLAUDE_TIMEOUT,
         DRAFT_REASON_CLAUDE_BINARY_MISSING,
         DRAFT_REASON_CLAUDE_EXIT_NONZERO,
+        DRAFT_REASON_CLAUDE_AUTH_EXPIRED,
+        DRAFT_REASON_CLAUDE_AUTH_FAILED,
         DRAFT_REASON_CLAUDE_OUTPUT_INVALID,
         DRAFT_REASON_QUEUE_LOAD,
         DRAFT_REASON_CLAUDE_SELECT,
@@ -234,7 +241,7 @@ def format_draft_stage_blocked(exc: BaseException) -> str:
 
 def self_test() -> int:
     assert DRAFT_REASON_UNKNOWN == "UNKNOWN_DRAFT_FAILURE"
-    assert len(ALLOWED_DRAFT_REASON_CODES) == 51
+    assert len(ALLOWED_DRAFT_REASON_CODES) == 53
     err = DraftStageError("CLAUDE_EXIT_NONZERO", exit_code=3)
     assert err.reason_code == "CLAUDE_EXIT_NONZERO"
     assert err.exit_code == 3
