@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from nullone_bridge_common import BridgeError
+from nullone_draft_stage_error import (
+    DRAFT_REASON_CLAUDE_AUTH_EXPIRED,
+    DRAFT_REASON_CLAUDE_AUTH_FAILED,
+    DRAFT_REASON_CLAUDE_EXIT_NONZERO,
+    mark_stage,
+)
 
 
 def _extract_structured(stdout: str) -> dict[str, Any]:
@@ -137,9 +143,27 @@ def run_structured(
     if cp.returncode != 0:
         # Intentionally do not surface raw stdout/stderr because
         # presign calls may contain temporary signed URLs.
-        raise BridgeError(
+        # Extract only deterministic, safe error categories from
+        # Claude CLI's own machine-readable JSON output on non-zero
+        # exit. Falls back to the generic exit code for any unknown
+        # or unparsable output.
+        stage_code = DRAFT_REASON_CLAUDE_EXIT_NONZERO
+        try:
+            out_obj = json.loads(cp.stdout or "{}")
+            if isinstance(out_obj, dict) and out_obj.get("is_error") is True:
+                result = out_obj.get("result", "")
+                if isinstance(result, str):
+                    if "OAuth session expired" in result:
+                        stage_code = DRAFT_REASON_CLAUDE_AUTH_EXPIRED
+                    elif "Failed to authenticate" in result:
+                        stage_code = DRAFT_REASON_CLAUDE_AUTH_FAILED
+        except (ValueError, TypeError):
+            pass
+        exc = BridgeError(
             f"Claude invocation failed "
             f"(exit={cp.returncode})"
         )
+        mark_stage(exc, stage_code, exit_code=cp.returncode)
+        raise exc
 
     return _extract_structured(cp.stdout)
